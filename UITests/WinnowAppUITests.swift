@@ -1473,11 +1473,9 @@ final class WinnowAppUITests: XCTestCase {
             .exists, "no shared-file note")
         Screenshots.capture(app, "19-export-seed-redacted", testCase: self)
 
-        XCUIDevice.shared.press(.home)
-        app.activate()
-        // The clear happens on the scene's background transition, which a
-        // slow simulator delivers a moment after the app is back: wait for
-        // the link to go, rather than reading it in the first three seconds.
+        backgroundAndReturn(app)
+        // Await an actual background transition before checking the sensitive
+        // export. A Home/activate pair can leave an iPad scene foregrounded.
         XCTAssertTrue(poll(timeout: 15, interval: 1, "staged seed export cleared on backgrounding") {
             !shareLink.exists
         }, "staged seed export survived backgrounding")
@@ -2137,11 +2135,17 @@ final class WinnowAppUITests: XCTestCase {
         app.navigationTab("Settings").tap()
         let toggle = app.switches["torEnabledToggle"]
         XCTAssertTrue(scrollUntilExists(app, toggle, maxSwipes: 8))
-        // Materialization alone does not put the whole section above the tab
-        // bar. Move it into view before capturing or waiting for its last row.
-        let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.65))
-        let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.35))
-        start.press(forDuration: 0.05, thenDragTo: end)
+        // A fixed extra swipe put this row underneath the iPad's floating
+        // tabs. Center the actual row, away from either platform's tab bar.
+        for _ in 0..<3 {
+            let position = (toggle.frame.midY - app.frame.minY) / app.frame.height
+            if (0.3...0.6).contains(position) { break }
+            let delta = max(-0.3, min(0.3, 0.45 - position))
+            let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5 + delta))
+            start.press(forDuration: 0.05, thenDragTo: end)
+        }
+        XCTAssertTrue(toggle.isHittable)
         XCTAssertEqual(app.staticTexts["torState"].label, "State, Stopped")
         Screenshots.capture(app, "48-tor-stopped", testCase: self)
         app.flipSwitch(toggle)

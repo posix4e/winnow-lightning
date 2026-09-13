@@ -111,6 +111,9 @@ struct SendView: View {
             .id(sentTxid != nil ? "sent" : preview != nil ? "review" : "form")
             .navigationTitle(sentTxid != nil ? "Payment" : preview != nil ? "Review payment" : "Send")
             .navigationBarTitleDisplayMode(.inline)
+            // iPad and hardware keyboards can supply Return even for a
+            // decimal pad. End editing just as the accessory Done button does.
+            .onSubmit { focusedField = nil }
             .toolbar {
                 ToolbarItemGroup(placement: .keyboard) {
                     Spacer()
