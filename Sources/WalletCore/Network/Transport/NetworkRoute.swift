@@ -78,8 +78,11 @@ public final class RoutedHTTPClient: Sendable {
         config.httpCookieStorage = nil
         config.urlCache = nil
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
-        config.timeoutIntervalForRequest = 30
-        config.timeoutIntervalForResource = 120
+        // A fresh Tor circuit can take longer than a direct HTTP connection.
+        // Keep both inactivity and whole-resource limits finite, while allowing
+        // the same circuit setup time used by the Bitcoin peer transport.
+        config.timeoutIntervalForRequest = route.socksProxy == nil ? 30 : 90
+        config.timeoutIntervalForResource = route.socksProxy == nil ? 120 : 180
         if let proxy = route.socksProxy, proxy.port > 0 {
             config.proxyConfigurations = [ProxyConfiguration(socksv5Proxy:
                 .hostPort(host: NWEndpoint.Host(proxy.host), port: NWEndpoint.Port(rawValue: proxy.port)!))]

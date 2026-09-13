@@ -53,7 +53,7 @@ final class LiveTorDeviceTests: XCTestCase {
         refresh.tap()
         let notice = app.staticTexts["peerCatalogNotice"]
         let error = app.staticTexts["peerCatalogError"]
-        XCTAssertTrue(poll(timeout: 150, interval: 2, "the proxied census response") { notice.exists || error.exists })
+        XCTAssertTrue(poll(timeout: 210, interval: 2, "the proxied census response") { notice.exists || error.exists })
         capture(app, "device-tor-census-response")
         XCTAssertFalse(error.exists, error.exists ? error.label : "")
         XCTAssertTrue(notice.exists)

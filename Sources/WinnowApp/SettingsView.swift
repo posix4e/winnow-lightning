@@ -50,7 +50,7 @@ struct SettingsView: View {
                         .disabled(model.e2e?.forcedNetwork != nil)
                     } footer: {
                         if model.e2e?.forcedNetwork != nil {
-                            Text("This debug session is locked to public signet.")
+                            Text("This debug session is locked to \(model.network == .mainnet ? "mainnet" : "public signet").")
                         } else {
                             Text("Each network has its own wallet on this device. Switching opens that network's wallet, or onboarding when it has none. Signet coins have no value; use it to rehearse.")
                         }

@@ -69,8 +69,16 @@ extension XCTestCase {
                            maxSwipes: Int = 10, up: Bool = false) -> Bool {
         for _ in 0 ... maxSwipes {
             if element.waitForExistence(timeout: 2) { return true }
-            let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: up ? 0.30 : 0.62))
-            let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: up ? 0.62 : 0.30))
+            // iPad forms are centered sheets. A drag at 30% of the whole
+            // display can land on the sheet's navigation bar instead of its
+            // content, moving the sheet without scrolling its fields.
+            let modal = app.collectionViews.allElementsBoundByIndex.last { view in
+                view.exists && view.frame.width > 0 && view.frame.width < app.frame.width * 0.9
+                    && view.frame.height > 100 && app.frame.intersects(view.frame)
+            }
+            let surface: XCUIElement = modal ?? app
+            let start = surface.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: up ? 0.30 : 0.62))
+            let end = surface.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: up ? 0.62 : 0.30))
             start.press(forDuration: 0.05, thenDragTo: end)
         }
         return element.exists
