@@ -29,7 +29,7 @@ def render():
     for digest, (source, notice) in sorted(notices.items()):
         packages = [p for p in data["packages"] if digest in p["notices"]]
         names = [p["name"] + " " + p["version"] + " (" + p["license"] + ")" for p in packages]
-        sections.append("\n".join(names) + "\n\nSource: " + source + "\n\n" + notice.rstrip())
+        sections.append("\n".join(names) + "\n\nSource: " + source + "\n\n" + "\n".join(line.rstrip() for line in notice.splitlines()))
     text = "\n\n".join(sections) + "\n"
     page = '''<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'"><title>Tor licenses</title><style>body{font:15px system-ui;margin:24px;color-scheme:light dark}pre{white-space:pre-wrap;overflow-wrap:anywhere}</style><body><pre>''' + html.escape(text) + '</pre></body></html>\n'
     return {"THIRD_PARTY_NOTICES.txt": text, "tor-licenses.html": page}

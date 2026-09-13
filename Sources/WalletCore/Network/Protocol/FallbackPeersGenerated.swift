@@ -1,28 +1,12 @@
 // GENERATED FILE — edit by regenerating, not by hand.
-//
-// scripts/generate-fallback-peers rewrites this file on the release path
-// (#161) with `winnow-debug generate fallback-peers` (Tools/Debug). The input
-// is the winnow-census CI's peers.json — a crawler that descends from the
-// btcnodes snapshot and re-crawls mainnet continuously, so this list inherits
-// the census's view of the network rather than the generating host's. Every
-// clearnet entry is re-verified offline before it is written: public IP
-// literal, port 8333, one per /16 by the same `PeerEndpoint.netblock` the
-// pool's diversity policy uses, and a reported height within 100 of the
-// artifact's recorded tip in either direction (ahead of the tip is another
-// chain). With no usable artifact, `--from-crawl` crawls mainnet from the DNS
-// seeds instead, dialling candidates pre-filtered by their advertised
-// NODE_COMPACT_FILTERS bit with the same PeerConnection the app uses, whose
-// handshake already refuses any peer not advertising that bit.
-//
-// The committed copy is the last verified generation and the build's fallback;
-// a release regenerates so freshness tracks releases rather than memory.
-// `PeerPolicyTests` validates this file on every CI run.
-//
-// What this is not, recorded so it is not over-claimed: the list inherits
-// whatever the census — or, from a crawl, the generating host — could see,
-// and generation is not reproducible: two runs give different lists. The
-// generation log is kept as a release artifact so the list is auditable even
-// though it is not reproducible.
+// scripts/generate-fallback-peers validates the census artifact with the
+// same policy as manual refresh. Selection from a fixed artifact is
+// deterministic; the source hash and observation date identify evidence.
+// Public clearnet endpoints use /16 IPv4 or /32 IPv6 diversity. Entries
+// must report heights within 100 blocks of the reference tip. This does
+// not establish filter correctness or that an endpoint is still online.
+// --from-crawl instead performs bounded discovery and live handshakes.
+// PeerPolicyTests checks the bundled list on every CI run.
 //
 // Generation: 2026-08-25T00:42:03Z, 42 peers verified, median reported
 // tip 963930.
