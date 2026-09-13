@@ -136,19 +136,35 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        device: [iPhone, iPad]
+        include:
+          - device: iPhone
+            runner: [self-hosted, macOS, btc-swift, node-e2e]
+          # The Intel VM's iPad compositor aborts in CA::OGL::push_surface
+          # during lifecycle tests. Keep the full journey on native arm64;
+          # iPhone and package lanes retain Intel coverage.
+          - device: iPad
+            runner: macos-latest
     needs: changes
     if: >-
       needs.changes.outputs.required == 'true'
       && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
       && (contains('pull_request push schedule', github.event_name) || inputs.confirm_dedicated_fixture)
-    runs-on: [self-hosted, macOS, btc-swift, node-e2e]
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Prepare the hosted Apple silicon fixture tools
+        if: matrix.device == 'iPad'
+        run: |
+          test "$(uname -m)" = arm64
+          brew install bitcoin
+          bitcoin-cli --version
+          sw_vers
+          xcodebuild -version
 
       - name: Stop simulator miners and fixtures left by an interrupted run
         run: |
