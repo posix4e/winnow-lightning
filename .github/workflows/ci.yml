@@ -90,6 +90,7 @@ jobs:
           scripts/ci-debug
 
       - name: Observe proxy routing with packet capture
+        timeout-minutes: 5
         run: scripts/check-route-packets "$RUNNER_TEMP/route-packets"
 
       - name: Preserve routing packet evidence
