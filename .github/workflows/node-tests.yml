@@ -172,9 +172,13 @@ jobs:
             | python3 -c 'import json,sys; info=json.load(sys.stdin); assert info["chain"] == "signet" and info["blocks"] == 0, "expected a fresh signet fixture"'
 
       - name: Python with standard TOML support
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version: '3.12'
+        run: |
+          if ! brew list --versions python@3.12 >/dev/null 2>&1; then
+            brew install python@3.12
+          fi
+          python_prefix="$(brew --prefix python@3.12)"
+          "$python_prefix/bin/python3.12" -c 'import tomllib'
+          echo "$python_prefix/libexec/bin" >> "$GITHUB_PATH"
 
       - name: Build pinned app Tor framework
         run: |

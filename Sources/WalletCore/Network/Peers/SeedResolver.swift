@@ -47,14 +47,15 @@ public struct SeedResolver: Sendable {
         }
     }
 
-    public static func routed(client: RoutedHTTPClient) -> SeedResolver {
+    public static func routed(client: RoutedHTTPClient, endpoint: URL = defaultDoHEndpoint,
+                              systemResolve: @escaping SystemResolve = SeedResolver.getaddrinfo) -> SeedResolver {
         .live(fetchJSON: { name, type in
-            var parts = URLComponents(url: defaultDoHEndpoint, resolvingAgainstBaseURL: false)!
+            var parts = URLComponents(url: endpoint, resolvingAgainstBaseURL: false)!
             parts.queryItems = [URLQueryItem(name: "name", value: name), URLQueryItem(name: "type", value: type)]
             return try await client.get(parts.url!, maximumBytes: 128 * 1024, accept: "application/dns-json")
         }, systemResolve: { host, port in
             guard client.route == .direct, !Task.isCancelled else { return [] }
-            return getaddrinfo(host: host, port: port)
+            return systemResolve(host, port)
         })
     }
 

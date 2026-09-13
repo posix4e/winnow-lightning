@@ -107,7 +107,7 @@ public final class RoutedHTTPClient: Sendable {
             state.tasks[id] = task
             return task
         }
-        defer { requests.withLock { $0.tasks.removeValue(forKey: id) } }
+        defer { _ = requests.withLock { $0.tasks.removeValue(forKey: id) } }
         return try await withTaskCancellationHandler {
             try await pending.value
         } onCancel: { pending.cancel() }

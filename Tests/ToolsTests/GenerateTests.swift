@@ -329,6 +329,9 @@ struct WinnowGenerateTests {
                 PeerEndpoint(host: "1.2.3.4", port: 8333),  // /Satoshi:29.2.0/Knots:20260507/
                 PeerEndpoint(host: "9.9.9.9", port: 8333),  // /Satoshi:31.0.0/
             ]
+            static let generatedMainnetTorFallbackPeers: [PeerEndpoint] = [
+
+            ]
         }
 
         """))

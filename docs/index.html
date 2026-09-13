@@ -107,7 +107,7 @@ dialog a{overflow-wrap:anywhere}
 <p>On Bitcoin, your two devices appear as one key and one signature within the shared wallet’s three-key rule.</p>
 <p><a href="/vaults">How the two signing methods fit together</a></p>
 </dialog></section>
-<nav class="jump-links" aria-label="On this page"><a href="#setup">Set up your wallet</a> <a href="#receive">Receive bitcoin</a> <a href="#send">Send bitcoin</a> <a href="#people">Pay someone again</a> <a href="#senders">Name who paid you</a> <a href="#sender-lookup">Infer a sender with the explorer</a> <a href="#savings">Save with other people</a> <a href="#recovery">Back up and restore</a> <a href="#controls">More options when you need them</a></nav>
+<nav class="jump-links" aria-label="On this page"><a href="#setup">Set up your wallet</a> <a href="#receive">Receive bitcoin</a> <a href="#send">Send bitcoin</a> <a href="#people">Pay someone again</a> <a href="#senders">Name who paid you</a> <a href="#sender-lookup">Choose a funding destination</a> <a href="#savings">Save with other people</a> <a href="#recovery">Back up and restore</a> <a href="#controls">More options when you need them</a></nav>
 <details class="journey" id="setup" open>
 <summary><h2>Set up your wallet</h2></summary><div class="journey-body"><p>Create a wallet and write down your recovery words. If you stop partway through, you can finish the backup when you return.</p>
 <img class="app-shot" src="screenshots/01-onboarding.png" width="1320" height="2868" loading="lazy" alt="Winnow: Set up your wallet.">
@@ -179,12 +179,12 @@ dialog a{overflow-wrap:anywhere}
 <p>The tests use the app on a private Bitcoin test network. Screenshots show test funds. Open a test run to see which version was checked, what passed, and what failed.</p>
 <p><a href="/testing#artifacts">Read the logs and screenshots</a> · <a href="/testing#limits">What still needs testing</a></p></dialog></div></details>
 <details class="journey" id="sender-lookup" open>
-<summary><h2>Infer a sender with the explorer</h2></summary><div class="journey-body"><p>If you choose to consult an explorer, review what is disclosed and whether the request goes directly or through Tor. Then explicitly select any returned destination.</p>
-<img class="app-shot" src="screenshots/43-infer-sender.png" width="1320" height="2868" loading="lazy" alt="Winnow: Infer a sender with the explorer.">
+<summary><h2>Choose a funding destination</h2></summary><div class="journey-body"><p>If you choose to consult an explorer, review what is disclosed and whether the request goes directly or through Tor. Then explicitly select any returned destination.</p>
+<img class="app-shot" src="screenshots/43-infer-sender.png" width="1320" height="2868" loading="lazy" alt="Winnow: Choose a funding destination.">
 <p class="limit">The explorer receives the transaction ID. Direct mode reveals your connection IP; a clearnet explorer reached through Tor sees an exit IP. Returned addresses do not identify people.</p>
 <button class="test-link" type="button" data-dialog="sender-lookup-tests" aria-controls="sender-lookup-tests" aria-haspopup="dialog">How this is tested</button>
 <dialog id="sender-lookup-tests" aria-labelledby="sender-lookup-tests-title">
-<div class="dialog-heading"><h2 id="sender-lookup-tests-title">How we test: Infer a sender with the explorer</h2><form method="dialog"><button class="dialog-close" autofocus>Close</button></form></div><ol>
+<div class="dialog-heading"><h2 id="sender-lookup-tests-title">How we test: Choose a funding destination</h2><form method="dialog"><button class="dialog-close" autofocus>Close</button></form></div><ol>
 <li>Assert that no explorer request occurs before consent.</li>
 <li>Review and confirm the transaction-ID disclosure and actual network route.</li>
 <li>Verify that even one returned address stays unselected until tapped, then save it with unverified provenance.</li>

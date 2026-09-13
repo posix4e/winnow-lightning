@@ -11,6 +11,7 @@ public actor FakeSocksProxy {
     public private(set) var requestedHost: String?
     public private(set) var requestedPort: UInt16?
     public private(set) var requestedHosts: [String] = []
+    public private(set) var httpRequests: [String] = []
     private let upstreamPort: UInt16?
     private let refuseWith: UInt8?
     private let httpResponse: Data?
@@ -79,7 +80,11 @@ public actor FakeSocksProxy {
             }
             if let httpResponse = httpResponsesByHost[requestedHost ?? ""] ?? httpResponse {
                 try await Self.write(client, Data([0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]))
-                _ = try await Self.read(client, exactly: 1)
+                var request = Data()
+                while request.count < 16_384, !request.suffix(4).elementsEqual([13, 10, 13, 10]) {
+                    request.append(try await Self.read(client, exactly: 1))
+                }
+                httpRequests.append(String(decoding: request, as: UTF8.self))
                 try await Self.write(client, httpResponse)
                 return
             }

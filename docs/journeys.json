@@ -79,7 +79,7 @@
   {
     "id": "sender-lookup",
     "section": "everyday",
-    "title": "Infer a sender with the explorer",
+    "title": "Choose a funding destination",
     "description": "If you choose to consult an explorer, review what is disclosed and whether the request goes directly or through Tor. Then explicitly select any returned destination.",
     "journey": [
       "Assert that no explorer request occurs before consent.",

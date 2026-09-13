@@ -16,6 +16,8 @@ generated = dt.datetime.fromisoformat(match[1].replace('Z', '+00:00'))
 age = (dt.datetime.now(dt.timezone.utc) - generated).total_seconds() / 86400
 print(f'fallback peers generated {match[1]} ({age:.1f} days ago)')
 observation = re.search(r'^// Observation date: (\d{4}-\d{2}-\d{2}); generated:', text, re.M)
+if 'winnow-census artifact of ' in text and not observation:
+    raise SystemExit('legacy census bundle has no source hash/observation provenance; regenerate it')
 if observation:
     if not re.search(r'^// Source SHA256: [0-9a-f]{64}$', text, re.M):
         raise SystemExit('census provenance has no valid source SHA256')

@@ -1,13 +1,15 @@
 import XCTest
 
-/// Opt-in by selecting this class on a physical device. Public-network
-/// availability is deliberately excluded from the ordinary simulator suite.
+/// Selected explicitly by scripts/check-live-tor-ui on device or simulator.
+/// Public-network availability is excluded from ordinary simulator CI.
 @MainActor
 final class LiveTorDeviceTests: XCTestCase {
     func testRealTorForegroundRecovery() throws {
         #if targetEnvironment(simulator)
-        throw XCTSkip("Select a paired iPhone for the live Tor journey")
-        #else
+        guard ProcessInfo.processInfo.environment["WINNOW_LIVE_TOR_UI"] == "1" else {
+            throw XCTSkip("Run scripts/check-live-tor-ui for the live Tor simulator journey")
+        }
+        #endif
         continueAfterFailure = false
         let app = XCUIApplication()
         app.launchEnvironment = [
@@ -56,7 +58,6 @@ final class LiveTorDeviceTests: XCTestCase {
         XCTAssertFalse(error.exists, error.exists ? error.label : "")
         XCTAssertTrue(notice.exists)
         app.terminate()
-        #endif
     }
 
     private func capture(_ app: XCUIApplication, _ name: String) {

@@ -102,21 +102,14 @@ enum FallbackPeerGenerator {
         guard peers.count >= options.floor else { throw GenerateError.thinList("too few validated census peers") }
         let hash = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
         var text = render(peers, tip: catalog.tip, date: catalog.date + "T00:00:00Z",
-                          provenance: .census(artifactDate: catalog.date))
-        let tor = (catalog.networks["tor"] ?? []).map {
-            "        PeerEndpoint(host: \"\($0.host)\", port: \($0.port)),"
-        }.joined(separator: "\n")
+                          provenance: .census(artifactDate: catalog.date),
+                          torPeers: catalog.networks["tor", default: []].map(\.endpoint))
         text += """
         // Source: \(commentSafe(source))
         // Source SHA256: \(hash)
         // Observation date: \(catalog.date); generated: \(ISO8601DateFormatter().string(from: Date()))
-        extension NetworkParams {
-            static let generatedMainnetTorFallbackPeers: [PeerEndpoint] = [
-        \(tor)
-            ]
-        }
-
         """
+        text += "\n"
         try Data(text.utf8).write(to: options.out, options: .atomic)
         print("generator: wrote \(peers.count) clearnet and \(catalog.networks["tor"]?.count ?? 0) Tor candidates; observed \(catalog.date); SHA256 \(hash)")
     }
@@ -429,7 +422,7 @@ enum FallbackPeerGenerator {
     /// reads: `scripts/check-release-policy` parses the `// Generation:` line
     /// for the date, and `PeerPolicyTests` validates the entries.
     static func render(_ peers: [VerifiedPeer], tip: Int32, date: String,
-                       provenance: Provenance = .crawl) -> String {
+                       provenance: Provenance = .crawl, torPeers: [PeerEndpoint] = []) -> String {
         let entries = peers
             .sorted { $0.endpoint.host < $1.endpoint.host }
             .map { peer in
@@ -437,6 +430,9 @@ enum FallbackPeerGenerator {
                 + "port: \(peer.endpoint.port)),  // \(commentSafe(peer.userAgent))"
             }
             .joined(separator: "\n")
+        let torEntries = torPeers.sorted { $0.host < $1.host }.map {
+            "        PeerEndpoint(host: \"\($0.host)\", port: \($0.port)),"
+        }.joined(separator: "\n")
         let generation: String
         switch provenance {
         case let .census(artifactDate):
@@ -465,6 +461,9 @@ enum FallbackPeerGenerator {
         extension NetworkParams {
             static let generatedMainnetFallbackPeers: [PeerEndpoint] = [
         \(entries)
+            ]
+            static let generatedMainnetTorFallbackPeers: [PeerEndpoint] = [
+        \(torEntries)
             ]
         }
 
