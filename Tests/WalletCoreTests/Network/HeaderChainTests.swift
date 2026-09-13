@@ -625,6 +625,59 @@ struct HeaderChainTests {
         #expect(await chain.tipHash == synthetic.blocks[6].hash)
     }
 
+    @Test("an unconnected tip announcement cannot replace the requested header chain")
+    func tipAnnouncementDuringRequestIsRetried() async throws {
+        let synthetic = makeSyntheticChain(length: 6, watchHeight: 8)
+        let node = LoopbackNode(params: synthetic.params, chain: synthetic.blocks, withholdHeaders: true)
+        try await node.start()
+        defer { Task { await node.stop() } }
+        let peer = PeerConnection(endpoint: await node.endpoint, params: synthetic.params)
+        try await peer.connect()
+        defer { Task { await peer.disconnect() } }
+        let chain = try HeaderChain(params: synthetic.params)
+        let headers = synthetic.blocks.map(\.header)
+        let replies = Task {
+            #expect(await node.nextMessage(command: "getheaders") != nil)
+            // BIP130 announcements and getheaders replies share a command.
+            // This announcement arrives after request registration, so the
+            // transport's pre-request backlog purge cannot distinguish it.
+            try await node.send(.headers([headers[6]]))
+            guard await node.nextMessage(command: "getheaders", timeout: .seconds(2)) != nil else { return }
+            try await node.send(.headers(Array(headers.dropFirst())))
+        }
+        defer { replies.cancel() }
+        let outcome = try await chain.sync(using: peer, timeout: .seconds(3))
+        try await replies.value
+        #expect(outcome.connected == 6)
+        #expect(await chain.tipHash == headers[6].hash)
+    }
+
+    @Test("repeated unconnected single headers exhaust a bounded retry budget")
+    func unconnectedAnnouncementBudgetIsBounded() async throws {
+        let synthetic = makeSyntheticChain(length: 6, watchHeight: 8)
+        let node = LoopbackNode(params: synthetic.params, chain: synthetic.blocks, withholdHeaders: true)
+        try await node.start()
+        defer { Task { await node.stop() } }
+        let peer = PeerConnection(endpoint: await node.endpoint, params: synthetic.params)
+        try await peer.connect()
+        defer { Task { await peer.disconnect() } }
+        let chain = try HeaderChain(params: synthetic.params)
+        let headers = synthetic.blocks.map(\.header)
+        let replies = Task {
+            for _ in 0 ... HeaderChain.maxReplayedBatches {
+                guard await node.nextMessage(command: "getheaders", timeout: .seconds(2)) != nil else { return }
+                try await node.send(.headers([headers[6]]))
+            }
+        }
+        defer { replies.cancel() }
+        await #expect(throws: HeaderChainError.doesNotConnect) {
+            try await chain.sync(using: peer, timeout: .seconds(3))
+        }
+        try await replies.value
+        #expect(await chain.height == 0)
+        #expect(await chain.tipHash == headers[0].hash)
+    }
+
     @Test("a peer on the losing block of a race is not condemned")
     func staleSiblingIsAStateNotALie() async throws {
         // Our chain has the winning block 6; the peer's ends in a sibling of

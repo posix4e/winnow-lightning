@@ -875,15 +875,14 @@ final class WinnowAppUITests: XCTestCase {
         let app = launchApp(run: "beginner", reset: true, expectOnboarding: true,
                             configureLocalNode: false)
         app.buttons["createWalletButton"].tap()
-        XCTAssertTrue(app.switches["writtenDownToggle"].waitForExistence(timeout: 180),
+        XCTAssertTrue(backupConfirmationIsReachable(app),
                       "backup sheet did not appear after create")
-        app.flipSwitch(app.switches["writtenDownToggle"])
-        let backupDone = app.buttons["backupDoneButton"]
-        XCTAssertTrue(scrollUntilExists(app, backupDone, maxSwipes: 4))
-        backupDone.tap()
+        XCTAssertTrue(confirmBackupAndContinue(app))
         XCTAssertTrue(app.staticTexts["balanceText"].waitForExistence(timeout: 60), "home did not appear")
 
-        XCTAssertEqual(app.tabBars.buttons.count, 3)
+        for title in ["Wallet", "Send", "Settings"] {
+            XCTAssertTrue(app.navigationTab(title).exists, "missing beginner tab: \(title)")
+        }
         XCTAssertFalse(app.navigationTab("People").exists)
         XCTAssertTrue(app.buttons["walletSharedSavingsButton"].exists)
         XCTAssertFalse(app.buttons["walletExtraDeviceButton"].exists)
@@ -1091,6 +1090,7 @@ final class WinnowAppUITests: XCTestCase {
             app.typeInto("cosignerField", expression)
             app.buttons["addPastedKeyButton"].tap()
         }
+        XCTAssertTrue(scrollUntilExists(app, app.buttons["buildDescriptorButton"]))
         app.buttons["buildDescriptorButton"].tap()
         let descriptorPreview = app.staticTexts.matching(
             NSPredicate(format: "label BEGINSWITH 'tr('")).firstMatch
@@ -1279,7 +1279,7 @@ final class WinnowAppUITests: XCTestCase {
         let app = launchApp(run: "backup", reset: true, expectOnboarding: true,
                             configureLocalNode: false)
         app.buttons["createWalletButton"].tap()
-        XCTAssertTrue(app.switches["writtenDownToggle"].waitForExistence(timeout: 180),
+        XCTAssertTrue(backupConfirmationIsReachable(app),
                       "backup sheet did not appear after create")
         Screenshots.capture(app, "20-backup-sheet", testCase: self)
 
@@ -1288,7 +1288,7 @@ final class WinnowAppUITests: XCTestCase {
         let resumed = XCUIApplication()
         resumed.launchEnvironment = backupEnvironment // same run, NO reset
         resumed.launch()
-        XCTAssertTrue(resumed.switches["writtenDownToggle"].waitForExistence(timeout: 60),
+        XCTAssertTrue(backupConfirmationIsReachable(resumed),
                       "relaunch did not resume the backup sheet — backup skipped (#5)")
         Screenshots.capture(resumed, "21-backup-resumed", testCase: self)
 
@@ -1302,15 +1302,12 @@ final class WinnowAppUITests: XCTestCase {
         XCTAssertTrue(resumeBackup.waitForExistence(timeout: 20),
                       "pending backup has no explicit resume action")
         resumeBackup.tap()
-        XCTAssertTrue(resumed.switches["writtenDownToggle"].waitForExistence(timeout: 60),
+        XCTAssertTrue(backupConfirmationIsReachable(resumed),
                       "explicit backup resume did not restore the authenticated flow")
 
         // Complete the backup: toggle + Done -> wallet home.
-        resumed.flipSwitch(resumed.switches["writtenDownToggle"])
-        let backupDone = resumed.buttons["backupDoneButton"]
-        XCTAssertTrue(scrollUntilExists(resumed, backupDone, maxSwipes: 4),
-                      "backup Done button was not reachable after explicit resume")
-        backupDone.tap()
+        XCTAssertTrue(confirmBackupAndContinue(resumed),
+                      "backup confirmation was not completed after explicit resume")
         XCTAssertTrue(resumed.staticTexts["balanceText"].waitForExistence(timeout: 60),
                       "home did not appear after backup Done")
 
@@ -1803,12 +1800,9 @@ final class WinnowAppUITests: XCTestCase {
         // A fresh wallet whose only receipt is the node's payment.
         var app = launchApp(run: "senders", reset: true, expectOnboarding: true)
         app.buttons["createWalletButton"].tap()
-        XCTAssertTrue(app.switches["writtenDownToggle"].waitForExistence(timeout: 180),
+        XCTAssertTrue(backupConfirmationIsReachable(app),
                       "backup sheet did not appear after create")
-        app.flipSwitch(app.switches["writtenDownToggle"])
-        let backupDone = app.buttons["backupDoneButton"]
-        XCTAssertTrue(scrollUntilExists(app, backupDone, maxSwipes: 4))
-        backupDone.tap()
+        XCTAssertTrue(confirmBackupAndContinue(app))
         XCTAssertTrue(app.staticTexts["balanceText"].waitForExistence(timeout: 60), "home did not appear")
 
         app.buttons["receiveButton"].tap()
@@ -1999,11 +1993,8 @@ final class WinnowAppUITests: XCTestCase {
                             advanced: true,
                             entropy: "e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7")
         app.buttons["createWalletButton"].tap()
-        XCTAssertTrue(app.switches["writtenDownToggle"].waitForExistence(timeout: 180))
-        app.flipSwitch(app.switches["writtenDownToggle"])
-        let backupDone = app.buttons["backupDoneButton"]
-        XCTAssertTrue(scrollUntilExists(app, backupDone, maxSwipes: 4))
-        backupDone.tap()
+        XCTAssertTrue(backupConfirmationIsReachable(app))
+        XCTAssertTrue(confirmBackupAndContinue(app))
         XCTAssertTrue(app.staticTexts["balanceText"].waitForExistence(timeout: 60), "home did not appear")
 
         app.buttons["receiveButton"].tap()
@@ -2158,9 +2149,13 @@ final class WinnowAppUITests: XCTestCase {
             app.staticTexts["torState"].label == "State, Bootstrapping"
         })
         Screenshots.capture(app, "49-tor-bootstrapping", testCase: self)
+        XCTAssertTrue(poll(timeout: 10, interval: 0.1, "Tor failed closed") {
+            app.staticTexts["torState"].label == "State, Failed"
+        })
         XCTAssertTrue(scrollUntilExists(app, app.buttons["retryTorButton"], maxSwipes: 4))
-        XCTAssertEqual(app.staticTexts["torState"].label, "State, Failed")
+        XCTAssertTrue(scrollUntilExists(app, app.buttons["refreshPeerCatalogButton"], maxSwipes: 4))
         XCTAssertFalse(app.buttons["refreshPeerCatalogButton"].isEnabled)
+        XCTAssertTrue(scrollUntilExists(app, toggle, maxSwipes: 4, up: true))
         Screenshots.capture(app, "50-tor-failed", testCase: self)
         app.flipSwitch(toggle)
         XCTAssertTrue(poll(timeout: 10, interval: 0.1, "explicit Tor disable") {

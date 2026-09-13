@@ -399,6 +399,15 @@ public actor HeaderChain {
                 // it was an announcement or a stale reply that the wait
                 // consumed in place of the real one.
                 answeredNothing = connected.appended == 0
+            } catch HeaderChainError.doesNotConnect where batch.count == 1 {
+                // A BIP130 tip announcement can race the requested reply
+                // after the transport has purged its old backlog. Its parent
+                // may be ahead of our chain. Never append it without linkage;
+                // request the missing chain again within the same retry budget.
+                guard replays < Self.maxReplayedBatches else {
+                    throw HeaderChainError.doesNotConnect
+                }
+                answeredNothing = true
             } catch HeaderChainError.reorgWithoutMoreWork
                 where batch.count == 1 && batch[0].previousHash == tip.previousHash {
                 // A sibling of our tip with no more work: the losing block
