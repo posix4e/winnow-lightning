@@ -11,6 +11,8 @@ struct SettingsView: View {
     @State private var newPeer = ""
     @State private var peerError: String?
     @State private var connectedPeers: [PeerInfo] = []
+    @State private var confirmPeerReset = false
+    @State private var resettingPeers = false
     @State private var showReadSide = false
     @State private var showPapers = false
     @State private var showDestroyWallet = false
@@ -178,6 +180,26 @@ struct SettingsView: View {
                     }
                     Button("Refresh") { Task { await refreshPeers() } }
                         .accessibilityIdentifier("refreshPeersButton")
+                    Button(resettingPeers ? "Resetting…" : "Reset and shuffle peers") {
+                        confirmPeerReset = true
+                    }
+                    .accessibilityIdentifier("resetPeersButton")
+                    .disabled(resettingPeers)
+                    .confirmationDialog("Reset and shuffle peers?",
+                                        isPresented: $confirmPeerReset, titleVisibility: .visible) {
+                        Button("Reset and shuffle peers", role: .destructive) {
+                            Task {
+                                resettingPeers = true
+                                defer { resettingPeers = false }
+                                await model.resetPeers()
+                                await refreshPeers()
+                            }
+                        }
+                        .accessibilityIdentifier("confirmResetPeersButton")
+                        Button("Cancel", role: .cancel) {}
+                    } message: {
+                        Text("Disconnects all peers, forgets saved peers, and finds new ones from DNS seeds and the built-in list. Your manual peers are kept.")
+                    }
                 }
                 }
 

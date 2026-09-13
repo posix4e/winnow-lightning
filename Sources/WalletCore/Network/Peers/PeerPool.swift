@@ -167,6 +167,19 @@ public actor PeerPool {
         persistKnownGood()
     }
 
+    /// Forgets every remembered good peer: the in-memory list, the persisted
+    /// file, cooldowns and session rejections. Manual peers are the owner's
+    /// instruction, not a memory — they survive. The next start dials from
+    /// scratch: manual peers, then fallbacks, then DNS seeds. Call after
+    /// `stop()` (which persists); a pool rebuilt afterwards starts clean.
+    public func forgetKnownGood() {
+        knownGood = []
+        cooldownUntil = [:]
+        rejectedForSession = []
+        lastRejection = [:]
+        if let peersFileURL { try? FileManager.default.removeItem(at: peersFileURL) }
+    }
+
     /// Currently connected peers (snapshot).
     public func connectedPeers() -> [PeerConnection] { peers }
 

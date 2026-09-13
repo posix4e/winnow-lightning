@@ -59,3 +59,9 @@ both passed in the same run (`winnow-kimi-t1718.xcresult`), covering the reveale
 funding address attaching with its warning, the label persisting across a
 restart, paying the sender back, and the warned loopback-explorer inference for
 a taproot key-path payment.
+
+The peer-reset capture (`42-peer-reset`) is an unchanged original captured
+locally on 2026-09-13 with an iPhone 17 Pro simulator against the disposable
+custom signet fixture, from the `feature/peer-reset` working tree. The `network`
+journey's reset scenario passed in the same run (`winnow-kimi-t19.xcresult`):
+the remembered good peers are forgotten and the manual fixture peer dials back.

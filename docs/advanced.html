@@ -91,14 +91,16 @@ dialog a{overflow-wrap:anywhere}
 <p><a href="/testing#artifacts">Read the logs and screenshots</a> · <a href="/testing#limits">What still needs testing</a></p></dialog></section>
 <section class="journey" id="network">
 <h2>Inspect peers and control external disclosure</h2><p>Inspect connected peers and network settings. Explorer links open only after an explicit warning about the information sent to that website.</p>
+<img class="app-shot" src="screenshots/42-peer-reset.png" width="1320" height="2868" loading="lazy" alt="Winnow: Inspect peers and control external disclosure.">
 <p class="limit">Explorer websites are not wallet backends. A single or coordinated set of peers can still withhold information; multiple connections are not proof of independent operators.</p>
 <button class="test-link" type="button" data-dialog="network-tests" aria-controls="network-tests" aria-haspopup="dialog">How this is tested</button>
 <dialog id="network-tests" aria-labelledby="network-tests-title">
 <div class="dialog-heading"><h2 id="network-tests-title">How we test: Inspect peers and control external disclosure</h2><form method="dialog"><button class="dialog-close" autofocus>Close</button></form></div><ol>
 <li>Open the real peer settings.</li>
 <li>Open an explorer warning and cancel before leaving the app.</li>
+<li>Reset and shuffle the remembered peers, and watch fresh connections arrive.</li>
 </ol><p>Test code:
-<a href="https://github.com/winnowwallet/winnow/blob/main/UITests/WinnowAppUITests.swift#L428">test05SettingsPeersAndExplorerWarning</a>
+<a href="https://github.com/winnowwallet/winnow/blob/main/UITests/WinnowAppUITests.swift#L428">test05SettingsPeersAndExplorerWarning</a>, <a href="https://github.com/winnowwallet/winnow/blob/main/UITests/WinnowAppUITests.swift#L2021">test19ResetAndShufflePeers</a>
 . <a href="https://github.com/winnowwallet/winnow/actions/workflows/node-tests.yml">View test results</a>.</p>
 <p>The tests use the app on a private Bitcoin test network. Screenshots show test funds. Open a test run to see which version was checked, what passed, and what failed.</p>
 <p><a href="/testing#artifacts">Read the logs and screenshots</a> · <a href="/testing#limits">What still needs testing</a></p></dialog></section>

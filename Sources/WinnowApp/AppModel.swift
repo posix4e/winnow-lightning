@@ -2298,6 +2298,24 @@ final class AppModel {
         await refresh()
     }
 
+    /// "Reset and shuffle peers": forgets every remembered good peer —
+    /// `stop()` persists, so the forgetting comes after it — and rebuilds,
+    /// leaving the next dials to manual peers, fallbacks and DNS seeds.
+    /// Manual peers are the owner's instruction and stay.
+    func resetPeers() async {
+        syncTask?.cancel()
+        syncTask = nil
+        await stack?.pool.stop()
+        await stack?.pool.forgetKnownGood()
+        await stack?.broadcaster.shutdown()
+        broadcasterEventTask?.cancel()
+        broadcasterEventTask = nil
+        stack = nil
+        e2e?.journal("peers.reset", fields: [:])
+        await activate()
+        await refresh()
+    }
+
     /// Switching where the chain starts cannot be applied to a chain already
     /// on disk, so this tears the stack down and rebuilds it. Turning the
     /// setting on discards the stored headers and re-derives from block 0,

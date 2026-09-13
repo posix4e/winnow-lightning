@@ -197,11 +197,14 @@
     "description": "Inspect connected peers and network settings. Explorer links open only after an explicit warning about the information sent to that website.",
     "journey": [
       "Open the real peer settings.",
-      "Open an explorer warning and cancel before leaving the app."
+      "Open an explorer warning and cancel before leaving the app.",
+      "Reset and shuffle the remembered peers, and watch fresh connections arrive."
     ],
     "tests": [
-      "test05SettingsPeersAndExplorerWarning"
+      "test05SettingsPeersAndExplorerWarning",
+      "test19ResetAndShufflePeers"
     ],
-    "limitations": "Explorer websites are not wallet backends. A single or coordinated set of peers can still withhold information; multiple connections are not proof of independent operators."
+    "limitations": "Explorer websites are not wallet backends. A single or coordinated set of peers can still withhold information; multiple connections are not proof of independent operators.",
+    "image": "42-peer-reset"
   }
 ]

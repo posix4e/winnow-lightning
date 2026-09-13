@@ -2011,4 +2011,42 @@ final class WinnowAppUITests: XCTestCase {
         app.navigationBars.buttons["Winnow"].tap()
         XCTAssertTrue(app.staticTexts["Received from Miner"].waitForExistence(timeout: 20))
     }
+
+    // MARK: - 19 Reset and shuffle peers
+
+    /// Advanced mode's escape hatch for peers the user does not like: forget
+    /// the remembered good peers and dial fresh ones. On the custom signet
+    /// the manual peer is the only source, so the same peer must return —
+    /// the shuffle itself is covered in PeerPoolTests.
+    func test19ResetAndShufflePeers() throws {
+        let app = launchApp(advanced: true)
+        app.tabBars.buttons["Settings"].tap()
+
+        let refresh = app.buttons["refreshPeersButton"]
+        XCTAssertTrue(scrollUntilExists(app, refresh), "settings form did not load")
+        refresh.tap()
+        let localPeer = app.staticTexts.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "\(BitcoinCLI.nodeHost):\(BitcoinCLI.p2pPort)")).firstMatch
+        poll(timeout: 60, interval: 3, "connected local peer in settings") {
+            if localPeer.exists { return true }
+            if refresh.exists, refresh.isHittable { refresh.tap() }
+            return localPeer.exists
+        }
+
+        let reset = app.buttons["resetPeersButton"]
+        XCTAssertTrue(scrollUntilExists(app, reset, up: true), "no peer reset button")
+        reset.tap()
+        let confirm = app.buttons["confirmResetPeersButton"].firstMatch
+        XCTAssertTrue(confirm.waitForExistence(timeout: 10), "no reset confirmation")
+        Screenshots.capture(app, "42-peer-reset", testCase: self)
+        confirm.tap()
+
+        // The stack rebuilds from nothing; the manual fixture peer dials back.
+        poll(timeout: 120, interval: 3, "peer back after the reset") {
+            if localPeer.exists { return true }
+            if refresh.exists, refresh.isHittable { refresh.tap() }
+            return localPeer.exists
+        }
+        XCTAssertFalse(app.buttons["confirmResetPeersButton"].exists)
+    }
 }
