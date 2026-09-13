@@ -66,12 +66,11 @@ public actor FakeSocksProxy {
             _ = methods
             try await Self.write(client, Data([0x05, 0x00]))
             let head = try await Self.read(client, exactly: 4)
-            guard head[0] == 0x05, head[1] == 0x01, head[3] == 0x03 else { client.cancel(); return }
-            let length = try await Self.read(client, exactly: 1)
-            let name = try await Self.read(client, exactly: Int(length[0]))
+            guard head[0] == 0x05, head[1] == 0x01 else { client.cancel(); return }
+            let name = try await Self.readHost(client, type: head[3])
             let portBytes = try await Self.read(client, exactly: 2)
-            requestedHost = String(decoding: name, as: UTF8.self)
-            requestedHosts.append(String(decoding: name, as: UTF8.self))
+            requestedHost = name
+            requestedHosts.append(name)
             requestedPort = UInt16(portBytes[0]) << 8 | UInt16(portBytes[1])
             if let refuseWith {
                 try await Self.write(client, Data([0x05, refuseWith, 0x00, 0x01, 0, 0, 0, 0, 0, 0]))
@@ -97,6 +96,21 @@ public actor FakeSocksProxy {
             Self.pump(from: upstream, to: client)
         } catch {
             client.cancel()
+        }
+    }
+
+    private static func readHost(_ client: NWConnection, type: UInt8) async throws -> String {
+        switch type {
+        case 1:
+            return try await read(client, exactly: 4).map(String.init).joined(separator: ".")
+        case 3:
+            let length = try await read(client, exactly: 1)
+            return String(decoding: try await read(client, exactly: Int(length[0])), as: UTF8.self)
+        case 4:
+            let bytes = try await read(client, exactly: 16)
+            guard let address = IPv6Address(bytes) else { throw NWError.posix(.EINVAL) }
+            return address.debugDescription
+        default: throw NWError.posix(.EINVAL)
         }
     }
 

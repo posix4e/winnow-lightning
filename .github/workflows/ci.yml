@@ -89,6 +89,18 @@ jobs:
           swift test
           scripts/ci-debug
 
+      - name: Observe proxy routing with packet capture
+        run: scripts/check-route-packets "$RUNNER_TEMP/route-packets"
+
+      - name: Preserve routing packet evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: route-packets-${{ github.run_id }}
+          path: ${{ runner.temp }}/route-packets/
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Release-build production package and reject first-party warnings
         run: >-
           scripts/ci-production-warnings
