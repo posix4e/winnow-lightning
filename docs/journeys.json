@@ -64,33 +64,33 @@
     "id": "senders",
     "section": "everyday",
     "title": "Name who paid you",
-    "description": "Label a received payment with the person who sent it. When the payment itself reveals a funding address, the app attaches it — with a warning that it is a guess, and that paying it reuses an address.",
+    "description": "Give a received payment a local name without attaching an address. Add a payment card or explicitly choose a destination before sending.",
     "journey": [
-      "Receive a payment whose input reveals its funding address, open it in Wallet, and save the sender — the address attaches itself, with its warning.",
-      "Reopen the app and check the payment is labeled “Received from …”.",
-      "Pay the sender back from the payment screen, and check the review names them and warns about address reuse."
+      "Save a name-only label on a received payment, relaunch and check that the label persists.",
+      "Verify that a name-only person cannot send until a destination is attached.",
+      "Explicitly select a locally reconstructed funding address and continue through the normal amount and confirmation flow."
     ],
     "tests": [
       "test17SaveSenderFromReceivedPayment"
     ],
     "image": "40-save-sender",
-    "limitations": "A funding address is a guess about a person, never proof: exchanges, coinjoins and multisig wallets fund payments from addresses that do not identify the payer. Taproot key-path inputs reveal nothing at all."
+    "limitations": "Funding addresses are unverified destinations, not proof of who paid you. Winnow never selects one automatically. Sending to an address again can reveal address reuse."
   },
   {
     "id": "sender-lookup",
     "section": "everyday",
     "title": "Infer a sender with the explorer",
-    "description": "When a payment’s inputs reveal nothing, an explicit tap asks the configured block explorer for the addresses that funded it — after a warning that the explorer learns the transaction and your IP address.",
+    "description": "If you choose to consult an explorer, review what is disclosed and whether the request goes directly or through Tor. Then explicitly select any returned destination.",
     "journey": [
-      "Receive a taproot key-path payment: the sender sheet shows no funding address.",
-      "Tap “Infer with …”, accept the privacy warning, and check the explorer’s answer attaches itself.",
-      "Save the sender and check the payment is labeled."
+      "Assert that no explorer request occurs before consent.",
+      "Review and confirm the transaction-ID disclosure and actual network route.",
+      "Verify that even one returned address stays unselected until tapped, then save it with unverified provenance."
     ],
     "tests": [
       "test18InferSenderWithExplorer"
     ],
     "image": "43-infer-sender",
-    "limitations": "The explorer learns the transaction ID and the device IP address, and its answer still names addresses, not people. It is contacted only on that tap, never in the background."
+    "limitations": "The explorer receives the transaction ID. Direct mode reveals your connection IP; a clearnet explorer reached through Tor sees an exit IP. Returned addresses do not identify people."
   },
   {
     "id": "savings",
@@ -206,5 +206,35 @@
     ],
     "limitations": "Explorer websites are not wallet backends. A single or coordinated set of peers can still withhold information; multiple connections are not proof of independent operators.",
     "image": "42-peer-reset"
+  },
+  {
+    "id": "peer-refresh",
+    "section": "advanced",
+    "title": "Refresh the peer list",
+    "description": "Download dated candidates from Winnow’s census without interrupting active peers. Reset and shuffle peers is a separate action.",
+    "journey": [
+      "Refresh from an isolated HTTP fixture and assert its observation date and candidate counts.",
+      "Return malformed data and check that the previous catalog remains.",
+      "Relaunch and reset peers; verify the downloaded catalog is preserved."
+    ],
+    "tests": [
+      "test20PeerCatalogRefreshAndFailureRecovery"
+    ],
+    "limitations": "Downloads expire after seven days, then automatic selection falls back to bundled candidates. Bundled and downloaded census entries count as the same trust source. Every selected peer still undergoes normal wallet checks."
+  },
+  {
+    "id": "tor",
+    "section": "advanced",
+    "title": "Use Tor for wallet connections",
+    "description": "Turn on Tor to route peers, discovery, census refresh and explorer lookups through the embedded client. Networking stops in the background.",
+    "journey": [
+      "Check the default-off stopped state.",
+      "Use an injected failing driver to assert the bootstrapping and failed states.",
+      "Verify refresh is disabled on failure and that only explicit disablement returns to direct mode. Real device bootstrap, onion connections and foreground recovery are checked separately before release."
+    ],
+    "tests": [
+      "test21TorStatesFailClosed"
+    ],
+    "limitations": "Failure-state screenshots use a deterministic test driver. Tor failure leaves Winnow offline. External browsers use their own routing; Winnow warns before opening them. I2P transport is deferred."
   }
 ]
