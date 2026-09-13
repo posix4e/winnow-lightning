@@ -61,6 +61,38 @@
     "image": "24-saved-recipient"
   },
   {
+    "id": "senders",
+    "section": "everyday",
+    "title": "Name who paid you",
+    "description": "Label a received payment with the person who sent it. When the payment itself reveals a funding address, the app attaches it — with a warning that it is a guess, and that paying it reuses an address.",
+    "journey": [
+      "Receive a payment whose input reveals its funding address, open it in Wallet, and save the sender — the address attaches itself, with its warning.",
+      "Reopen the app and check the payment is labeled “Received from …”.",
+      "Pay the sender back from the payment screen, and check the review names them and warns about address reuse."
+    ],
+    "tests": [
+      "test17SaveSenderFromReceivedPayment"
+    ],
+    "image": "40-save-sender",
+    "limitations": "A funding address is a guess about a person, never proof: exchanges, coinjoins and multisig wallets fund payments from addresses that do not identify the payer. Taproot key-path inputs reveal nothing at all."
+  },
+  {
+    "id": "sender-lookup",
+    "section": "everyday",
+    "title": "Infer a sender with the explorer",
+    "description": "When a payment’s inputs reveal nothing, an explicit tap asks the configured block explorer for the addresses that funded it — after a warning that the explorer learns the transaction and your IP address.",
+    "journey": [
+      "Receive a taproot key-path payment: the sender sheet shows no funding address.",
+      "Tap “Infer with …”, accept the privacy warning, and check the explorer’s answer attaches itself.",
+      "Save the sender and check the payment is labeled."
+    ],
+    "tests": [
+      "test18InferSenderWithExplorer"
+    ],
+    "image": "43-infer-sender",
+    "limitations": "The explorer learns the transaction ID and the device IP address, and its answer still names addresses, not people. It is contacted only on that tap, never in the background."
+  },
+  {
     "id": "savings",
     "section": "everyday",
     "title": "Save with other people",

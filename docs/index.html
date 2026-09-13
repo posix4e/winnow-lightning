@@ -107,7 +107,7 @@ dialog a{overflow-wrap:anywhere}
 <p>On Bitcoin, your two devices appear as one key and one signature within the shared wallet’s three-key rule.</p>
 <p><a href="/vaults">How the two signing methods fit together</a></p>
 </dialog></section>
-<nav class="jump-links" aria-label="On this page"><a href="#setup">Set up your wallet</a> <a href="#receive">Receive bitcoin</a> <a href="#send">Send bitcoin</a> <a href="#people">Pay someone again</a> <a href="#savings">Save with other people</a> <a href="#recovery">Back up and restore</a> <a href="#controls">More options when you need them</a></nav>
+<nav class="jump-links" aria-label="On this page"><a href="#setup">Set up your wallet</a> <a href="#receive">Receive bitcoin</a> <a href="#send">Send bitcoin</a> <a href="#people">Pay someone again</a> <a href="#senders">Name who paid you</a> <a href="#sender-lookup">Infer a sender with the explorer</a> <a href="#savings">Save with other people</a> <a href="#recovery">Back up and restore</a> <a href="#controls">More options when you need them</a></nav>
 <details class="journey" id="setup" open>
 <summary><h2>Set up your wallet</h2></summary><div class="journey-body"><p>Create a wallet and write down your recovery words. If you stop partway through, you can finish the backup when you return.</p>
 <img class="app-shot" src="screenshots/01-onboarding.png" width="1320" height="2868" loading="lazy" alt="Winnow: Set up your wallet.">
@@ -118,7 +118,7 @@ dialog a{overflow-wrap:anywhere}
 <li>Create a wallet while it connects to the network.</li>
 <li>Leave the backup unfinished, reopen the app, and finish it. Check that viewing the recovery words requires unlocking.</li>
 </ol><p>Test code:
-<a href="https://github.com/winnowwallet/winnow/blob/main/UITests/WinnowAppUITests.swift#L117">test01OnboardingCreateWallet</a>, <a href="https://github.com/winnowwallet/winnow/blob/main/UITests/WinnowAppUITests.swift#L1270">test09BackupResumeAndReveal</a>
+<a href="https://github.com/winnowwallet/winnow/blob/main/UITests/WinnowAppUITests.swift#L118">test01OnboardingCreateWallet</a>, <a href="https://github.com/winnowwallet/winnow/blob/main/UITests/WinnowAppUITests.swift#L1271">test09BackupResumeAndReveal</a>
 . <a href="https://github.com/winnowwallet/winnow/actions/workflows/node-tests.yml">View test results</a>.</p>
 <p>The tests use the app on a private Bitcoin test network. Screenshots show test funds. Open a test run to see which version was checked, what passed, and what failed.</p>
 <p><a href="/testing#artifacts">Read the logs and screenshots</a> · <a href="/testing#limits">What still needs testing</a></p></dialog></div></details>
@@ -131,7 +131,7 @@ dialog a{overflow-wrap:anywhere}
 <li>Confirm a payment on the test network and check that it appears in the wallet.</li>
 <li>Watch a new payment arrive on Receive before it is confirmed, then check that its status updates after confirmation.</li>
 </ol><p>Test code:
-<a href="https://github.com/winnowwallet/winnow/blob/main/UITests/WinnowAppUITests.swift#L167">test02ReceiveAndFunding</a>, <a href="https://github.com/winnowwallet/winnow/blob/main/UITests/WinnowAppUITests.swift#L1489">test14IncomingPaymentBeforeConfirmation</a>
+<a href="https://github.com/winnowwallet/winnow/blob/main/UITests/WinnowAppUITests.swift#L168">test02ReceiveAndFunding</a>, <a href="https://github.com/winnowwallet/winnow/blob/main/UITests/WinnowAppUITests.swift#L1490">test14IncomingPaymentBeforeConfirmation</a>
 . <a href="https://github.com/winnowwallet/winnow/actions/workflows/node-tests.yml">View test results</a>.</p>
 <p>The tests use the app on a private Bitcoin test network. Screenshots show test funds. Open a test run to see which version was checked, what passed, and what failed.</p>
 <p><a href="/testing#artifacts">Read the logs and screenshots</a> · <a href="/testing#limits">What still needs testing</a></p></dialog></div></details>
@@ -145,7 +145,7 @@ dialog a{overflow-wrap:anywhere}
 <li>Edit a reviewed payment, then verify the new amount, full address, fee, and total before sending.</li>
 <li>Check that Bitcoin Core received the payment, open its details, and wait for the app to show it as confirmed.</li>
 </ol><p>Test code:
-<a href="https://github.com/winnowwallet/winnow/blob/main/UITests/WinnowAppUITests.swift#L227">test03Send</a>
+<a href="https://github.com/winnowwallet/winnow/blob/main/UITests/WinnowAppUITests.swift#L228">test03Send</a>
 . <a href="https://github.com/winnowwallet/winnow/actions/workflows/node-tests.yml">View test results</a>.</p>
 <p>The tests use the app on a private Bitcoin test network. Screenshots show test funds. Open a test run to see which version was checked, what passed, and what failed.</p>
 <p><a href="/testing#artifacts">Read the logs and screenshots</a> · <a href="/testing#limits">What still needs testing</a></p></dialog></div></details>
@@ -159,7 +159,37 @@ dialog a{overflow-wrap:anywhere}
 <li>Reopen the app and check the name on the payment. Remove and re-add the saved recipient without losing the label.</li>
 <li>Choose a saved address in Send and check the address-reuse notice. Pay a saved card, then check that the next payment uses a fresh address.</li>
 </ol><p>Test code:
-<a href="https://github.com/winnowwallet/winnow/blob/main/UITests/WinnowAppUITests.swift#L715">test10SaveRecipientFromPayment</a>
+<a href="https://github.com/winnowwallet/winnow/blob/main/UITests/WinnowAppUITests.swift#L716">test10SaveRecipientFromPayment</a>
+. <a href="https://github.com/winnowwallet/winnow/actions/workflows/node-tests.yml">View test results</a>.</p>
+<p>The tests use the app on a private Bitcoin test network. Screenshots show test funds. Open a test run to see which version was checked, what passed, and what failed.</p>
+<p><a href="/testing#artifacts">Read the logs and screenshots</a> · <a href="/testing#limits">What still needs testing</a></p></dialog></div></details>
+<details class="journey" id="senders" open>
+<summary><h2>Name who paid you</h2></summary><div class="journey-body"><p>Label a received payment with the person who sent it. When the payment itself reveals a funding address, the app attaches it — with a warning that it is a guess, and that paying it reuses an address.</p>
+<img class="app-shot" src="screenshots/40-save-sender.png" width="1320" height="2868" loading="lazy" alt="Winnow: Name who paid you.">
+<p class="limit">A funding address is a guess about a person, never proof: exchanges, coinjoins and multisig wallets fund payments from addresses that do not identify the payer. Taproot key-path inputs reveal nothing at all.</p>
+<button class="test-link" type="button" data-dialog="senders-tests" aria-controls="senders-tests" aria-haspopup="dialog">How this is tested</button>
+<dialog id="senders-tests" aria-labelledby="senders-tests-title">
+<div class="dialog-heading"><h2 id="senders-tests-title">How we test: Name who paid you</h2><form method="dialog"><button class="dialog-close" autofocus>Close</button></form></div><ol>
+<li>Receive a payment whose input reveals its funding address, open it in Wallet, and save the sender — the address attaches itself, with its warning.</li>
+<li>Reopen the app and check the payment is labeled “Received from …”.</li>
+<li>Pay the sender back from the payment screen, and check the review names them and warns about address reuse.</li>
+</ol><p>Test code:
+<a href="https://github.com/winnowwallet/winnow/blob/main/UITests/WinnowAppUITests.swift#L1798">test17SaveSenderFromReceivedPayment</a>
+. <a href="https://github.com/winnowwallet/winnow/actions/workflows/node-tests.yml">View test results</a>.</p>
+<p>The tests use the app on a private Bitcoin test network. Screenshots show test funds. Open a test run to see which version was checked, what passed, and what failed.</p>
+<p><a href="/testing#artifacts">Read the logs and screenshots</a> · <a href="/testing#limits">What still needs testing</a></p></dialog></div></details>
+<details class="journey" id="sender-lookup" open>
+<summary><h2>Infer a sender with the explorer</h2></summary><div class="journey-body"><p>When a payment’s inputs reveal nothing, an explicit tap asks the configured block explorer for the addresses that funded it — after a warning that the explorer learns the transaction and your IP address.</p>
+<img class="app-shot" src="screenshots/43-infer-sender.png" width="1320" height="2868" loading="lazy" alt="Winnow: Infer a sender with the explorer.">
+<p class="limit">The explorer learns the transaction ID and the device IP address, and its answer still names addresses, not people. It is contacted only on that tap, never in the background.</p>
+<button class="test-link" type="button" data-dialog="sender-lookup-tests" aria-controls="sender-lookup-tests" aria-haspopup="dialog">How this is tested</button>
+<dialog id="sender-lookup-tests" aria-labelledby="sender-lookup-tests-title">
+<div class="dialog-heading"><h2 id="sender-lookup-tests-title">How we test: Infer a sender with the explorer</h2><form method="dialog"><button class="dialog-close" autofocus>Close</button></form></div><ol>
+<li>Receive a taproot key-path payment: the sender sheet shows no funding address.</li>
+<li>Tap “Infer with …”, accept the privacy warning, and check the explorer’s answer attaches itself.</li>
+<li>Save the sender and check the payment is labeled.</li>
+</ol><p>Test code:
+<a href="https://github.com/winnowwallet/winnow/blob/main/UITests/WinnowAppUITests.swift#L1941">test18InferSenderWithExplorer</a>
 . <a href="https://github.com/winnowwallet/winnow/actions/workflows/node-tests.yml">View test results</a>.</p>
 <p>The tests use the app on a private Bitcoin test network. Screenshots show test funds. Open a test run to see which version was checked, what passed, and what failed.</p>
 <p><a href="/testing#artifacts">Read the logs and screenshots</a> · <a href="/testing#limits">What still needs testing</a></p></dialog></div></details>
@@ -175,7 +205,7 @@ dialog a{overflow-wrap:anywhere}
 <li>Back up the funded account from its detail screen, then open Send, choose a saved recipient, and check the account, amount, and fee.</li>
 <li>Continue straight to approvals without copying the request into another screen. Complete two approvals without the third person.</li>
 </ol><p>Test code:
-<a href="https://github.com/winnowwallet/winnow/blob/main/UITests/WinnowAppUITests.swift#L930">test12SharedSavingsCreateAndAsk</a>, <a href="https://github.com/winnowwallet/winnow/blob/main/UITests/WinnowAppUITests.swift#L564">test07ApproveRequest</a>
+<a href="https://github.com/winnowwallet/winnow/blob/main/UITests/WinnowAppUITests.swift#L931">test12SharedSavingsCreateAndAsk</a>, <a href="https://github.com/winnowwallet/winnow/blob/main/UITests/WinnowAppUITests.swift#L565">test07ApproveRequest</a>
 . <a href="https://github.com/winnowwallet/winnow/actions/workflows/node-tests.yml">View test results</a>.</p>
 <p>The tests use the app on a private Bitcoin test network. Screenshots show test funds. Open a test run to see which version was checked, what passed, and what failed.</p>
 <p><a href="/testing#artifacts">Read the logs and screenshots</a> · <a href="/testing#limits">What still needs testing</a></p></dialog></div></details>
@@ -188,7 +218,7 @@ dialog a{overflow-wrap:anywhere}
 <li>Export a backup with private keys and one without them.</li>
 <li>Restore a wallet that has funds and check that the backup is valid and the funds are found.</li>
 </ol><p>Test code:
-<a href="https://github.com/winnowwallet/winnow/blob/main/UITests/WinnowAppUITests.swift#L475">test06ImportBundleVerification</a>, <a href="https://github.com/winnowwallet/winnow/blob/main/UITests/WinnowAppUITests.swift#L1410">test08ExportBundle</a>
+<a href="https://github.com/winnowwallet/winnow/blob/main/UITests/WinnowAppUITests.swift#L476">test06ImportBundleVerification</a>, <a href="https://github.com/winnowwallet/winnow/blob/main/UITests/WinnowAppUITests.swift#L1411">test08ExportBundle</a>
 . <a href="https://github.com/winnowwallet/winnow/actions/workflows/node-tests.yml">View test results</a>.</p>
 <p>The tests use the app on a private Bitcoin test network. Screenshots show test funds. Open a test run to see which version was checked, what passed, and what failed.</p>
 <p><a href="/testing#artifacts">Read the logs and screenshots</a> · <a href="/testing#limits">What still needs testing</a></p></dialog></div></details>
@@ -201,7 +231,7 @@ dialog a{overflow-wrap:anywhere}
 <li>Check which tabs and controls appear in normal mode.</li>
 <li>Turn Advanced mode on and off, checking that fee and network settings appear and disappear.</li>
 </ol><p>Test code:
-<a href="https://github.com/winnowwallet/winnow/blob/main/UITests/WinnowAppUITests.swift#L871">test11BeginnerShellHidesAdvancedControls</a>
+<a href="https://github.com/winnowwallet/winnow/blob/main/UITests/WinnowAppUITests.swift#L872">test11BeginnerShellHidesAdvancedControls</a>
 . <a href="https://github.com/winnowwallet/winnow/actions/workflows/node-tests.yml">View test results</a>.</p>
 <p>The tests use the app on a private Bitcoin test network. Screenshots show test funds. Open a test run to see which version was checked, what passed, and what failed.</p>
 <p><a href="/testing#artifacts">Read the logs and screenshots</a> · <a href="/testing#limits">What still needs testing</a></p></dialog></div></details>

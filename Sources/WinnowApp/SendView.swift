@@ -143,12 +143,11 @@ struct SendView: View {
                 if sentTxid == nil, !sending { preview = nil }
             }
             .onChange(of: accountID) { _, _ in reset() }
-            .onChange(of: personID) { _, requested in
-                guard let requested else { return }
-                reset()
-                selectedPersonID = requested
-                personID = nil
-            }
+            // A "Send to <person>" request can arrive while this view does
+            // not exist yet (the tab is created lazily): consume it on
+            // appear as well as on later changes.
+            .onAppear { consumeRequestedPerson() }
+            .onChange(of: personID) { _, _ in consumeRequestedPerson() }
             .onChange(of: model.walletID) { _, _ in accountID = nil; reset() }
             .onChange(of: model.vaults.map(\.id)) { _, ids in
                 if let accountID, !ids.contains(accountID) { self.accountID = nil }
@@ -492,6 +491,14 @@ struct SendView: View {
         feeFloorNotice = false
         confirmedHeight = nil
         error = nil
+    }
+
+    /// Applies an outside "Send to <person>" request exactly once.
+    private func consumeRequestedPerson() {
+        guard let requested = personID else { return }
+        reset()
+        selectedPersonID = requested
+        personID = nil
     }
 
     /// Follows the broadcast: TxBroadcaster events (announced → a peer asked
