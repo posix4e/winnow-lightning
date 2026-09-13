@@ -391,33 +391,7 @@ public actor HeaderChain {
                 throw HeaderChainError.badPeerResponse("expected headers")
             }
             if batch.isEmpty { return outcome }
-            let answeredNothing: Bool
-            do {
-                let connected = try connect(batch)
-                outcome.absorb(connected)
-                // A batch made only of headers already held answers nothing:
-                // it was an announcement or a stale reply that the wait
-                // consumed in place of the real one.
-                answeredNothing = connected.appended == 0
-            } catch HeaderChainError.doesNotConnect where batch.count == 1 {
-                // A BIP130 tip announcement can race the requested reply
-                // after the transport has purged its old backlog. Its parent
-                // may be ahead of our chain. Never append it without linkage;
-                // request the missing chain again within the same retry budget.
-                guard replays < Self.maxReplayedBatches else {
-                    throw HeaderChainError.doesNotConnect
-                }
-                answeredNothing = true
-            } catch HeaderChainError.reorgWithoutMoreWork
-                where batch.count == 1 && batch[0].previousHash == tip.previousHash {
-                // A sibling of our tip with no more work: the losing block
-                // of a race the peer saw first. Being on the losing side is
-                // a state, not a lie, so it counts as a batch that answered
-                // nothing. A lighter branch longer than one block is not
-                // what a race produces and stays a fault.
-                outcome.staleSiblings += 1
-                answeredNothing = true
-            }
+            let answeredNothing = try connectSyncReply(batch, replays: replays, outcome: &outcome)
             // Ask again, a bounded number of times, so the sync ends on the
             // peer's actual answer rather than on a batch it did not mean.
             if answeredNothing {
@@ -426,6 +400,38 @@ public actor HeaderChain {
                 continue
             }
             if batch.count < Self.maxHeadersPerRequest { return outcome }
+        }
+    }
+
+    /// Interprets a single reply without mixing response classification with
+    /// the async request loop. Only connected headers alter the chain.
+    private func connectSyncReply(_ batch: [BlockHeader], replays: Int,
+                                  outcome: inout SyncOutcome) throws -> Bool {
+        do {
+            let connected = try connect(batch)
+            outcome.absorb(connected)
+            // A batch made only of headers already held answers nothing:
+            // it was an announcement or a stale reply that the wait
+            // consumed in place of the real one.
+            return connected.appended == 0
+        } catch HeaderChainError.doesNotConnect where batch.count == 1 {
+            // A BIP130 tip announcement can race the requested reply
+            // after the transport has purged its old backlog. Its parent
+            // may be ahead of our chain. Never append it without linkage;
+            // request the missing chain again within the same retry budget.
+            guard replays < Self.maxReplayedBatches else {
+                throw HeaderChainError.doesNotConnect
+            }
+            return true
+        } catch HeaderChainError.reorgWithoutMoreWork
+            where batch.count == 1 && batch[0].previousHash == tip.previousHash {
+            // A sibling of our tip with no more work: the losing block
+            // of a race the peer saw first. Being on the losing side is
+            // a state, not a lie, so it counts as a batch that answered
+            // nothing. A lighter branch longer than one block is not
+            // what a race produces and stays a fault.
+            outcome.staleSiblings += 1
+            return true
         }
     }
 
