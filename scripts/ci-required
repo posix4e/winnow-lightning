@@ -14,7 +14,7 @@ PATTERNS = {
 }
 JOBS = {
     "ci": {"complexity", "package", "app-build", "package-tests-intel"},
-    "node-tests": {"ui", "differential"},
+    "node-tests": {"ui-iPhone", "ui-iPad", "differential"},
 }
 
 

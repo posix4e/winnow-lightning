@@ -194,6 +194,7 @@ public struct NetworkParams: Sendable, Equatable {
         // ordinary launch. See FallbackPeersGenerated.swift for provenance
         // and for what generation deliberately does not claim.
         fallbackPeers: generatedMainnetFallbackPeers,
+        overlayFallbackPeers: [.tor: generatedMainnetTorFallbackPeers],
         // Derived, not asserted. Winnow synced mainnet from genesis on
         // 2026-08-19, proof-of-work-checking every one of the 900,001 headers
         // up to this height, and emitted the three values below. The block hash

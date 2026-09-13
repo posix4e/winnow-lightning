@@ -185,7 +185,7 @@ struct CopyableIdentifier: View {
 /// The bundled design papers are the same HTML the website serves. Loading the
 /// file from the bundle keeps them readable with no network, and lets the page
 /// bring its own typography instead of being flattened into one Text view.
-private struct BundledPageView: UIViewRepresentable {
+struct BundledPageView: UIViewRepresentable {
     let url: URL
     let openExternal: (URL) -> Void
 
@@ -210,6 +210,10 @@ private struct BundledPageView: UIViewRepresentable {
     }
 
     func makeUIView(context: Context) -> WKWebView {
+        makeWebView(coordinator: context.coordinator)
+    }
+
+    func makeWebView(coordinator: Coordinator) -> WKWebView {
         let config = WKWebViewConfiguration()
         config.defaultWebpagePreferences.allowsContentJavaScript = false
         // site.css hides the site's own nav and footer under .embedded; the
@@ -219,7 +223,7 @@ private struct BundledPageView: UIViewRepresentable {
                          injectionTime: .atDocumentEnd,
                          forMainFrameOnly: true))
         let view = WKWebView(frame: .zero, configuration: config)
-        view.navigationDelegate = context.coordinator
+        view.navigationDelegate = coordinator
         view.isOpaque = false
         view.backgroundColor = .systemBackground
         // Block subresources as well as navigations. These offline papers must

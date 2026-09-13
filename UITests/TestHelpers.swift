@@ -175,3 +175,16 @@ extension XCUIApplication {
         }
     }
 }
+
+@MainActor
+extension XCUIApplication {
+    /// iPadOS exposes its floating tabs as cells instead of an iPhone TabBar.
+    /// Keep the same asserted journeys on each platform's native tab layout.
+    func navigationTab(_ title: String) -> XCUIElement {
+        let phone = tabBars.buttons[title]
+        if phone.exists { return phone }
+        let floating = cells[title].firstMatch
+        if floating.exists { return floating }
+        return buttons[title].firstMatch
+    }
+}
