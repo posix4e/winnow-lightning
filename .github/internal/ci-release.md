@@ -37,7 +37,9 @@ private runner repository. Winnow requires a prepared macOS/Xcode seat with
 Bitcoin Core tools and the workflow's labels; it manages only its temporary
 node through `scripts/signet-fixture`.
 
-Each job owns fixture setup and teardown under its temporary directory; prior
+Each job owns fixture setup and teardown under its temporary directory.
+Test logs, screenshots, and result bundles use a fresh `mktemp` evidence
+directory per job so cancelled runs cannot poison a later Xcode result path; prior
 wallet state and difficulty retargets cannot affect the next run.
 The three Keychain attribute checks use the app's existing iOS test host.
 They verify recorded attributes and round-trip storage; device-lock enforcement
