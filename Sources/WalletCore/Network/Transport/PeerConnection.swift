@@ -225,12 +225,12 @@ public actor PeerConnection {
             guard case let .version(theirVersion) = theirVersionMessage else {
                 throw PeerError.handshakeFailed("expected version")
             }
-            guard theirVersion.services & Self.nodeCompactFilters != 0 else {
-                throw PeerError.missingCompactFilters(services: theirVersion.services)
-            }
             peerServices = theirVersion.services
             peerUserAgent = theirVersion.userAgent
             peerStartHeight = theirVersion.startHeight
+            guard theirVersion.services & Self.nodeCompactFilters != 0 else {
+                throw PeerError.missingCompactFilters(services: theirVersion.services)
+            }
             // The peer's verack may already be in our receive buffer (it is
             // sent on receipt of our version), so the waiter consults the
             // backlog first — no ordering assumption here.

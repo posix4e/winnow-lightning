@@ -30,6 +30,13 @@ enum OnionChecksum {
             0x8000000080008081, 0x8000000000008080, 0x0000000080000001, 0x8000000080008008,
         ]
         for constant in constants {
+            theta(&a)
+            let b = rhoPi(a, shifts: shifts)
+            chi(&a, b)
+            a[0] ^= constant
+        }
+    }
+    private static func theta(_ a: inout [UInt64]) {
             var c = [UInt64](repeating: 0, count: 5)
             for x in 0..<5 {
                 for y in 0..<5 { c[x] ^= a[x + 5 * y] }
@@ -38,14 +45,18 @@ enum OnionChecksum {
                 let d = c[(x + 4) % 5] ^ rotate(c[(x + 1) % 5], 1)
                 for y in 0..<5 { a[x + 5 * y] ^= d }
             }
+    }
+    private static func rhoPi(_ a: [UInt64], shifts: [Int]) -> [UInt64] {
             var b = [UInt64](repeating: 0, count: 25)
             for x in 0..<5 {
                 for y in 0..<5 { b[y + 5 * ((2 * x + 3 * y) % 5)] = rotate(a[x + 5 * y], shifts[x + 5 * y]) }
             }
+        return b
+    }
+    private static func chi(_ a: inout [UInt64], _ b: [UInt64]) {
             for x in 0..<5 {
                 for y in 0..<5 { a[x + 5 * y] = b[x + 5 * y] ^ ((~b[(x + 1) % 5 + 5 * y]) & b[(x + 2) % 5 + 5 * y]) }
             }
-            a[0] ^= constant
-        }
     }
+
 }
