@@ -277,7 +277,18 @@ final class WinnowAppUITests: XCTestCase {
         app.flipSwitch(advancedToggle)
         app.navigationTab("Send").tap()
         app.typeInto("feeOverrideField", "99")
-        XCTAssertFalse(app.keyboards.firstMatch.exists, "Done must dismiss the fee keypad")
+        // Keyboard dismissal animates independently of app idleness. Await
+        // the resulting state, including when iPad supplies a Return key.
+        XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 5),
+                      "Return or Done must dismiss the fee keypad")
+        // Exercise the app's accessory separately from the system Return key.
+        app.textFields["feeOverrideField"].tap()
+        let feeDone = app.buttons["sendKeyboardDone"]
+        XCTAssertTrue(feeDone.waitForExistence(timeout: 5))
+        XCTAssertTrue(feeDone.isHittable)
+        feeDone.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 5),
+                      "The fee keypad's Done button must end editing")
         app.navigationTab("Settings").tap()
         XCTAssertTrue(scrollUntilExists(app, advancedToggle, up: true))
         app.flipSwitch(advancedToggle)
@@ -523,8 +534,7 @@ final class WinnowAppUITests: XCTestCase {
 
         // Imported JSON may contain the seed. Leaving the active scene must
         // erase it before the app can be foregrounded again.
-        XCUIDevice.shared.press(.home)
-        app.activate()
+        backgroundAndReturn(app)
         XCTAssertTrue(app.buttons["importPasteButton"].waitForExistence(timeout: 20),
                       "import sheet did not return after activation")
         XCTAssertFalse(((app.textViews["importJSONEditor"].value as? String) ?? "")
@@ -708,8 +718,7 @@ final class WinnowAppUITests: XCTestCase {
         })
 
         // Sensitive state is dropped on a background transition.
-        XCUIDevice.shared.press(.home)
-        app.activate()
+        backgroundAndReturn(app)
         XCTAssertFalse(progress.waitForExistence(timeout: 3), "approval review survived backgrounding")
     }
 
@@ -1294,8 +1303,7 @@ final class WinnowAppUITests: XCTestCase {
 
         // A background transition erases the phrase and dismisses its sheet;
         // resuming requires another explicit action (and production auth).
-        XCUIDevice.shared.press(.home)
-        resumed.activate()
+        backgroundAndReturn(resumed)
         XCTAssertFalse(resumed.switches["writtenDownToggle"].waitForExistence(timeout: 3),
                        "onboarding recovery phrase survived backgrounding")
         let resumeBackup = resumed.buttons["resumeBackupButton"]
@@ -1331,12 +1339,8 @@ final class WinnowAppUITests: XCTestCase {
         XCTAssertTrue(settled.buttons["settingsCopyPhraseButton"].exists,
                       "Settings recovery screen does not offer phrase copy")
         Screenshots.capture(settled, "22-phrase-revealed", testCase: self)
-        XCUIDevice.shared.press(.home)
-        settled.activate()
-        // As in test08: the clear rides on the scene's background
-        // transition, which a slow simulator delivers a moment after the
-        // app is back, so wait for the phrase to go rather than read it in
-        // the first three seconds.
+        backgroundAndReturn(settled)
+        // Await the cleared state after the verified background transition.
         XCTAssertTrue(poll(timeout: 15, interval: 1, "recovery phrase cleared on backgrounding") {
             !settled.staticTexts[firstWord].exists
         }, "Settings recovery phrase survived backgrounding")
@@ -1357,8 +1361,7 @@ final class WinnowAppUITests: XCTestCase {
         seedAlert.buttons["Export with phrase"].tap()
         let shareLink = settled.buttons["exportShareLink"]
         XCTAssertTrue(shareLink.waitForExistence(timeout: 30), "seed export was not staged")
-        XCUIDevice.shared.press(.home)
-        settled.activate()
+        backgroundAndReturn(settled)
         XCTAssertFalse(shareLink.waitForExistence(timeout: 3),
                        "seed-bearing staged export survived backgrounding")
         XCTAssertTrue(scrollUntilExists(settled, exportButton, up: true),
@@ -1374,8 +1377,7 @@ final class WinnowAppUITests: XCTestCase {
         importApp.typeInto("importJSONEditor", privateMarker)
         XCTAssertTrue(((importApp.textViews["importJSONEditor"].value as? String) ?? "")
             .contains(privateMarker), "import test marker was not entered")
-        XCUIDevice.shared.press(.home)
-        importApp.activate()
+        backgroundAndReturn(importApp)
         XCTAssertTrue(importApp.buttons["importPasteButton"].waitForExistence(timeout: 20),
                       "empty import sheet did not remain available")
         XCTAssertFalse(((importApp.textViews["importJSONEditor"].value as? String) ?? "")

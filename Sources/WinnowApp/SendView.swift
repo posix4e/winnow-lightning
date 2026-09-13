@@ -118,6 +118,7 @@ struct SendView: View {
                 ToolbarItemGroup(placement: .keyboard) {
                     Spacer()
                     Button("Done") { focusedField = nil }
+                        .accessibilityIdentifier("sendKeyboardDone")
                 }
             }
             .sheet(isPresented: $showRecipients) {
