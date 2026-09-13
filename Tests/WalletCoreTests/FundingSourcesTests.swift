@@ -194,4 +194,16 @@ struct FundingSourcesTests {
             Data([0x00, 0x14]) + Hash160.hash(otherKey),
         ])
     }
+
+    @Test("History entries from before funding scripts still decode, empty")
+    func historyEntryBackwardsCompatibleDecode() throws {
+        let legacy = """
+            {"txid":"\(String(repeating: "ab", count: 32))","height":12,\
+            "received":1000,"spent":0}
+            """
+        let entry = try JSONDecoder().decode(HistoryEntry.self, from: Data(legacy.utf8))
+        #expect(entry.fundingScripts.isEmpty)
+        let reencoded = try JSONEncoder().encode(entry)
+        #expect(!String(decoding: reencoded, as: UTF8.self).contains("fundingScripts"))
+    }
 }

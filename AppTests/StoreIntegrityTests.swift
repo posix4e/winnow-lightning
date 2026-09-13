@@ -501,12 +501,12 @@ final class PeopleStoreSecurityTests: XCTestCase {
         } catch PeopleStorageError.duplicate(let existing) {
             XCTAssertEqual(existing, "Alice")
         }
-        do {
-            try await store.add(name: "Nobody", payTo: nil, signerKey: nil)
-            XCTFail("a person with no keys was saved")
-        } catch PeopleStorageError.nothingToSave {}
+        // A name alone is a valid label-only person (received payments can
+        // be labelled before any address is known), so "Nobody" now saves.
+        let nobody = try await store.add(name: "Nobody", payTo: nil, signerKey: nil)
+        XCTAssertNil(nobody.payTo)
         let records = await store.all
-        XCTAssertEqual(records.count, 1)
+        XCTAssertEqual(records.count, 2)
         XCTAssertEqual(try JSONDecoder().decode(PeopleFileProbe.self, from: Data(contentsOf: url)).people, records)
         XCTAssertTrue(String(decoding: try Data(contentsOf: url), as: UTF8.self).contains("/<0;1>/*"),
                       "the file keeps key expressions readable")

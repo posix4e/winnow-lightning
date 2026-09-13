@@ -33,6 +33,9 @@ struct SendReviewInputs: Equatable {
 struct SendView: View {
     @Environment(AppModel.self) private var model
     @Binding var accountID: String?
+    /// Set from outside ("Send to <person>" on a received payment) to open
+    /// the form pre-addressed; consumed once, like `accountID`.
+    @Binding var personID: String?
 
     private struct Approval: Identifiable {
         let record: VaultRecord
@@ -140,6 +143,12 @@ struct SendView: View {
                 if sentTxid == nil, !sending { preview = nil }
             }
             .onChange(of: accountID) { _, _ in reset() }
+            .onChange(of: personID) { _, requested in
+                guard let requested else { return }
+                reset()
+                selectedPersonID = requested
+                personID = nil
+            }
             .onChange(of: model.walletID) { _, _ in accountID = nil; reset() }
             .onChange(of: model.vaults.map(\.id)) { _, ids in
                 if let accountID, !ids.contains(accountID) { self.accountID = nil }

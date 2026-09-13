@@ -18,6 +18,8 @@ struct FeeBumpReviewInputs: Equatable {
 /// labeled "awaiting confirmation", never "incoming" (docs/read-side.md §3.3).
 struct HomeView: View {
     var sendFrom: (String) -> Void
+    /// Opens Send pre-addressed to a saved person, from a payment's detail.
+    var sendToPerson: (String) -> Void
     @Environment(AppModel.self) private var model
     @State private var showReceive = false
     @State private var showSharedSavings = false
@@ -157,7 +159,7 @@ struct HomeView: View {
                 }
             }
             .navigationTitle("Winnow")
-            .navigationDestination(for: Data.self) { PaymentDetailView(txid: $0) }
+            .navigationDestination(for: Data.self) { PaymentDetailView(txid: $0, sendToPerson: sendToPerson) }
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
                     Button("Receive") { showReceive = true }
@@ -217,7 +219,10 @@ private struct HistoryRow: View {
     }
 
     private var title: String {
-        guard net < 0 else { return "Received" }
+        guard net < 0 else {
+            if let sender = model.receivedSender(entry) { return "Received from \(sender.name)" }
+            return "Received"
+        }
         let recipients = model.paymentRecipients(entry)
         if recipients.count == 1, let person = recipients.first?.person { return "Sent to \(person.name)" }
         return "Sent"
@@ -226,8 +231,10 @@ private struct HistoryRow: View {
 
 private struct PaymentDetailView: View {
     let txid: Data
+    let sendToPerson: (String) -> Void
     @Environment(AppModel.self) private var model
     @State private var editing: AppModel.PaymentRecipient?
+    @State private var labelingSender = false
     @State private var showFeeBump = false
     @State private var loading = false
     @State private var error: String?
@@ -259,6 +266,7 @@ private struct PaymentDetailView: View {
                         }
                     }
                 }
+                if entry.received > 0 { senderSection(entry) }
                 if entry.rawTransaction == nil, entry.spent > 0 {
                     Section {
                         if loading || model.status.syncing { ProgressView("Loading payment details…") }
@@ -278,9 +286,41 @@ private struct PaymentDetailView: View {
         }
         .navigationTitle("Payment")
         .sheet(item: $editing) { AddPersonView(person: $0.person, address: $0.address) }
+        .sheet(isPresented: $labelingSender) {
+            AddPersonView(txid: txid,
+                          senderCandidates: entry.map { model.senderCandidates(for: $0) } ?? [])
+        }
         .sheet(isPresented: $showFeeBump) { FeeBumpView(txid: txid) }
         .task(id: model.status.syncing) {
             if !model.status.syncing { await load() }
+        }
+    }
+
+    /// Who the payment came from: a saved label and the way to change it, or
+    /// the way to make one. The candidates themselves — and the warned
+    /// explorer lookup for the inputs that reveal nothing — live in the
+    /// sheet, so this section stays two rows deep.
+    private func senderSection(_ entry: HistoryEntry) -> some View {
+        Section("Sender") {
+            if let sender = model.receivedSender(entry) {
+                Text(sender.name).font(.headline)
+                    .accessibilityIdentifier("senderName")
+                if sender.payTo != nil {
+                    Button("Send to \(sender.name)") { sendToPerson(sender.id) }
+                        .accessibilityIdentifier("sendToSenderButton")
+                }
+                Button("Change sender") { labelingSender = true }
+                    .accessibilityIdentifier("changeSenderButton")
+                    .disabled(model.peopleStorageNotice != nil)
+                Button("Remove sender label", role: .destructive) {
+                    Task { await model.removeReceivedSenderLabel(txid: entry.txid) }
+                }
+                .accessibilityIdentifier("removeSenderLabelButton")
+            } else {
+                Button("Save sender as person") { labelingSender = true }
+                    .accessibilityIdentifier("saveSenderButton")
+                    .disabled(model.peopleStorageNotice != nil)
+            }
         }
     }
 

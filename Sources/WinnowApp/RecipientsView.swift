@@ -58,22 +58,41 @@ struct SavedRecipientsView: View {
 }
 
 /// One editor for a saved recipient, a payment's address, or a co-owner's card.
+/// With `txid` set it labels a received payment instead: a name is enough on
+/// its own, and the funding addresses the payment itself reveals — or the
+/// explicitly tapped explorer lookup — can be attached to the person.
 struct AddPersonView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     var person: PersonRecord?
     var forSigning = false
+    /// The received payment being labelled, when this sheet is a sender flow.
+    var txid: Data?
+    /// Offline-reconstructed funding addresses (WalletCore `FundingSources`).
+    var senderCandidates: [AppModel.SenderCandidate] = []
     @State private var name: String
     @State private var pasted: String
     @State private var error: String?
     @State private var saving = false
+    @State private var confirmInfer = false
+    @State private var inferring = false
+    @State private var inferredAddresses: [String] = []
 
-    init(person: PersonRecord? = nil, address: String = "", forSigning: Bool = false) {
+    init(person: PersonRecord? = nil, address: String = "", forSigning: Bool = false,
+         txid: Data? = nil, senderCandidates: [AppModel.SenderCandidate] = []) {
         self.person = person
         self.forSigning = forSigning
+        self.txid = txid
+        self.senderCandidates = senderCandidates
         _name = State(initialValue: person?.name ?? "")
-        _pasted = State(initialValue: address)
+        // A single revealed funding address attaches automatically; several
+        // stay an explicit choice, since paying one is a guess about a person.
+        _pasted = State(initialValue: address.isEmpty && senderCandidates.count == 1
+                        ? senderCandidates[0].address : address)
     }
+
+    private var labelingSender: Bool { txid != nil && person == nil }
+    private var explorerHost: String { model.esploraBaseURL.host ?? "the explorer" }
 
     private var parsed: PersonImport? { try? PersonPaste.parse(pasted, network: model.network) }
     private var effectiveName: String {
@@ -83,6 +102,7 @@ struct AddPersonView: View {
     private var canSave: Bool {
         guard !saving, !effectiveName.isEmpty else { return false }
         if person != nil { return true }
+        if labelingSender { return true } // a name alone is a valid label
         return forSigning ? parsed?.signerKey != nil : parsed?.payTo != nil
     }
 
@@ -98,6 +118,58 @@ struct AddPersonView: View {
                             .accessibilityIdentifier("personPasteField")
                         Button("Paste from clipboard") { pasted = UIPasteboard.general.string ?? "" }
                             .accessibilityIdentifier("personPasteButton")
+                    }
+                }
+                if labelingSender, !model.people.isEmpty {
+                    Section("Or choose someone saved") {
+                        ForEach(model.people) { saved in
+                            Button(saved.name) { choose(saved) }
+                                .accessibilityIdentifier("chooseSenderPerson-\(saved.name)")
+                        }
+                    }
+                }
+                if labelingSender, senderCandidates.count > 1 {
+                    Section {
+                        ForEach(senderCandidates) { candidate in
+                            Button(candidate.address) { pasted = candidate.address }
+                                .font(.system(.footnote, design: .monospaced))
+                                .accessibilityIdentifier("senderCandidate-\(candidate.id)")
+                        }
+                    } header: {
+                        Text("Funding addresses this payment reveals")
+                    } footer: {
+                        Text(Self.fundingWarning)
+                    }
+                }
+                if labelingSender, senderCandidates.count == 1 {
+                    Section {
+                    } footer: {
+                        Text(Self.fundingWarning)
+                            .accessibilityIdentifier("senderCandidateWarning")
+                    }
+                }
+                if labelingSender, senderCandidates.isEmpty {
+                    Section {
+                        Button(inferring ? "Inferring…" : "Infer with \(explorerHost)") {
+                            confirmInfer = true
+                        }
+                        .accessibilityIdentifier("inferSenderButton")
+                        .disabled(inferring)
+                    } footer: {
+                        Text("This payment's inputs reveal no funding address — a taproot key-path spend carries only a signature. \(explorerHost) can show the addresses that funded it, and learns this transaction ID and your IP address when you ask.")
+                    }
+                }
+                if !inferredAddresses.isEmpty {
+                    Section {
+                        ForEach(inferredAddresses, id: \.self) { address in
+                            Button(address) { pasted = address }
+                                .font(.system(.footnote, design: .monospaced))
+                                .accessibilityIdentifier("inferredSender-\(address)")
+                        }
+                    } header: {
+                        Text("Funded by, according to \(explorerHost)")
+                    } footer: {
+                        Text(Self.fundingWarning)
                     }
                 }
                 if let parsed, person == nil {
@@ -118,7 +190,7 @@ struct AddPersonView: View {
                         .accessibilityIdentifier("savePersonButton").disabled(!canSave)
                 }
             }
-            .navigationTitle(person?.isSavedRecipient == true ? "Rename recipient" : forSigning ? "Add co-owner" : "Save recipient")
+            .navigationTitle(navigationTitle)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
             }
@@ -128,6 +200,48 @@ struct AddPersonView: View {
                 do { _ = try PersonPaste.parse(text, network: model.network) }
                 catch { self.error = error.localizedDescription }
             }
+            .confirmationDialog("Infer sender with \(explorerHost)?",
+                                isPresented: $confirmInfer, titleVisibility: .visible) {
+                Button("Infer with \(explorerHost)") { infer() }
+                    .accessibilityIdentifier("confirmInferSenderButton")
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("\(explorerHost) will learn this transaction ID and your IP address. It can show the addresses that funded the payment, not who sent it.")
+            }
+        }
+    }
+
+    private var navigationTitle: String {
+        if labelingSender { return "Save sender" }
+        return person?.isSavedRecipient == true ? "Rename recipient" : forSigning ? "Add co-owner" : "Save recipient"
+    }
+
+    /// Shown wherever a guessed funding address could be attached.
+    private static let fundingWarning =
+        "Guessed from this payment's inputs. It can be wrong for exchanges, coinjoins and multisig wallets, and paying it reuses an address — a payment card gives a fresh address every time."
+
+    private func choose(_ saved: PersonRecord) {
+        guard let txid else { return }
+        saving = true
+        Task {
+            defer { saving = false }
+            do {
+                try await model.labelReceivedSender(txid: txid, personID: saved.id)
+                dismiss()
+            } catch { self.error = error.localizedDescription }
+        }
+    }
+
+    private func infer() {
+        guard let txid else { return }
+        inferring = true
+        Task {
+            defer { inferring = false }
+            do {
+                let addresses = try await model.lookupSenderOnline(txid: txid)
+                inferredAddresses = addresses
+                if addresses.count == 1 { pasted = addresses[0] }
+            } catch { self.error = error.localizedDescription }
         }
     }
 
@@ -138,6 +252,10 @@ struct AddPersonView: View {
             do {
                 if let person {
                     try await model.updateRecipient(id: person.id, name: effectiveName, saved: true)
+                } else if labelingSender {
+                    let record = try await model.addPerson(name: effectiveName, payTo: parsed?.payTo,
+                                                           signerKey: nil)
+                    try await model.labelReceivedSender(txid: txid!, personID: record.id)
                 } else if let parsed {
                     try await model.addPerson(name: effectiveName, payTo: parsed.payTo, signerKey: parsed.signerKey)
                 }

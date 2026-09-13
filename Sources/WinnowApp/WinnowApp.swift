@@ -162,6 +162,7 @@ struct MainTabView: View {
 
     @State private var selection: Tab
     @State private var sendAccountID: String?
+    @State private var sendPersonID: String?
 
     init() {
         let requested = E2EMode.current?.initialTab.flatMap(Tab.init(rawValue:))
@@ -170,13 +171,19 @@ struct MainTabView: View {
 
     var body: some View {
         TabView(selection: $selection) {
-            HomeView { accountID in
-                sendAccountID = accountID
-                selection = .send
-            }
+            HomeView(
+                sendFrom: { accountID in
+                    sendAccountID = accountID
+                    selection = .send
+                },
+                sendToPerson: { personID in
+                    sendPersonID = personID
+                    selection = .send
+                }
+            )
                 .tabItem { Label("Wallet", systemImage: "bitcoinsign.circle") }
                 .tag(Tab.wallet)
-            SendView(accountID: $sendAccountID)
+            SendView(accountID: $sendAccountID, personID: $sendPersonID)
                 .tabItem { Label("Send", systemImage: "arrow.up.circle") }
                 .tag(Tab.send)
             SettingsView()

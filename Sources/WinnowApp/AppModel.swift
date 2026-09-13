@@ -1873,36 +1873,28 @@ final class AppModel {
         return people.first { $0.id == personID }
     }
 
-    /// One address a received payment was funded from, reconstructed from
-    /// what the transaction's own inputs reveal (WalletCore's
-    /// `FundingSources`). An input that reveals nothing — taproot key-path,
-    /// coinbase, bare legacy scripts — yields no candidate.
+    /// One address a received payment was funded from, as reconstructed and
+    /// stored while the full transaction — witnesses included — was in hand
+    /// (WalletCore's `FundingSources`; `HistoryEntry.fundingScripts`).
+    /// Entries from before this record, or whose inputs reveal nothing —
+    /// taproot key-path, coinbase, bare legacy scripts — yield no candidate.
     struct SenderCandidate: Identifiable, Equatable {
-        /// The input index the address was reconstructed from.
+        /// Position in the entry's distinct funding scripts.
         var id: Int
         var address: String
         var scriptPubKey: Data
-        /// How the spent script was reconstructed.
-        var kind: FundingSources.Revelation
     }
 
     func senderCandidates(for entry: HistoryEntry) -> [SenderCandidate] {
         Self.senderCandidates(entry, network: network)
     }
 
-    /// Pure, like `paymentRecipients`: the distinct revealed funding
-    /// scripts in first-seen input order, each with its rendered address.
-    /// Empty when the raw transaction is missing or undecodable, or when no
-    /// input reveals a renderable script.
+    /// Pure, like `paymentRecipients`: the entry's stored funding scripts,
+    /// each with its rendered address.
     static func senderCandidates(_ entry: HistoryEntry, network: BitcoinNetwork) -> [SenderCandidate] {
-        guard let transaction = try? entry.transaction() else { return [] }
-        var seen: Set<Data> = []
-        return FundingSources.sources(of: transaction).compactMap { source in
-            guard let script = source.scriptPubKey, seen.insert(script).inserted,
-                  let address = AddressDecoder.address(for: script, network: network)
-            else { return nil }
-            return SenderCandidate(id: source.inputIndex, address: address,
-                                   scriptPubKey: script, kind: source.revelation)
+        entry.fundingScripts.enumerated().compactMap { index, script in
+            guard let address = AddressDecoder.address(for: script, network: network) else { return nil }
+            return SenderCandidate(id: index, address: address, scriptPubKey: script)
         }
     }
 

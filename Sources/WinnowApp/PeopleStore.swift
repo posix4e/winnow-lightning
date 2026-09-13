@@ -8,7 +8,7 @@ struct PersonRecord: Codable, Equatable, Identifiable, Sendable {
     /// Opaque; a UUID string.
     var id: String
     var name: String
-    /// Absent for a signer-only person.
+    /// Absent for a signer-only or label-only person.
     var payTo: PersonPayTo?
     /// A validated script-path signer expression, `[fp/path]xpub…/<0;1>/*`.
     var signerKey: String?
@@ -33,7 +33,6 @@ enum PeopleStorageError: Error, Equatable, LocalizedError {
     case invalidState(String)
     case damaged
     case duplicate(existingName: String)
-    case nothingToSave
     case unknownPerson
     case tooMany
 
@@ -45,8 +44,6 @@ enum PeopleStorageError: Error, Equatable, LocalizedError {
             "Winnow could not safely read your saved recipients, so they cannot be changed until the file is readable again."
         case let .duplicate(existingName):
             "That key already belongs to \(existingName)."
-        case .nothingToSave:
-            "Paste a card, a public account key or an address before saving."
         case .unknownPerson:
             "That person is no longer in your list."
         case .tooMany:
@@ -195,7 +192,8 @@ actor PeopleStore {
         guard !trimmedName.isEmpty else {
             throw PeopleStorageError.invalidState("a person needs a name")
         }
-        guard payTo != nil || signerKey != nil else { throw PeopleStorageError.nothingToSave }
+        // payTo and signerKey may both be absent: a name alone labels a
+        // received payment, and keys can only ever be added by re-saving.
         let candidate = PersonRecord(id: UUID().uuidString, name: trimmedName,
                                      payTo: payTo, signerKey: signerKey)
         if let existing = try Self.firstSharingAKey(with: candidate, among: records, network: network) {
@@ -324,13 +322,11 @@ actor PeopleStore {
         }
     }
 
-    /// What every person needs, whatever keys they carry.
+    /// What every person needs, whatever keys they carry — or do not: a
+    /// label-only person holds a name and no keys at all.
     private static func validateShape(_ record: PersonRecord) throws {
         guard !record.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw PeopleStorageError.invalidState("a person has no name")
-        }
-        guard record.payTo != nil || record.signerKey != nil else {
-            throw PeopleStorageError.invalidState("a person has no keys")
         }
         guard record.nextPaymentIndex <= maximumNextIndex else {
             throw PeopleStorageError.invalidState("payment index is out of range")

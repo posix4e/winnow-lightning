@@ -146,6 +146,8 @@ final class SenderCandidateTests: XCTestCase {
                           scriptSig: Data(), sequence: 0xFFFF_FFFE, witness: witness)
     }
 
+    /// An entry as the wallet stores it: the raw is witness-stripped, but the
+    /// funding scripts were distilled while the full transaction was in hand.
     private func entry(_ inputs: [Transaction.Input], raw: Bool = true) -> HistoryEntry {
         let transaction = Transaction(version: 2, inputs: inputs,
                                       outputs: [.init(value: 1_000,
@@ -153,7 +155,8 @@ final class SenderCandidateTests: XCTestCase {
                                                           + Data(repeating: 0x22, count: 32))],
                                       locktime: 0)
         return HistoryEntry(txid: transaction.txid, height: 12, received: 1_000, spent: 0,
-                            rawTransaction: raw ? transaction.serialized(includeWitness: true) : nil)
+                            rawTransaction: raw ? transaction.serialized(includeWitness: false) : nil,
+                            fundingScripts: raw ? FundingSources.fundingScripts(of: transaction) : [])
     }
 
     func testAWitnessKeyHashInputYieldsItsFundingAddress() throws {
@@ -164,7 +167,6 @@ final class SenderCandidateTests: XCTestCase {
         XCTAssertEqual(candidate.id, 0)
         XCTAssertEqual(candidate.address, "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4")
         XCTAssertEqual(candidate.scriptPubKey, Data([0x00, 0x14]) + generatorHash160)
-        XCTAssertEqual(candidate.kind, .witnessKeyHash)
     }
 
     func testRepeatedFundingScriptsKeepTheFirstSeenInput() {
@@ -175,8 +177,7 @@ final class SenderCandidateTests: XCTestCase {
             input(txid: 0x03, witness: [schnorrSignature]), // taproot key-path: opaque
             input(txid: 0x04, witness: [derSignature, otherKey]),
         ]), network: .mainnet)
-        XCTAssertEqual(candidates.map(\.id), [0, 3])
-        XCTAssertEqual(candidates.map(\.kind), [.witnessKeyHash, .witnessKeyHash])
+        XCTAssertEqual(candidates.map(\.id), [0, 1])
         XCTAssertEqual(candidates.first?.address, "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4")
         XCTAssertEqual(Set(candidates.map(\.address)).count, 2)
     }
