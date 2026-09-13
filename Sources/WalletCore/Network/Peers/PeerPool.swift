@@ -725,6 +725,14 @@ public actor PeerPool {
             fallback = fallback.filter { $0.overlay == .tor } + fallback.filter { $0.overlay == .clearnet }
         }
         ordered += fallback.map { PeerCandidate(endpoint: $0, source: .fallback) }
+        if route.socksProxy != nil {
+            // Keep explicit manual choices first, but do not let remembered
+            // direct-mode peers race ahead of the automatic onion candidates.
+            let manual = ordered.filter { $0.source == .manual }
+            let automatic = ordered.filter { $0.source != .manual }
+            ordered = manual + automatic.filter { $0.endpoint.overlay == .tor }
+                + automatic.filter { $0.endpoint.overlay != .tor }
+        }
         var seen = connected
         return ordered.filter { route.permits($0.endpoint) && seen.insert($0.endpoint).inserted }
     }

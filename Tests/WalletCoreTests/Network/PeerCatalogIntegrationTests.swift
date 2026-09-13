@@ -47,6 +47,24 @@ struct PeerCatalogIntegrationTests {
         #expect(Set(await pool.candidateEndpointsForTest()) == Set(NetworkParams.mainnet.fallbackPeers))
     }
 
+    @Test func torPrefersOnionsOverRememberedClearnetWithoutOverridingManualChoices() async throws {
+        let fixture = CensusCatalogTests()
+        let remembered = PeerEndpoint(host: "8.8.8.8", port: 8333)
+        let manual = PeerEndpoint(host: "9.9.9.9", port: 8333)
+        let file = FileManager.default.temporaryDirectory.appending(path: "peer-order-\(UUID()).json")
+        defer { try? FileManager.default.removeItem(at: file) }
+        try JSONEncoder().encode(PersistedPeers([PeerCandidate(endpoint: remembered, source: .dnsSeed)]))
+            .write(to: file)
+        let pool = PeerPool(params: .mainnet, manualPeers: [manual], peersFileURL: file,
+                            route: .tor(proxy: .init(host: "127.0.0.1", port: 9050)),
+                            censusCatalog: fixture.catalog(), catalogNow: { fixture.now })
+        let candidates = await pool.candidateEndpointsForTest()
+        #expect(candidates == [manual, .init(host: fixture.onion, port: 8333), remembered])
+        let sources = await pool.candidateSourcesForTest()
+        #expect(sources[remembered] == .dnsSeed, "transport preference must preserve source diversity")
+        #expect(sources[manual] == .manual)
+    }
+
     @Test func reshuffleAvoidsPreviousPeersAndOnionsRequireTor() async {
         let fixture = CensusCatalogTests()
         var catalog = fixture.catalog()
