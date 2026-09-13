@@ -11,6 +11,8 @@ struct SettingsView: View {
     @State private var newPeer = ""
     @State private var peerError: String?
     @State private var connectedPeers: [PeerInfo] = []
+    @State private var confirmPeerReset = false
+    @State private var resettingPeers = false
     @State private var showReadSide = false
     @State private var showPapers = false
     @State private var showDestroyWallet = false
@@ -48,7 +50,7 @@ struct SettingsView: View {
                         .disabled(model.e2e?.forcedNetwork != nil)
                     } footer: {
                         if model.e2e?.forcedNetwork != nil {
-                            Text("This debug session is locked to public signet.")
+                            Text("This debug session is locked to \(model.network == .mainnet ? "mainnet" : "public signet").")
                         } else {
                             Text("Each network has its own wallet on this device. Switching opens that network's wallet, or onboarding when it has none. Signet coins have no value; use it to rehearse.")
                         }
@@ -81,6 +83,39 @@ struct SettingsView: View {
                     Text("Shows the controls most people never need: fee bumping, the test network, your own peers, chain verification, the block explorer, build details and the raw vault tools. Off, the wallet sends, receives and saves with people. Nothing is deleted: a peer or setting you already have stays visible until you remove it.")
                 }
 
+                if model.advancedMode {
+                    Section {
+                        Toggle("Use Tor for wallet traffic", isOn: Binding(
+                            get: { model.tor.enabled },
+                            set: { value in Task { await model.setTorEnabled(value) } }
+                        ))
+                        .accessibilityIdentifier("torEnabledToggle")
+                        LabeledContent("State", value: model.tor.state.rawValue.capitalized)
+                            .accessibilityIdentifier("torState")
+                        if model.tor.state == .failed {
+                            Text("Tor failed. Winnow remains offline until Tor recovers or you disable it.")
+                            Button("Retry Tor") { Task { await model.retryTor() } }
+                                .accessibilityIdentifier("retryTorButton")
+                        }
+                    } header: { Text("Tor") } footer: {
+                        Text("Off by default. When enabled, Bitcoin peers, discovery, peer-list downloads and explorer lookups use Tor. There is no direct fallback. Networking stops in the background. External browser links are outside Winnow's protection. I2P transport is unavailable.")
+                    }
+                    Section {
+                        Button(model.refreshingCatalog ? "Refreshing… \(model.catalogBytes) bytes" : "Refresh peer list") {
+                            Task { await model.refreshPeerCatalog() }
+                        }
+                        .disabled(model.refreshingCatalog || model.tor.route == .offline)
+                        .accessibilityIdentifier("refreshPeerCatalogButton")
+                        if let notice = model.catalogNotice { Text(notice).accessibilityIdentifier("peerCatalogNotice") }
+                        else if let downloaded = model.catalogStore?.load() {
+                            Text("Observed \(downloaded.catalog.date): \(downloaded.catalog.networks["clearnet", default: []].count) clearnet, \(downloaded.catalog.networks["tor", default: []].count) Tor candidates.").accessibilityIdentifier("peerCatalogNotice")
+                        } else { Text("Using bundled candidates. Downloaded catalogs expire after seven days.") }
+                        if let error = model.catalogError { Text(error).foregroundStyle(.red).accessibilityIdentifier("peerCatalogError") }
+                    } header: { Text("Mainnet peer list") } footer: {
+                        Text("Downloads candidates from census.winnowwallet.com. Refresh keeps active connections. Every selected peer still undergoes Winnow's normal checks. Tor candidates are used only with Tor enabled.")
+                    }
+                }
+
                 if model.showsManualPeers {
                 Section {
                     ForEach(model.manualPeers, id: \.self) { peer in
@@ -104,7 +139,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Manual peers")
                 } footer: {
-                    Text("Manual peers are tried before DNS seeds. Seeds resolve over HTTPS (Cloudflare 1.1.1.1), then system DNS. The default port is 8333 (mainnet) / 38333 (signet). Peers must serve BIP157 compact filters.")
+                    Text("Manual peers are tried first. Seeds resolve over HTTPS (Cloudflare 1.1.1.1). Direct mode can fall back to system DNS; Tor mode cannot. The default port is 8333 (mainnet) / 38333 (signet). Peers must advertise compact filters and pass Winnow's checks.")
                 }
                 }
 
@@ -137,7 +172,7 @@ struct SettingsView: View {
                 } header: {
                     Text("External block explorer")
                 } footer: {
-                    Text("This is a link destination only. Winnow never contacts it for balances, history, fees, synchronization, or broadcasting. Tapping an address or transaction shows a privacy warning before opening the selected website. blockstream.info has no signet explorer, so that preset opens mempool.space while on signet.")
+                    Text("Winnow does not use the explorer for balances, synchronization, fees or broadcasting. Every funding-address lookup asks for consent and explains the transaction-ID disclosure and current route; you must explicitly select any result. External browser links have their own warning because the browser is outside Winnow’s Tor protection. On signet, the blockstream.info preset uses mempool.space.")
                 }
                 }
 
@@ -178,6 +213,26 @@ struct SettingsView: View {
                     }
                     Button("Refresh") { Task { await refreshPeers() } }
                         .accessibilityIdentifier("refreshPeersButton")
+                    Button(resettingPeers ? "Resetting…" : "Reset and shuffle peers") {
+                        confirmPeerReset = true
+                    }
+                    .accessibilityIdentifier("resetPeersButton")
+                    .disabled(resettingPeers)
+                    .confirmationDialog("Reset and shuffle peers?",
+                                        isPresented: $confirmPeerReset, titleVisibility: .visible) {
+                        Button("Reset and shuffle peers", role: .destructive) {
+                            Task {
+                                resettingPeers = true
+                                defer { resettingPeers = false }
+                                await model.resetPeers()
+                                await refreshPeers()
+                            }
+                        }
+                        .accessibilityIdentifier("confirmResetPeersButton")
+                        Button("Cancel", role: .cancel) {}
+                    } message: {
+                        Text("Disconnects all peers, forgets saved peers, and finds new ones from DNS seeds and the built-in list. Your manual peers and downloaded catalog are kept.")
+                    }
                 }
                 }
 
@@ -187,6 +242,9 @@ struct SettingsView: View {
                         LabeledContent("Wallet ID", value: model.walletID ?? "—")
                     }
                     Button("Design papers") { showPapers = true }
+                    NavigationLink("Tor open-source licenses") {
+                        DesignPaperView(resource: "tor-licenses", title: "Tor licenses")
+                    }
                 }
 
                 if model.walletID != nil {

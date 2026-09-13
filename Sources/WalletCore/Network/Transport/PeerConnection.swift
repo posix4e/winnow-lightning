@@ -179,7 +179,20 @@ public actor PeerConnection {
 
     /// TCP connect + version handshake. Throws `missingCompactFilters` when
     /// the peer cannot serve BIP157 filters.
+    private var permanentlyClosed = false
+
     public func connect(timeout: Duration = .seconds(20)) async throws {
+        try Task.checkCancellation()
+        try await withTaskCancellationHandler {
+            try await connectOnce(timeout: timeout)
+        } onCancel: {
+            Task { await self.disconnect() }
+        }
+    }
+
+    private func connectOnce(timeout: Duration) async throws {
+        try Task.checkCancellation()
+        guard !permanentlyClosed else { throw PeerError.notConnected }
         guard connection == nil else { return }
         // Through a proxy, the TCP connection is to the proxy; the peer's
         // name travels inside the SOCKS request.
@@ -207,6 +220,10 @@ public actor PeerConnection {
 
         receiveTask = Task { await self.receiveLoop(connection) }
 
+        try await exchangeVersion(timeout: timeout)
+    }
+
+    private func exchangeVersion(timeout: Duration) async throws {
         // version → version + verack → verack (BIP handshake order).
         let version = VersionMessage(
             version: Self.protocolVersion,
@@ -249,6 +266,7 @@ public actor PeerConnection {
 
     /// Cleanly closes the connection and finishes all event streams.
     public func disconnect() {
+        permanentlyClosed = true
         teardown(error: nil)
     }
 

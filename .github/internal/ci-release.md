@@ -2,8 +2,9 @@
 
 Winnow is one repository and one release train. The root Swift package organizes
 internal modules and development executables. The app, fuzz harness
-and debugging tool share one `Package.swift` and one `Package.resolved`; only
-swift-secp256k1 is remote. Xcode resolution must match that root lockfile.
+and debugging tool share one `Package.swift` and one `Package.resolved`; the Swift dependency
+is swift-secp256k1. The app also owns a locked Rust Arti bridge, rebuilt for
+each supported iOS architecture; WalletCore and census do not link it. Xcode resolution must match that root lockfile.
 
 ## Checks and ownership
 
@@ -56,8 +57,8 @@ tags in Winnow and the archived library remain fixed; the former library's
 Run Release manually first to validate the checkout without signing, uploading,
 assigning TestFlight groups or publishing. Release checks the generation date
 recorded inside `FallbackPeersGenerated.swift`, so copying or squashing history
-cannot make an old peer list appear fresh. If older than 30 days, run
-`scripts/generate-fallback-peers` (which runs `winnow-debug generate fallback-peers`
+cannot make an old peer list appear fresh. The census observation must be no more than seven days old. Run
+`scripts/generate-fallback-peers --from-census https://census.winnowwallet.com/census/peers.json` (which runs `winnow-debug generate fallback-peers`
 from [Tools/Generate](../../Tools/Generate/README.md)), retain its log and
 commit the result before tagging. Refreshing the header checkpoint is the same
 tool's other subcommand, via `scripts/refresh-checkpoint`, and needs a

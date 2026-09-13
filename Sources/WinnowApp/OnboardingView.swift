@@ -222,7 +222,7 @@ private struct MnemonicBackupView: View {
         NavigationStack {
             List {
                 Section {
-                    Text("Write these \(words.count) words down, in order, and keep them offline. They are the only backup of this wallet — they are stored in this device's Keychain and never leave it.")
+                    Text("Write these \(words.count) words down, in order, and keep them offline. These words protect your signing keys. Keep an exported wallet bundle too: Winnow needs both to restore your wallet.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }

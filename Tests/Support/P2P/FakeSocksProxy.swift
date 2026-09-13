@@ -10,15 +10,22 @@ public actor FakeSocksProxy {
     public private(set) var port: UInt16 = 0
     public private(set) var requestedHost: String?
     public private(set) var requestedPort: UInt16?
+    public private(set) var requestedHosts: [String] = []
+    public private(set) var httpRequests: [String] = []
     private let upstreamPort: UInt16?
     private let refuseWith: UInt8?
+    private let httpResponse: Data?
+    private let httpResponsesByHost: [String: Data]
     private var connections: [NWConnection] = []
 
     /// `upstreamPort` nil with `refuseWith` set answers every CONNECT with
     /// that reply code and closes.
-    public init(upstreamPort: UInt16?, refuseWith: UInt8? = nil) {
+    public init(upstreamPort: UInt16?, refuseWith: UInt8? = nil, httpResponse: Data? = nil,
+                httpResponsesByHost: [String: Data] = [:]) {
         self.upstreamPort = upstreamPort
         self.refuseWith = refuseWith
+        self.httpResponse = httpResponse
+        self.httpResponsesByHost = httpResponsesByHost
     }
 
     public var endpoint: PeerEndpoint { PeerEndpoint(host: "127.0.0.1", port: port) }
@@ -59,15 +66,25 @@ public actor FakeSocksProxy {
             _ = methods
             try await Self.write(client, Data([0x05, 0x00]))
             let head = try await Self.read(client, exactly: 4)
-            guard head[0] == 0x05, head[1] == 0x01, head[3] == 0x03 else { client.cancel(); return }
-            let length = try await Self.read(client, exactly: 1)
-            let name = try await Self.read(client, exactly: Int(length[0]))
+            guard head[0] == 0x05, head[1] == 0x01 else { client.cancel(); return }
+            let name = try await Self.readHost(client, type: head[3])
             let portBytes = try await Self.read(client, exactly: 2)
-            requestedHost = String(decoding: name, as: UTF8.self)
+            requestedHost = name
+            requestedHosts.append(name)
             requestedPort = UInt16(portBytes[0]) << 8 | UInt16(portBytes[1])
             if let refuseWith {
                 try await Self.write(client, Data([0x05, refuseWith, 0x00, 0x01, 0, 0, 0, 0, 0, 0]))
                 client.cancel()
+                return
+            }
+            if let httpResponse = httpResponsesByHost[requestedHost ?? ""] ?? httpResponse {
+                try await Self.write(client, Data([0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]))
+                var request = Data()
+                while request.count < 16_384, !request.suffix(4).elementsEqual([13, 10, 13, 10]) {
+                    request.append(try await Self.read(client, exactly: 1))
+                }
+                httpRequests.append(String(decoding: request, as: UTF8.self))
+                try await Self.write(client, httpResponse)
                 return
             }
             guard let upstreamPort, let port = NWEndpoint.Port(rawValue: upstreamPort) else { client.cancel(); return }
@@ -79,6 +96,21 @@ public actor FakeSocksProxy {
             Self.pump(from: upstream, to: client)
         } catch {
             client.cancel()
+        }
+    }
+
+    private static func readHost(_ client: NWConnection, type: UInt8) async throws -> String {
+        switch type {
+        case 1:
+            return try await read(client, exactly: 4).map(String.init).joined(separator: ".")
+        case 3:
+            let length = try await read(client, exactly: 1)
+            return String(decoding: try await read(client, exactly: Int(length[0])), as: UTF8.self)
+        case 4:
+            let bytes = try await read(client, exactly: 16)
+            guard let address = IPv6Address(bytes) else { throw NWError.posix(.EINVAL) }
+            return address.debugDescription
+        default: throw NWError.posix(.EINVAL)
         }
     }
 

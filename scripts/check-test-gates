@@ -12,7 +12,8 @@ SETTERS=(.github/workflows scripts)
 # Optional overrides a developer may set by hand; never a gate.
 ALLOW_UNSET="WINNOW_BITCOIN_CLI"
 # Conditional skips that are deliberate and documented.
-ALLOW_XCTSKIP="AppTests/E2EModeTests.swift"
+# Public-network device tests are a recorded release gate, not ordinary simulator CI.
+ALLOW_XCTSKIP="AppTests/E2EModeTests.swift UITests/LiveTorDeviceTests.swift"
 # Gates that hid suites nobody ran; folded into the node lane or a tool.
 DENY='WINNOW_SIGNET|WINNOW_HEADERS_BIN|WINNOW_GENERATE_FALLBACK_PEERS'
 
@@ -30,8 +31,9 @@ for name in $names; do
   fi
 done
 
-# 2. The only conditional suite is the node lane's.
-if grep -rn 'enabled(if:' "${TEST_DIRS[@]}" | grep -v 'diffEnabled'; then
+# 2. Conditional suites belong to the node lane. One live-network proof is
+# explicitly run by scripts/check-live-tor during release verification.
+if grep -rn 'enabled(if:' "${TEST_DIRS[@]}" | sed -E 's/^([^:]+):[0-9]+:/\1:/' | grep -v 'diffEnabled' | grep -vF 'Tests/WalletCoreTests/Network/RoutingTests.swift:    @Test(.enabled(if: ProcessInfo.processInfo.environment["WINNOW_LIVE_TOR_PORT"] != nil))'; then
   echo "::error::a suite is conditionally enabled on something other than diffEnabled"
   status=1
 fi

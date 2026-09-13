@@ -47,6 +47,11 @@ public actor PeerPool {
     private let peersFileURL: URL?
     /// DNS-seed resolver (DoH, then getaddrinfo). Injectable for tests.
     private let seedResolver: SeedResolver
+    private let route: NetworkRoute
+    private var censusCatalog: CensusCatalog?
+    private let catalogNow: @Sendable () -> Date
+    private var inFlight: [PeerEndpoint: PeerConnection] = [:]
+    private var avoidOnReset: Set<PeerEndpoint> = []
     /// Clock for cooldown expiry. Injectable so a test can advance time
     /// instead of sleeping through a 30-second cooldown.
     private let now: @Sendable () -> ContinuousClock.Instant
@@ -121,7 +126,11 @@ public actor PeerPool {
                 relayPreference: Bool = false,
                 dialTimeout: Duration = .seconds(5),
                 maxParallelDials: Int = 5, maxDialAttempts: Int = 50,
-                seedResolver: SeedResolver = .live(),
+                seedResolver: SeedResolver? = nil,
+                route: NetworkRoute = .direct,
+                censusCatalog: CensusCatalog? = nil,
+                catalogNow: @Sendable @escaping () -> Date = { Date() },
+                avoidOnReset: Set<PeerEndpoint> = [],
                 now: @Sendable @escaping () -> ContinuousClock.Instant = { ContinuousClock.now }) {
         self.params = params
         self.peerCount = peerCount
@@ -131,7 +140,11 @@ public actor PeerPool {
         self.dialTimeout = dialTimeout
         self.maxParallelDials = maxParallelDials
         self.maxDialAttempts = maxDialAttempts
-        self.seedResolver = seedResolver
+        self.route = route
+        self.catalogNow = catalogNow
+        self.censusCatalog = try? censusCatalog?.validated(now: catalogNow())
+        self.avoidOnReset = avoidOnReset
+        self.seedResolver = seedResolver ?? .routed(client: RoutedHTTPClient(route: route))
         self.now = now
         if let peersFileURL,
            let data = try? Data(contentsOf: peersFileURL),
@@ -161,10 +174,31 @@ public actor PeerPool {
         monitorTask?.cancel()
         monitorTask = nil
         started = false
+        for peer in inFlight.values { await peer.disconnect() }
+        inFlight = [:]
         for peer in peers { await peer.disconnect() }
         peers = []
         rejectedForSession = []
         persistKnownGood()
+    }
+
+    /// Forgets every remembered good peer: the in-memory list, the persisted
+    /// file, cooldowns and session rejections. Manual peers are the owner's
+    /// instruction, not a memory — they survive. The next start dials from
+    /// scratch: manual peers, then fallbacks, then DNS seeds. Call after
+    /// `stop()` (which persists); a pool rebuilt afterwards starts clean.
+    public func forgetKnownGood() throws {
+        if let peersFileURL, FileManager.default.fileExists(atPath: peersFileURL.path) {
+            try FileManager.default.removeItem(at: peersFileURL)
+        }
+        knownSource = [:]
+        seatedSources = [:]
+        staleTipJudged = []
+        knownGood = []
+        cooldownUntil = [:]
+        rejectedForSession = []
+        lastRejection = [:]
+
     }
 
     /// Currently connected peers (snapshot).
@@ -505,13 +539,14 @@ public actor PeerPool {
               attemptsThisRound < maxDialAttempts {
             let candidate = queue[next]
             next += 1
-            guard policy.admits(candidate, given: seatedCandidates()) else { continue }
+            guard route.permits(candidate.endpoint), policy.admits(candidate, given: seatedCandidates()) else { continue }
             let endpoint = candidate.endpoint
             running += 1
             attemptsThisRound += 1
-            group.addTask { [params, relayPreference, dialTimeout] in
-                let peer = PeerConnection(endpoint: endpoint, params: params,
-                                          relayPreference: relayPreference)
+            let peer = PeerConnection(endpoint: endpoint, params: params,
+                                      relayPreference: relayPreference, socksProxy: route.socksProxy)
+            inFlight[endpoint] = peer
+            group.addTask { [dialTimeout] in
                 do {
                     try await peer.connect(timeout: dialTimeout)
                     return (endpoint, peer)
@@ -593,13 +628,17 @@ public actor PeerPool {
                                     into: &group)
                 guard running > 0, let (endpoint, dialed) = await group.next() else { break }
                 running -= 1
+                inFlight.removeValue(forKey: endpoint)
                 guard let peer = dialed else { continue }
                 let source = queue.first { $0.endpoint == endpoint }?.source ?? .persisted
                 await seatArrival(peer, endpoint: endpoint, source: source)
             }
             // The pool filled or stopped while other dials were in flight.
             // Their receive tasks keep them alive until explicitly closed.
-            for await (_, peer) in group { await peer?.disconnect() }
+            for await (endpoint, peer) in group {
+                inFlight.removeValue(forKey: endpoint)
+                await peer?.disconnect()
+            }
         }
         // Judged after the round against the last validated tip, so a stale
         // peer that raced in ahead of honest ones does not keep its seat.
@@ -636,6 +675,10 @@ public actor PeerPool {
                    uniquingKeysWith: { first, _ in first })
     }
 
+    func candidateEndpointsForTest() -> [PeerEndpoint] {
+        localCandidates(excluding: []).map(\.endpoint)
+    }
+
     /// What is connected right now, with each peer's origin.
     /// The provenance class this pool reached `endpoint` through, when it
     /// knows one. Consumers use it to make comparisons span acquisition
@@ -665,15 +708,38 @@ public actor PeerPool {
         for endpoint in knownGood.subtracting(manualPeers) {
             ordered.append(PeerCandidate(endpoint: endpoint, source: rememberedSource(endpoint)))
         }
-        for endpoint in params.fallbackPeers where endpoint.overlay == .clearnet {
-            // A tor/i2p entry here is a data error — overlays without a
-            // transport live in `overlayFallbackPeers`, which this queue
-            // deliberately never reads — but a dial that must fail must not
-            // spend a slot in the race even then.
-            ordered.append(PeerCandidate(endpoint: endpoint, source: .fallback))
+        let freshCatalog = censusCatalog.flatMap { catalog -> CensusCatalog? in
+            guard let day = CensusCatalog.day(catalog.date),
+                  (0...CensusCatalog.maximumAgeDays).contains(Int(floor(catalogNow().timeIntervalSince1970 / 86_400)) - day) else { return nil }
+            return catalog
+        }
+        let clearnet = freshCatalog?.networks["clearnet"]?.map(\.endpoint) ?? params.fallbackPeers
+        let tor = freshCatalog?.networks["tor"]?.map(\.endpoint) ?? params.fallbackPeers(for: .tor)
+        let automatic = (route.socksProxy == nil ? clearnet : tor.shuffled() + clearnet.shuffled())
+            .filter { route.permits($0) }
+        let shuffled = automatic.shuffled()
+        let preferred = shuffled.filter { !avoidOnReset.contains($0) }
+        let previous = shuffled.filter { avoidOnReset.contains($0) }
+        var fallback = preferred + previous
+        if route.socksProxy != nil {
+            fallback = fallback.filter { $0.overlay == .tor } + fallback.filter { $0.overlay == .clearnet }
+        }
+        ordered += fallback.map { PeerCandidate(endpoint: $0, source: .fallback) }
+        if route.socksProxy != nil {
+            // Keep explicit manual choices first, but do not let remembered
+            // direct-mode peers race ahead of the automatic onion candidates.
+            let manual = ordered.filter { $0.source == .manual }
+            let automatic = ordered.filter { $0.source != .manual }
+            ordered = manual + automatic.filter { $0.endpoint.overlay == .tor }
+                + automatic.filter { $0.endpoint.overlay != .tor }
         }
         var seen = connected
-        return ordered.filter { seen.insert($0.endpoint).inserted }
+        return ordered.filter { route.permits($0.endpoint) && seen.insert($0.endpoint).inserted }
+    }
+
+    /// Refresh only changes future discovery. Existing peers stay connected.
+    public func updateCensusCatalog(_ catalog: CensusCatalog) throws {
+        censusCatalog = try catalog.validated(now: catalogNow())
     }
 
     /// DNS-seed results (DoH, then getaddrinfo). Called only when local
@@ -684,7 +750,7 @@ public actor PeerPool {
             allowPrivate: params.allowsPrivateSeedAddresses
         )
         var seen = connected
-        return seeds.filter { seen.insert($0).inserted }
+        return seeds.filter { route.permits($0) && seen.insert($0).inserted }
             .map { PeerCandidate(endpoint: $0, source: .dnsSeed) }
     }
 

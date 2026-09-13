@@ -255,6 +255,9 @@ final class AppModel {
         }
     }
     private(set) var recipientByScript: [Data: PersonRecord] = [:]
+    /// Txid display hex → person id, mirrored from the people store so a
+    /// received payment can name its sender without an actor hop.
+    private(set) var senderByTxid: [String: String] = [:]
     private(set) var sharedSavings: [SharedSavings] = []
     /// Set when `people.json` could not be read. Shown in the recipient picker;
     /// the store refuses mutations meanwhile. Never blocks boot.
@@ -278,6 +281,13 @@ final class AppModel {
     let vaultStore = VaultStore()
     let peopleStore = PeopleStore()
     private let defaults: UserDefaults
+    let tor: TorController
+    private var changingNetwork = false
+    private var peersToAvoid: Set<PeerEndpoint> = []
+    private(set) var refreshingCatalog = false
+    private(set) var catalogBytes = 0
+    private(set) var catalogNotice: String?
+    private(set) var catalogError: String?
     private let deviceAuthenticator: any DeviceAuthenticating
 
     /// Non-nil only when launched with WINNOW_E2E=1 (XCUITest runs).
@@ -292,7 +302,9 @@ final class AppModel {
     private(set) var explorerProvider: ExplorerProvider
 
     /// The warned external block explorer. Presets cover the common sites;
-    /// `custom` uses whatever Esplora-compatible URL the owner typed.
+    /// `custom` uses whatever Esplora-compatible URL the owner typed. It is
+    /// contacted directly only on an explicit, warned tap — "Infer sender"
+    /// on a received payment, or an opened link — never in the background.
     enum ExplorerProvider: String, CaseIterable {
         case blockstream
         case mempool
@@ -349,6 +361,8 @@ final class AppModel {
         keyStore = e2e.map { KeychainStore(service: $0.keychainService) } ?? KeychainStore()
         let defaults = e2e?.defaults ?? defaults
         self.defaults = defaults
+        tor = TorController(enabled: defaults.bool(forKey: "torEnabled"),
+                            driver: e2e?.torDriver ?? NativeTorDriver.shared)
         // Mainnet is the default (#9). The E2E harness is a custom-signet
         // fixture, so a test launch that names no network still gets signet.
         let selectedNetwork = e2e?.forcedNetwork
@@ -447,17 +461,15 @@ final class AppModel {
 
     /// Sync-while-active: the stack runs only while the scene is foreground.
     func scenePhaseChanged(_ phase: ScenePhase) async {
+        e2e?.journal("app.scenePhase", fields: ["phase": String(describing: phase)])
         switch phase {
         case .active:
             isActive = true
             await activate()
         case .background:
             isActive = false
-            syncTask?.cancel()
-            syncTask = nil
-            phaseTask?.cancel()
-            phaseTask = nil
-            await stack?.pool.stop()
+            await tor.suspend()
+            await stopNetworking()
         default:
             break // .inactive: still foreground — keep syncing
         }
@@ -465,11 +477,17 @@ final class AppModel {
 
     private func activate() async {
         // Boot must attach the saved wallet before a stack chooses its filters.
-        guard stage != .loading else { return }
+        guard stage != .loading, isActive, !changingNetwork, let dir = storageDirectory() else { return }
         if case .storageDamaged = stage { return }
+        let epoch = tor.generation
+        let route = await tor.resume(directory: dir.appending(path: "tor"))
+        guard route != .offline, epoch == tor.generation, isActive else { return }
+        e2e?.journal("network.route", fields: ["mode": tor.enabled ? "tor" : "direct", "generation": String(epoch)])
         await buildStackIfNeeded()
+        guard epoch == tor.generation, isActive else { return }
         startPhasePolling()
         await stack?.pool.start()
+        guard epoch == tor.generation, isActive else { return }
         startSyncLoop()
     }
 
@@ -590,15 +608,30 @@ final class AppModel {
         }
     }
 
+    private func makePeerPool(params: NetworkParams, directory dir: URL) -> PeerPool {
+        PeerPool(params: params, manualPeers: parsedManualPeers(),
+                                peersFileURL: dir.appending(path: "peers.json"),
+                                relayPreference: true,
+                                dialTimeout: tor.enabled ? .seconds(90) : .seconds(5),
+                                seedResolver: .routed(client: tor.client), route: tor.route,
+                                censusCatalog: network == .mainnet ? catalogStore?.load()?.catalog : nil,
+                                avoidOnReset: peersToAvoid)
+    }
+
+    private func waitForStackBuild() async {
+        while stack == nil, buildingStack, !Task.isCancelled {
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+    }
+
     private func buildStackIfNeeded() async {
         guard stack == nil else { return }
         if buildingStack {
-            while stack == nil, buildingStack {
-                try? await Task.sleep(for: .milliseconds(50))
-            }
+            await waitForStackBuild()
             return
         }
-        guard let dir = storageDirectory() else { return }
+        guard let dir = storageDirectory(), tor.route != .offline else { return }
+        let epoch = tor.generation
         buildingStack = true
         defer { buildingStack = false }
         do {
@@ -607,9 +640,7 @@ final class AppModel {
             // mempool windows (§2.8) can open on live connections without a
             // reconnect. With no window open the invs are dropped unanswered —
             // the window bounds the expensive part (getdata of every tx).
-            let pool = PeerPool(params: params, manualPeers: parsedManualPeers(),
-                                peersFileURL: dir.appending(path: "peers.json"),
-                                relayPreference: true)
+            let pool = makePeerPool(params: params, directory: dir)
             let headersURL = dir.appending(path: "headers.bin")
             // A public signet snapshot is ~25 MB and validating every stored
             // header's linkage/work is intentionally CPU-heavy. Keep that
@@ -619,12 +650,16 @@ final class AppModel {
             let chain = try await Task.detached(priority: .userInitiated) {
                 try Self.openOrRebuildChain(params: params, storageURL: headersURL, start: start)
             }.value
+            guard epoch == tor.generation, isActive else { await pool.stop(); return }
             let broadcaster = try makeBroadcaster(
                 pool: pool, storageURL: dir.appending(path: "broadcast.json"))
             var newStack = SyncStack(pool: pool, chain: chain, filters: nil, broadcaster: broadcaster)
             if let wallet {
                 newStack.filters = try await makeFilterSync(pool: pool, chain: chain,
                                                             startHeight: wallet.nextScanHeight)
+            }
+            guard epoch == tor.generation, isActive else {
+                await pool.stop(); await broadcaster.shutdown(); return
             }
             stack = newStack
             observeBroadcasterFailures(broadcaster)
@@ -638,6 +673,7 @@ final class AppModel {
             try await resumeInterruptedRollback()
         } catch {
             status.lastSyncError = error.localizedDescription
+            e2e?.journal("network.stackFailed", fields: ["error": error.localizedDescription])
         }
     }
 
@@ -922,6 +958,7 @@ final class AppModel {
         status = snapshot
         vaults = await vaultStore.all
         people = await peopleStore.all
+        senderByTxid = await peopleStore.senderLabels
         journalSnapshotIfChanged()
     }
 
@@ -1418,6 +1455,7 @@ final class AppModel {
             /// The receive-chain index the address was derived at; nil for a
             /// person who gave one fixed address.
             var paymentIndex: UInt32?
+            var hasUnverifiedFundingDestination = false
 
             var derivesFreshAddresses: Bool { paymentIndex != nil }
         }
@@ -1516,7 +1554,8 @@ final class AppModel {
                                             priority: priority, override: override, accountID: accountID)
         preview.recipient = SendPreview.Recipient(
             personID: person.id, name: person.name,
-            paymentIndex: person.derivesFreshAddresses ? index : nil)
+            paymentIndex: person.derivesFreshAddresses ? index : nil,
+            hasUnverifiedFundingDestination: person.hasUnverifiedFundingDestination)
         return preview
     }
 
@@ -1778,6 +1817,7 @@ final class AppModel {
             peopleStorageNotice = nil
         }
         people = await peopleStore.all
+        senderByTxid = await peopleStore.senderLabels
         vaults = await vaultStore.all
     }
 
@@ -1842,8 +1882,9 @@ final class AppModel {
     }
 
     @discardableResult
-    func addPerson(name: String, payTo: PersonPayTo?, signerKey: String?) async throws -> PersonRecord {
-        let record = try await peopleStore.add(name: name, payTo: payTo, signerKey: signerKey)
+    func addPerson(name: String, payTo: PersonPayTo?, signerKey: String?,
+                   provenance: PersonRecord.DestinationProvenance? = nil, source: String? = nil) async throws -> PersonRecord {
+        let record = try await peopleStore.add(name: name, payTo: payTo, signerKey: signerKey, provenance: provenance, source: source)
         people = await peopleStore.all
         e2e?.journal("person.added", fields: [
             "name": record.name,
@@ -1853,11 +1894,63 @@ final class AppModel {
         return record
     }
 
+    func attachDestination(id: String, payTo: PersonPayTo, provenance: PersonRecord.DestinationProvenance,
+                           source: String? = nil) async throws {
+        try await peopleStore.attachDestination(id: id, payTo: payTo, provenance: provenance, source: source)
+        people = await peopleStore.all
+    }
+
     var savedRecipients: [PersonRecord] { people.filter(\.isSavedRecipient) }
 
     func updateRecipient(id: String, name: String? = nil, saved: Bool) async throws {
         try await peopleStore.updateRecipient(id: id, name: name, saved: saved)
         people = await peopleStore.all
+    }
+
+    /// The person a received payment is labelled as coming from, if anyone.
+    func receivedSender(_ entry: HistoryEntry) -> PersonRecord? {
+        guard let personID = senderByTxid[entry.txid.displayHex] else { return nil }
+        return people.first { $0.id == personID }
+    }
+
+    /// One address a received payment was funded from, as reconstructed and
+    /// stored while the full transaction — witnesses included — was in hand
+    /// (WalletCore's `FundingSources`; `HistoryEntry.fundingScripts`).
+    /// Entries from before this record, or whose inputs reveal nothing —
+    /// taproot key-path, coinbase, bare legacy scripts — yield no candidate.
+    struct SenderCandidate: Identifiable, Equatable {
+        /// Position in the entry's distinct funding scripts.
+        var id: Int
+        var address: String
+        var scriptPubKey: Data
+    }
+
+    func senderCandidates(for entry: HistoryEntry) -> [SenderCandidate] {
+        Self.senderCandidates(entry, network: network)
+    }
+
+    /// Pure, like `paymentRecipients`: the entry's stored funding scripts,
+    /// each with its rendered address.
+    static func senderCandidates(_ entry: HistoryEntry, network: BitcoinNetwork) -> [SenderCandidate] {
+        entry.fundingScripts.enumerated().compactMap { index, script in
+            guard let address = AddressDecoder.address(for: script, network: network) else { return nil }
+            return SenderCandidate(id: index, address: address, scriptPubKey: script)
+        }
+    }
+
+    /// Labels who a received payment came from. The store refuses unknown
+    /// people; the mirror follows it.
+    func labelReceivedSender(txid: Data, personID: String) async throws {
+        try await peopleStore.labelSender(txidHex: txid.displayHex, personID: personID)
+        people = await peopleStore.all
+        senderByTxid = await peopleStore.senderLabels
+        e2e?.journal("person.senderLabeled", fields: ["txid": txid.displayHex, "personID": personID])
+    }
+
+    func removeReceivedSenderLabel(txid: Data) async {
+        await peopleStore.removeSenderLabel(txidHex: txid.displayHex)
+        people = await peopleStore.all
+        senderByTxid = await peopleStore.senderLabels
     }
 
     struct PaymentRecipient: Identifiable {
@@ -2169,6 +2262,7 @@ final class AppModel {
     func switchNetwork(to newNetwork: BitcoinNetwork) async {
         guard e2e?.forcedNetwork == nil || e2e?.forcedNetwork == newNetwork else { return }
         guard newNetwork != network else { return }
+        await tor.suspend()
         syncTask?.cancel()
         syncTask = nil
         await stack?.pool.stop()
@@ -2232,15 +2326,87 @@ final class AppModel {
         defaults.set(manualPeers, forKey: DefaultsKey.manualPeers(network))
     }
 
+    private func stopNetworking() async {
+        syncTask?.cancel(); syncTask = nil
+        phaseTask?.cancel(); phaseTask = nil
+        broadcasterEventTask?.cancel(); broadcasterEventTask = nil
+        let previous = stack
+        stack = nil
+        await previous?.pool.stop()
+        await previous?.broadcaster.shutdown()
+    }
+
+    func setTorEnabled(_ enabled: Bool) async {
+        guard !changingNetwork, enabled != tor.enabled else { return }
+        changingNetwork = true
+        await tor.suspend()
+        await stopNetworking()
+        await tor.setEnabled(enabled)
+        defaults.set(enabled, forKey: "torEnabled")
+        changingNetwork = false
+        await activate()
+        await refresh()
+    }
+
+    func retryTor() async {
+        guard tor.enabled, !changingNetwork else { return }
+        await tor.suspend()
+        await stopNetworking()
+        await activate()
+    }
+
     /// Rebuilds the stack so changed peer settings take effect.
     func reconnect() async {
-        syncTask?.cancel()
-        syncTask = nil
-        await stack?.pool.stop()
-        await stack?.broadcaster.shutdown()
-        broadcasterEventTask?.cancel()
-        broadcasterEventTask = nil
-        stack = nil
+        await tor.suspend()
+        await stopNetworking()
+        await activate()
+        await refresh()
+    }
+
+    var catalogStore: CensusCatalogStore? {
+        storageDirectory().map { CensusCatalogStore(url: $0.deletingLastPathComponent().appending(path: "mainnet/downloaded-census.json")) }
+    }
+
+    func refreshPeerCatalog() async {
+        guard !refreshingCatalog, isActive else { return }
+        refreshingCatalog = true
+        catalogBytes = 0
+        catalogError = nil
+        let epoch = tor.generation
+        defer { refreshingCatalog = false }
+        do {
+            let data = try await tor.client.get(e2e?.censusURL ?? CensusCatalog.endpoint, maximumBytes: CensusCatalog.maximumBytes) { [weak self] bytes in
+                Task { @MainActor in if self?.tor.generation == epoch { self?.catalogBytes = bytes } }
+            }
+            guard epoch == tor.generation, isActive, let store = catalogStore else { throw CancellationError() }
+            let download = try store.replace(with: data)
+            if network == .mainnet { try await stack?.pool.updateCensusCatalog(download.catalog) }
+            let clearnet = download.catalog.networks["clearnet"]?.count ?? 0
+            let onion = download.catalog.networks["tor"]?.count ?? 0
+            catalogNotice = "Observed \(download.catalog.date): \(clearnet) clearnet, \(onion) Tor candidates. Active peers unchanged."
+            e2e?.journal("peers.catalogRefreshed", fields: ["date": download.catalog.date, "sha256": download.sha256])
+        } catch {
+            catalogError = error is CancellationError ? "Refresh cancelled; previous peer list retained." : error.localizedDescription
+        }
+    }
+
+    /// Reset learned peers while preserving the downloaded catalog and settings.
+    func resetPeers() async {
+        let pool = stack?.pool
+        peersToAvoid = []
+        for peer in await pool?.connectedPeers() ?? [] {
+            peersToAvoid.insert(await peer.endpoint)
+        }
+        await tor.suspend()
+        await stopNetworking()
+        do {
+            if let pool { try await pool.forgetKnownGood() }
+            else if let dir = storageDirectory() {
+                let file = dir.appending(path: "peers.json")
+                if FileManager.default.fileExists(atPath: file.path) { try FileManager.default.removeItem(at: file) }
+            }
+        } catch { status.lastSyncError = error.localizedDescription; return }
+        e2e?.journal("peers.reset", fields: [:])
         await activate()
         await refresh()
     }
@@ -2271,9 +2437,10 @@ final class AppModel {
         defaults.set(provider.rawValue, forKey: DefaultsKey.explorerProvider(network))
     }
 
-    /// The selected external block-explorer website. Winnow never contacts it
-    /// in the background; URLs derived here are opened only after a user taps
-    /// a link and accepts the privacy warning.
+    /// The selected external block-explorer website. Winnow contacts it
+    /// directly only when the user taps "Infer sender" on a received
+    /// payment, after the privacy warning; URLs derived here open only
+    /// after a tap accepts the same warning. Never in the background.
     var esploraBaseURL: URL {
         Self.explorerBaseURL(provider: explorerProvider,
                              customURLString: esploraURLString, network: network)
@@ -2315,6 +2482,42 @@ final class AppModel {
         esploraBaseURL
             .appending(path: "address")
             .appending(path: address)
+    }
+
+    /// A consented, routed explorer fetch for funding addresses of `txid`,
+    /// resolved at the selected explorer. Called only from the received
+    /// explicit destination-selection flow, after its privacy warning — never
+    /// in the background, never retried, never cached.
+    struct ExplorerLookupConsent: Equatable {
+        let txid: Data
+        let baseURL: URL
+        let network: BitcoinNetwork
+        let route: NetworkRoute
+        let generation: UInt64
+        var disclosure: String {
+            switch route {
+            case .direct: "The explorer receives this transaction ID and your IP address over a direct connection."
+            case .tor: "The explorer receives this transaction ID through Tor. A clearnet explorer sees a Tor exit IP, rather than your device IP."
+            case .offline: "Winnow is offline. No lookup can be sent."
+            }
+        }
+    }
+
+    func senderLookupConsent(txid: Data) -> ExplorerLookupConsent {
+        ExplorerLookupConsent(txid: txid, baseURL: esploraBaseURL, network: network,
+                              route: tor.route, generation: tor.generation)
+    }
+
+    func lookupSenderOnline(consent: ExplorerLookupConsent) async throws -> [String] {
+        guard isActive, consent == senderLookupConsent(txid: consent.txid), consent.route != .offline else {
+            throw SenderLookupError.unavailable("The network route changed. Review the lookup warning again.")
+        }
+        let addresses = try await EsploraSenderLookup.fundingAddresses(txid: consent.txid, baseURL: consent.baseURL,
+                                                                      network: consent.network, client: tor.client)
+        try Task.checkCancellation()
+        guard isActive, consent == senderLookupConsent(txid: consent.txid) else { throw CancellationError() }
+        e2e?.journal("sender.lookupOnline", fields: ["txid": consent.txid.displayHex, "explorer": consent.baseURL.host ?? ""])
+        return addresses
     }
 
     // MARK: - Storage
