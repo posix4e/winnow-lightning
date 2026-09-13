@@ -1,0 +1,4 @@
+module WinnowTor {
+    header "WinnowTor.h"
+    export *
+}

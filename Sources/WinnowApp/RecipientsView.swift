@@ -16,12 +16,15 @@ struct SavedRecipientsView: View {
                 if let notice = model.peopleStorageNotice ?? error {
                     Text(notice).foregroundStyle(.red).accessibilityIdentifier("recipientError")
                 }
-                if model.savedRecipients.isEmpty {
+                if model.people.filter({ $0.savedRecipient != false }).isEmpty {
                     Text("Save a recipient from a payment in Wallet, or add an address or card here.")
                         .foregroundStyle(.secondary)
                 }
-                ForEach(model.savedRecipients) { person in
-                    Button(person.name) { choose(person); dismiss() }
+                ForEach(model.people.filter { $0.savedRecipient != false }) { person in
+                    Button(person.payTo == nil ? "\(person.name) — add destination" : person.name) {
+                        if person.payTo == nil { editing = person }
+                        else { choose(person); dismiss() }
+                    }
                         .accessibilityIdentifier("chooseRecipient-\(person.name)")
                         .swipeActions(edge: .leading) {
                             Button("Rename") { editing = person }
@@ -75,8 +78,13 @@ struct AddPersonView: View {
     @State private var error: String?
     @State private var saving = false
     @State private var confirmInfer = false
+    @State private var lookupConsent: AppModel.ExplorerLookupConsent?
+    @State private var inferredSource: String?
     @State private var inferring = false
     @State private var inferredAddresses: [String] = []
+    @State private var lookupTask: Task<Void, Never>?
+    @State private var selectedFundingAddress: String?
+    @State private var selectedFundingProvenance: PersonRecord.DestinationProvenance?
 
     init(person: PersonRecord? = nil, address: String = "", forSigning: Bool = false,
          txid: Data? = nil, senderCandidates: [AppModel.SenderCandidate] = []) {
@@ -85,13 +93,11 @@ struct AddPersonView: View {
         self.txid = txid
         self.senderCandidates = senderCandidates
         _name = State(initialValue: person?.name ?? "")
-        // A single revealed funding address attaches automatically; several
-        // stay an explicit choice, since paying one is a guess about a person.
-        _pasted = State(initialValue: address.isEmpty && senderCandidates.count == 1
-                        ? senderCandidates[0].address : address)
+        _pasted = State(initialValue: address)
     }
 
     private var labelingSender: Bool { txid != nil && person == nil }
+    private var choosingFundingDestination: Bool { txid != nil && person?.payTo == nil }
     private var explorerHost: String { model.esploraBaseURL.host ?? "the explorer" }
 
     private var parsed: PersonImport? { try? PersonPaste.parse(pasted, network: model.network) }
@@ -101,6 +107,7 @@ struct AddPersonView: View {
     }
     private var canSave: Bool {
         guard !saving, !effectiveName.isEmpty else { return false }
+        if !pasted.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, parsed == nil { return false }
         if person != nil { return true }
         if labelingSender { return true } // a name alone is a valid label
         return forSigning ? parsed?.signerKey != nil : parsed?.payTo != nil
@@ -111,7 +118,7 @@ struct AddPersonView: View {
             Form {
                 Section {
                     TextField("Name", text: $name).accessibilityIdentifier("personNameField")
-                    if person == nil {
+                    if person?.payTo == nil {
                         TextField(forSigning ? "Paste a card or signer key" : "Paste an address or card",
                                   text: $pasted, axis: .vertical)
                             .autocorrectionDisabled().textInputAutocapitalization(.never)
@@ -128,10 +135,14 @@ struct AddPersonView: View {
                         }
                     }
                 }
-                if labelingSender, senderCandidates.count > 1 {
+                if choosingFundingDestination, !senderCandidates.isEmpty {
                     Section {
                         ForEach(senderCandidates) { candidate in
-                            Button(candidate.address) { pasted = candidate.address }
+                            Button(candidate.address) {
+                                pasted = candidate.address
+                                selectedFundingAddress = candidate.address
+                                selectedFundingProvenance = .localFunding
+                            }
                                 .font(.system(.footnote, design: .monospaced))
                                 .accessibilityIdentifier("senderCandidate-\(candidate.id)")
                         }
@@ -139,30 +150,29 @@ struct AddPersonView: View {
                         Text("Funding addresses this payment reveals")
                     } footer: {
                         Text(Self.fundingWarning)
-                    }
-                }
-                if labelingSender, senderCandidates.count == 1 {
-                    Section {
-                    } footer: {
-                        Text(Self.fundingWarning)
                             .accessibilityIdentifier("senderCandidateWarning")
                     }
                 }
-                if labelingSender, senderCandidates.isEmpty {
+                if choosingFundingDestination, senderCandidates.isEmpty {
                     Section {
-                        Button(inferring ? "Inferring…" : "Infer with \(explorerHost)") {
+                        Button(inferring ? "Looking up…" : "Find funding addresses with \(explorerHost)") {
+                            if let txid { lookupConsent = model.senderLookupConsent(txid: txid) }
                             confirmInfer = true
                         }
                         .accessibilityIdentifier("inferSenderButton")
                         .disabled(inferring)
                     } footer: {
-                        Text("This payment's inputs reveal no funding address — a taproot key-path spend carries only a signature. \(explorerHost) can show the addresses that funded it, and learns this transaction ID and your IP address when you ask.")
+                        Text("The locally stored payment does not reveal a funding address. You can request unverified funding addresses from \(explorerHost) after reviewing what the lookup discloses.")
                     }
                 }
                 if !inferredAddresses.isEmpty {
                     Section {
                         ForEach(inferredAddresses, id: \.self) { address in
-                            Button(address) { pasted = address }
+                            Button(address) {
+                                pasted = address
+                                selectedFundingAddress = address
+                                selectedFundingProvenance = .explorerFunding
+                            }
                                 .font(.system(.footnote, design: .monospaced))
                                 .accessibilityIdentifier("inferredSender-\(address)")
                         }
@@ -194,31 +204,33 @@ struct AddPersonView: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
             }
+            .onDisappear { lookupTask?.cancel() }
             .onChange(of: pasted) { _, text in
                 error = nil
                 guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
                 do { _ = try PersonPaste.parse(text, network: model.network) }
                 catch { self.error = error.localizedDescription }
             }
-            .confirmationDialog("Infer sender with \(explorerHost)?",
+            .confirmationDialog("Look up funding addresses with \(explorerHost)?",
                                 isPresented: $confirmInfer, titleVisibility: .visible) {
-                Button("Infer with \(explorerHost)") { infer() }
+                Button("Look up with \(explorerHost)") { infer() }
                     .accessibilityIdentifier("confirmInferSenderButton")
                 Button("Cancel", role: .cancel) {}
             } message: {
-                Text("\(explorerHost) will learn this transaction ID and your IP address. It can show the addresses that funded the payment, not who sent it.")
+                Text((lookupConsent?.disclosure ?? "No lookup selected.") + " Funding addresses do not establish who sent the payment or where they want a payment sent.")
             }
         }
     }
 
     private var navigationTitle: String {
         if labelingSender { return "Save sender" }
+        if let person, person.payTo == nil { return "Add destination for \(person.name)" }
         return person?.isSavedRecipient == true ? "Rename recipient" : forSigning ? "Add co-owner" : "Save recipient"
     }
 
     /// Shown wherever a guessed funding address could be attached.
     private static let fundingWarning =
-        "Guessed from this payment's inputs. It can be wrong for exchanges, coinjoins and multisig wallets, and paying it reuses an address — a payment card gives a fresh address every time."
+        "A funding address is unverified as a destination for this person. Exchanges, coinjoins and shared wallets can make it misleading. Select one only after checking with the person. Sending to it reuses an address; ask for a fresh address or payment card."
 
     private func choose(_ saved: PersonRecord) {
         guard let txid else { return }
@@ -233,15 +245,29 @@ struct AddPersonView: View {
     }
 
     private func infer() {
-        guard let txid else { return }
+        guard let lookupConsent else { return }
         inferring = true
-        Task {
+        lookupTask = Task {
             defer { inferring = false }
             do {
-                let addresses = try await model.lookupSenderOnline(txid: txid)
+                let addresses = try await model.lookupSenderOnline(consent: lookupConsent)
+                inferredSource = lookupConsent.baseURL.absoluteString
                 inferredAddresses = addresses
-                if addresses.count == 1 { pasted = addresses[0] }
+                try Task.checkCancellation()
             } catch { self.error = error.localizedDescription }
+        }
+    }
+
+    private var destinationProvenance: PersonRecord.DestinationProvenance? {
+        guard parsed?.payTo != nil else { return nil }
+        return pasted == selectedFundingAddress ? selectedFundingProvenance : .supplied
+    }
+
+    private var destinationSource: String? {
+        switch destinationProvenance {
+        case .localFunding: txid?.displayHex
+        case .explorerFunding: inferredSource
+        default: nil
         }
     }
 
@@ -251,10 +277,17 @@ struct AddPersonView: View {
             defer { saving = false }
             do {
                 if let person {
+                    if person.payTo == nil, let payTo = parsed?.payTo {
+                        try await model.attachDestination(id: person.id, payTo: payTo,
+                                                          provenance: destinationProvenance ?? .supplied,
+                                                          source: destinationSource)
+                    }
                     try await model.updateRecipient(id: person.id, name: effectiveName, saved: true)
                 } else if labelingSender {
                     let record = try await model.addPerson(name: effectiveName, payTo: parsed?.payTo,
-                                                           signerKey: nil)
+                                                           signerKey: nil,
+                                                           provenance: destinationProvenance,
+                                                           source: destinationSource)
                     try await model.labelReceivedSender(txid: txid!, personID: record.id)
                 } else if let parsed {
                     try await model.addPerson(name: effectiveName, payTo: parsed.payTo, signerKey: parsed.signerKey)

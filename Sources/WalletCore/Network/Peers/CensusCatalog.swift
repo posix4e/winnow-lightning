@@ -56,28 +56,37 @@ public struct CensusCatalog: Codable, Equatable, Sendable {
         guard !requireFresh || age <= Self.maximumAgeDays else { throw Invalid.expired }
         guard tip > 0 else { throw Invalid.height }
         var result = self
-        var seen = Set<PeerEndpoint>()
-        var blocks = Set<String>()
         for overlay in OverlayNetwork.allCases {
-            let entries = networks[overlay.rawValue] ?? []
-            guard entries.count <= (overlay == .clearnet ? 65_536 : Self.overlayCap) else { throw Invalid.size }
-            var canonical: [Entry] = []
-            for var entry in entries {
-                guard entry.port > 0, entry.userAgent.utf8.count <= 256,
-                      !entry.userAgent.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }),
-                      let host = Self.canonicalHost(entry.host, overlay: overlay) else { throw Invalid.endpoint }
-                guard Self.nearTip(entry.startHeight, tip: tip) else { throw Invalid.height }
-                entry.host = host
-                guard seen.insert(entry.endpoint).inserted else { throw Invalid.duplicate }
-                if overlay == .clearnet {
-                    guard entry.port == 8333, let block = entry.endpoint.netblock else { throw Invalid.endpoint }
-                    guard blocks.insert(block).inserted else { throw Invalid.diversity }
-                }
-                canonical.append(entry)
-            }
-            result.networks[overlay.rawValue] = canonical.sorted { ($0.host, $0.port) < ($1.host, $1.port) }
+            result.networks[overlay.rawValue] = try validatedEntries(overlay)
         }
         return result
+    }
+
+    private func validatedEntries(_ overlay: OverlayNetwork) throws -> [Entry] {
+        let entries = networks[overlay.rawValue] ?? []
+        guard entries.count <= (overlay == .clearnet ? 65_536 : Self.overlayCap) else { throw Invalid.size }
+        var seen = Set<PeerEndpoint>(), blocks = Set<String>()
+        let canonical = try entries.map { input in
+            let entry = try validatedEntry(input, overlay: overlay)
+            guard seen.insert(entry.endpoint).inserted else { throw Invalid.duplicate }
+            if overlay == .clearnet {
+                guard let block = entry.endpoint.netblock else { throw Invalid.endpoint }
+                guard blocks.insert(block).inserted else { throw Invalid.diversity }
+            }
+            return entry
+        }
+        return canonical.sorted { ($0.host, $0.port) < ($1.host, $1.port) }
+    }
+
+    private func validatedEntry(_ input: Entry, overlay: OverlayNetwork) throws -> Entry {
+        var entry = input
+        guard entry.port > 0, entry.userAgent.utf8.count <= 256,
+              !entry.userAgent.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }),
+              let host = Self.canonicalHost(entry.host, overlay: overlay) else { throw Invalid.endpoint }
+        guard Self.nearTip(entry.startHeight, tip: tip) else { throw Invalid.height }
+        guard overlay != .clearnet || entry.port == 8333 else { throw Invalid.endpoint }
+        entry.host = host
+        return entry
     }
 
     public static func nearTip(_ height: Int32, tip: Int32) -> Bool {
@@ -89,7 +98,11 @@ public struct CensusCatalog: Codable, Equatable, Sendable {
     public static func canonicalHost(_ text: String, overlay: OverlayNetwork) -> String? {
         guard text.utf8.count <= 255, text == text.trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
         let host = text.lowercased()
-        if overlay != .clearnet {
+        if overlay != .clearnet { return canonicalOverlay(host, overlay: overlay) }
+        return canonicalIP(host)
+    }
+
+    private static func canonicalOverlay(_ host: String, overlay: OverlayNetwork) -> String? {
             let suffix = overlay == .tor ? ".onion" : ".b32.i2p"
             guard host.hasSuffix(suffix) else { return nil }
             let label = String(host.dropLast(suffix.count))
@@ -102,7 +115,9 @@ public struct CensusCatalog: Codable, Equatable, Sendable {
                 guard label.count == 52, bytes.count == 32 else { return nil }
             }
             return host
-        }
+    }
+
+    private static func canonicalIP(_ host: String) -> String? {
         var v4 = in_addr()
         if host.withCString({ inet_pton(AF_INET, $0, &v4) }) == 1 {
             let bytes = withUnsafeBytes(of: v4) { Array($0) }

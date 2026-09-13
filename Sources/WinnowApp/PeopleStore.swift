@@ -17,6 +17,14 @@ struct PersonRecord: Codable, Equatable, Identifiable, Sendable {
     /// Nil in older files: payable recipients were all saved. Keep the record
     /// when hiding a shortcut so past names and address counters survive.
     var savedRecipient: Bool?
+    enum DestinationProvenance: String, Codable, Sendable {
+        case supplied, localFunding, explorerFunding
+    }
+    var destinationProvenance: DestinationProvenance?
+    var destinationSource: String?
+    var hasUnverifiedFundingDestination: Bool {
+        destinationProvenance == .localFunding || destinationProvenance == .explorerFunding
+    }
 
     var canCoOwnSavings: Bool { signerKey != nil }
     var derivesFreshAddresses: Bool { payTo?.derivesFreshAddresses == true }
@@ -126,7 +134,7 @@ actor PeopleStore {
 
         init(from decoder: any Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
-            people = try container.decodeIfPresent([PersonRecord].self, forKey: .people) ?? []
+            people = try container.decode([PersonRecord].self, forKey: .people)
             senderByTxid = try container.decodeIfPresent([String: String].self, forKey: .senderByTxid) ?? [:]
         }
     }
@@ -186,7 +194,8 @@ actor PeopleStore {
     }
 
     @discardableResult
-    func add(name: String, payTo: PersonPayTo?, signerKey: String?) throws -> PersonRecord {
+    func add(name: String, payTo: PersonPayTo?, signerKey: String?,
+             provenance: PersonRecord.DestinationProvenance? = nil, source: String? = nil) throws -> PersonRecord {
         guard !isDamaged else { throw PeopleStorageError.damaged }
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty else {
@@ -195,7 +204,8 @@ actor PeopleStore {
         // payTo and signerKey may both be absent: a name alone labels a
         // received payment, and keys can only ever be added by re-saving.
         let candidate = PersonRecord(id: UUID().uuidString, name: trimmedName,
-                                     payTo: payTo, signerKey: signerKey)
+                                     payTo: payTo, signerKey: signerKey,
+                                     destinationProvenance: provenance, destinationSource: source)
         if let existing = try Self.firstSharingAKey(with: candidate, among: records, network: network) {
             if !existing.isSavedRecipient, payTo != nil, existing.payTo == payTo, existing.signerKey == signerKey {
                 return try updateRecipient(id: existing.id, name: trimmedName, saved: true)
@@ -217,6 +227,27 @@ actor PeopleStore {
             if let name { $0[position].name = name.trimmingCharacters(in: .whitespacesAndNewlines) }
             $0[position].savedRecipient = saved
         }[position]
+    }
+
+    /// A name-only record acquires a destination only through explicit selection.
+    /// Existing destinations are immutable here so past payments retain meaning.
+    func attachDestination(id: String, payTo: PersonPayTo, provenance: PersonRecord.DestinationProvenance,
+                           source: String? = nil) throws {
+        guard !isDamaged else { throw PeopleStorageError.damaged }
+        guard let index = records.firstIndex(where: { $0.id == id }), records[index].payTo == nil else {
+            throw PeopleStorageError.invalidState("only a name-only contact can attach a destination")
+        }
+        var candidate = records[index]
+        candidate.payTo = payTo
+        if let duplicate = try Self.firstSharingAKey(with: candidate, among: records.filter { $0.id != id }, network: network) {
+            throw PeopleStorageError.duplicate(existingName: duplicate.name)
+        }
+        try mutate {
+            $0[index].payTo = payTo
+            $0[index].destinationProvenance = provenance
+            $0[index].destinationSource = source
+            $0[index].savedRecipient = true
+        }
     }
 
     /// Moves the person's payment counter past `index`. Monotonic, so a

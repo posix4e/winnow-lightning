@@ -82,6 +82,7 @@ final class WinnowAppUITests: XCTestCase {
                    expectOnboarding: Bool = false,
                    configureLocalNode: Bool = true,
                    advanced: Bool = false,
+                   environment: [String: String] = [:],
                    entropy: String = WinnowAppUITests.entropyHex) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchEnvironment = [
@@ -99,6 +100,7 @@ final class WinnowAppUITests: XCTestCase {
         }
         if reset { app.launchEnvironment["WINNOW_E2E_RESET"] = "1" }
         if let clipboard { app.launchEnvironment["WINNOW_E2E_CLIPBOARD"] = clipboard }
+        app.launchEnvironment.merge(environment) { _, new in new }
         app.launch()
         if expectOnboarding {
             XCTAssertTrue(app.buttons["createWalletButton"].waitForExistence(timeout: 120),
@@ -1831,11 +1833,10 @@ final class WinnowAppUITests: XCTestCase {
         openPayment(txid, in: app)
         app.buttons["saveSenderButton"].tap()
         XCTAssertTrue(app.textFields["personNameField"].waitForExistence(timeout: 20))
-        // The one revealed funding address attaches itself, with its warning.
-        XCTAssertEqual(app.textFields["personPasteField"].value as? String, utxo.address)
-        XCTAssertTrue(app.staticTexts["senderCandidateWarning"].exists)
+        // Even a sole candidate requires an explicit choice. First save only a label.
+        XCTAssertNotEqual(app.textFields["personPasteField"].value as? String, utxo.address)
         app.typeInto("personNameField", "Node")
-        Screenshots.capture(app, "40-save-sender", testCase: self)
+        Screenshots.capture(app, "44-name-only-label", testCase: self)
         app.buttons["savePersonButton"].tap()
         XCTAssertTrue(app.staticTexts["senderName"].waitForExistence(timeout: 20))
         XCTAssertEqual(app.staticTexts["senderName"].label, "Node")
@@ -1850,6 +1851,17 @@ final class WinnowAppUITests: XCTestCase {
 
         // Pay the sender back from the payment screen.
         openPayment(txid, in: app)
+        XCTAssertFalse(app.buttons["sendToSenderButton"].exists)
+        app.buttons["attachSenderDestinationButton"].tap()
+        let candidate = app.buttons["senderCandidate-0"]
+        XCTAssertTrue(candidate.waitForExistence(timeout: 20))
+        XCTAssertNotEqual(app.textFields["personPasteField"].value as? String, utxo.address)
+        candidate.tap()
+        XCTAssertEqual(app.textFields["personPasteField"].value as? String, utxo.address)
+        XCTAssertTrue(app.staticTexts["senderCandidateWarning"].exists)
+        Screenshots.capture(app, "40-save-sender", testCase: self)
+        app.buttons["savePersonButton"].tap()
+        XCTAssertTrue(app.buttons["sendToSenderButton"].waitForExistence(timeout: 20))
         app.buttons["sendToSenderButton"].tap()
         XCTAssertTrue(app.tabBars.buttons["Send"].isSelected)
         app.typeInto("amountField", "1000")
@@ -1884,30 +1896,66 @@ final class WinnowAppUITests: XCTestCase {
     /// the machine.
     private final class StubExplorer {
         let directory: URL
-        let port: UInt16 = 38_971
+        private(set) var port: UInt16 = 0
+        private var processID: String?
 
         init() {
             directory = FileManager.default.temporaryDirectory
                 .appending(path: "winnow-stub-explorer-\(UUID().uuidString)")
         }
 
-        /// Records what the explorer would say the funding addresses of
-        /// `txid` are, and (re)starts the server against a clean directory.
-        /// `exec` matters: without it the backgrounded subshell outlives the
-        /// command and holds HostProcess's pipes open forever.
+        /// The kernel assigns a free port and this fixture owns one server
+        /// process. Concurrent journeys cannot kill or contact each other.
         func serve(txid: String, addresses: [String]) throws {
             stop()
             let txDir = directory.appending(path: "tx", directoryHint: .isDirectory)
             try FileManager.default.createDirectory(at: txDir, withIntermediateDirectories: true)
             let vin = addresses.map { "{\"prevout\":{\"scriptpubkey_address\":\"\($0)\"}}" }
-            try Data("{\"vin\":[\(vin.joined(separator: ","))]}".utf8)
+            try Data("{\"txid\":\"\(txid)\",\"vin\":[\(vin.joined(separator: ","))]}".utf8)
                 .write(to: txDir.appending(path: txid))
-            _ = try HostProcess.run("/bin/sh", ["-c",
-                "cd '\(directory.path)' && exec /usr/bin/python3 -m http.server \(port) --bind 127.0.0.1 >/dev/null 2>&1 </dev/null &"])
+            try start()
         }
 
-        func stop() { _ = try? HostProcess.run("/usr/bin/pkill", ["-f", "http.server \(port)"]) }
+        func catalog(_ data: Data) throws {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try data.write(to: directory.appending(path: "peers.json"), options: .atomic)
+            if processID == nil { try start() }
+        }
+
+        private func start() throws {
+            let script = directory.appending(path: "server.py")
+            try """
+            import http.server, pathlib, os
+            root = pathlib.Path(__file__).parent
+            os.chdir(root)
+            server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), http.server.SimpleHTTPRequestHandler)
+            (root / 'port').write_text(str(server.server_port))
+            server.serve_forever()
+            """.write(to: script, atomically: true, encoding: .utf8)
+            let result = try HostProcess.run("/bin/sh", ["-c",
+                "/usr/bin/python3 '\(script.path)' >'\(directory.path)/requests.log' 2>&1 </dev/null & echo $!"])
+            processID = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+            for _ in 0..<100 where port == 0 {
+                let value = try? String(contentsOf: self.directory.appending(path: "port"), encoding: .utf8)
+                self.port = UInt16(value ?? "") ?? 0
+                if port == 0 { Thread.sleep(forTimeInterval: 0.1) }
+            }
+            XCTAssertGreaterThan(port, 0, "the isolated explorer listener did not start")
+        }
+
+        func stop() {
+            guard let processID, Int32(processID) != nil else { return }
+            let command = try? HostProcess.run("/bin/ps", ["-p", processID, "-o", "command="]).stdout
+            if command?.contains(directory.appending(path: "server.py").path) == true {
+                _ = try? HostProcess.run("/bin/kill", [processID])
+            }
+            self.processID = nil
+        }
         var baseURL: String { "http://127.0.0.1:\(port)" }
+        var requestCount: Int {
+            let log = (try? String(contentsOf: directory.appending(path: "requests.log"), encoding: .utf8)) ?? ""
+            return log.components(separatedBy: "GET /tx/").count - 1
+        }
     }
 
     /// Makes a fresh taproot UTXO in the wallet, sized to fund the test's
@@ -1994,15 +2042,21 @@ final class WinnowAppUITests: XCTestCase {
         // Taproot key-path: nothing to attach locally — the explorer is asked.
         // (An empty field reports its placeholder, never the address.)
         XCTAssertNotEqual(app.textFields["personPasteField"].value as? String, trUtxo.address)
+        XCTAssertEqual(stub.requestCount, 0, "No explorer request before consent")
         let infer = app.buttons["inferSenderButton"]
         XCTAssertTrue(scrollUntilExists(app, infer), "no infer button for an opaque payment")
         infer.tap()
         let confirm = app.buttons["confirmInferSenderButton"].firstMatch
         XCTAssertTrue(confirm.waitForExistence(timeout: 10), "no infer warning")
+        XCTAssertEqual(stub.requestCount, 0, "Opening the consent dialog cannot send a request")
+        Screenshots.capture(app, "45-explorer-consent", testCase: self)
         confirm.tap()
         let inferred = app.buttons["inferredSender-\(trUtxo.address)"]
         XCTAssertTrue(inferred.waitForExistence(timeout: 30), "stub explorer answer did not arrive")
-        // The single inferred address attached itself on arrival.
+        XCTAssertEqual(stub.requestCount, 1)
+        // The sole returned address is still unselected until tapped.
+        XCTAssertNotEqual(app.textFields["personPasteField"].value as? String, trUtxo.address)
+        inferred.tap()
         XCTAssertEqual(app.textFields["personPasteField"].value as? String, trUtxo.address)
         app.typeInto("personNameField", "Miner")
         Screenshots.capture(app, "43-infer-sender", testCase: self)
@@ -2048,5 +2102,64 @@ final class WinnowAppUITests: XCTestCase {
             return localPeer.exists
         }
         XCTAssertFalse(app.buttons["confirmResetPeersButton"].exists)
+    }
+
+    func test20PeerCatalogRefreshAndFailureRecovery() throws {
+        let stub = StubExplorer()
+        defer { stub.stop() }
+        let today = String(Date().ISO8601Format().prefix(10))
+        let catalog = CensusCatalog(date: today, tip: 900_000, networks: [
+            "clearnet": [.init(host: "8.8.8.8", port: 8333, userAgent: "/Fixture/", startHeight: 900_000)],
+            "tor": [], "i2p": []
+        ])
+        try stub.catalog(JSONEncoder().encode(catalog))
+        let app = launchApp(advanced: true, environment: ["WINNOW_E2E_CENSUS_URL": stub.baseURL + "/peers.json"])
+        app.tabBars.buttons["Settings"].tap()
+        let refresh = app.buttons["refreshPeerCatalogButton"]
+        XCTAssertTrue(scrollUntilExists(app, refresh, maxSwipes: 8))
+        refresh.tap()
+        let notice = app.staticTexts["peerCatalogNotice"]
+        XCTAssertTrue(notice.waitForExistence(timeout: 15))
+        XCTAssertTrue(notice.label.contains(today))
+        XCTAssertTrue(notice.label.contains("1 clearnet, 0 Tor"))
+        Screenshots.capture(app, "46-peer-refresh", testCase: self)
+        try stub.catalog(Data("{\"schemaVersion\":99}".utf8))
+        refresh.tap()
+        XCTAssertTrue(app.staticTexts["peerCatalogError"].waitForExistence(timeout: 15))
+        XCTAssertTrue(notice.label.contains(today))
+        Screenshots.capture(app, "47-peer-refresh-failed", testCase: self)
+        app.terminate()
+        let reopened = launchApp(advanced: true)
+        reopened.tabBars.buttons["Settings"].tap()
+        XCTAssertTrue(scrollUntilExists(reopened, reopened.staticTexts["peerCatalogNotice"], maxSwipes: 8))
+        XCTAssertTrue(reopened.staticTexts["peerCatalogNotice"].label.contains(today))
+        let reset = reopened.buttons["resetPeersButton"]
+        XCTAssertTrue(scrollUntilExists(reopened, reset, maxSwipes: 12))
+        reset.tap()
+        reopened.buttons["confirmResetPeersButton"].firstMatch.tap()
+        XCTAssertTrue(scrollUntilExists(reopened, reopened.staticTexts["peerCatalogNotice"], maxSwipes: 12, up: true))
+        XCTAssertTrue(reopened.staticTexts["peerCatalogNotice"].label.contains(today))
+    }
+
+    func test21TorStatesFailClosed() throws {
+        let app = launchApp(advanced: true, environment: ["WINNOW_E2E_TOR_FAILURE": "1"])
+        app.tabBars.buttons["Settings"].tap()
+        let toggle = app.switches["torEnabledToggle"]
+        XCTAssertTrue(scrollUntilExists(app, toggle, maxSwipes: 8))
+        XCTAssertEqual(app.staticTexts["torState"].label, "State, Stopped")
+        Screenshots.capture(app, "48-tor-stopped", testCase: self)
+        app.flipSwitch(toggle)
+        XCTAssertTrue(poll(timeout: 10, interval: 0.1, "Tor bootstrapping") {
+            app.staticTexts["torState"].label == "State, Bootstrapping"
+        })
+        Screenshots.capture(app, "49-tor-bootstrapping", testCase: self)
+        XCTAssertTrue(app.buttons["retryTorButton"].waitForExistence(timeout: 20))
+        XCTAssertEqual(app.staticTexts["torState"].label, "State, Failed")
+        XCTAssertFalse(app.buttons["refreshPeerCatalogButton"].isEnabled)
+        Screenshots.capture(app, "50-tor-failed", testCase: self)
+        app.flipSwitch(toggle)
+        XCTAssertTrue(poll(timeout: 10, interval: 0.1, "explicit Tor disable") {
+            app.staticTexts["torState"].label == "State, Stopped"
+        })
     }
 }

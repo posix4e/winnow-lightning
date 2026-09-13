@@ -13,6 +13,32 @@ import XCTest
 /// The label half of the people store, over a real file: round-trip,
 /// persistence across a reopen, removal, and the pre-labels file shape.
 final class SenderLabelStoreTests: XCTestCase {
+    func testNameOnlyLabelPersistsAndDestinationRequiresExplicitAttachment() async throws {
+        let url = tempStoreURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = PeopleStore()
+        await store.configure(storageURL: url, network: .signet)
+        let person = try await store.add(name: "Alice", payTo: nil, signerKey: nil)
+        let txid = String(repeating: "ab", count: 32)
+        try await store.labelSender(txidHex: txid, personID: person.id)
+        let reopened = PeopleStore()
+        _ = await reopened.configure(storageURL: url, network: .signet)
+        let labelled = await reopened.sender(forTxidHex: txid)
+        XCTAssertEqual(labelled?.name, "Alice")
+        XCTAssertNil(labelled?.payTo)
+        let destination = try PersonPayTo.address("tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx", network: .signet)
+        try await reopened.attachDestination(id: person.id, payTo: destination, provenance: .localFunding, source: txid)
+        let attached = await reopened.sender(forTxidHex: txid)
+        XCTAssertEqual(attached?.id, person.id)
+        XCTAssertEqual(attached?.payTo, destination)
+        XCTAssertEqual(attached?.destinationProvenance, .localFunding)
+        XCTAssertEqual(attached?.hasUnverifiedFundingDestination, true)
+        let again = PeopleStore()
+        _ = await again.configure(storageURL: url, network: .signet)
+        let persisted = await again.sender(forTxidHex: txid)
+        XCTAssertEqual(persisted?.destinationSource, txid)
+    }
+
     private func personFixture(_ byte: UInt8) throws -> (payTo: PersonPayTo, signer: String) {
         let master = try TestVaults.master(entropyByte: byte)
         let signer = try TestVaults.keyExpression(master: master)
@@ -200,6 +226,13 @@ final class SenderCandidateTests: XCTestCase {
 /// The explorer answer's strict decoding, from recorded responses — the
 /// lookup itself is never contacted from a test.
 final class EsploraSenderLookupTests: XCTestCase {
+    func testWrongNetworkDifferentTransactionAndOversizedResponsesFail() {
+        let data = Data(#"{"txid":"abcd","vin":[{"prevout":{"scriptpubkey_address":"1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH"}}]}"#.utf8)
+        XCTAssertThrowsError(try EsploraSenderLookup.parseFundingAddresses(data: data, network: .signet))
+        XCTAssertThrowsError(try EsploraSenderLookup.parseFundingAddresses(data: data, expectedTxid: "different"))
+        XCTAssertThrowsError(try EsploraSenderLookup.parseFundingAddresses(data: Data(repeating: 32, count: EsploraSenderLookup.maximumBytes + 1)))
+    }
+
     func testFundingAddressesAreDistinctInVinOrderAndSkipAddresslessInputs() throws {
         let json = """
         {

@@ -319,6 +319,12 @@ struct SendView: View {
 
     private func reviewWarnings(_ preview: AppModel.SendPreview) -> some View {
         Group {
+            if let recipient = preview.recipient, recipient.hasUnverifiedFundingDestination {
+                Section {
+                    Label("This destination was inferred from transaction funding. Winnow has not verified that it belongs to \(recipient.name). Confirm it with them before sending.", systemImage: "exclamationmark.triangle")
+                        .accessibilityIdentifier("unverifiedFundingWarning")
+                }
+            }
             if let recipient = preview.recipient, !recipient.derivesFreshAddresses {
                 Section {
                     Label("This address has been saved for reuse. Repeated payments can be linked. Ask \(recipient.name) for a fresh address or Winnow contact card.", systemImage: "eye")

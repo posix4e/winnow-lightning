@@ -80,7 +80,7 @@ struct WarnedExplorerLink: View {
             Button("Open \(url.host ?? "explorer")") { openURL(url) }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Opening \(url.host ?? "this explorer") shares your IP address and this exact \(exposedItem) with that service. Winnow does not use its response for wallet balance, history, fees, synchronization, or broadcasting.")
+            Text("Opening \(url.host ?? "this explorer") opens an external browser outside Winnow’s Tor routing protection and shares the browser’s IP address and this exact \(exposedItem) with that service. Winnow does not use its response for wallet balance, history, fees, synchronization, or broadcasting.")
         }
     }
 }
@@ -187,9 +187,31 @@ struct CopyableIdentifier: View {
 /// bring its own typography instead of being flattened into one Text view.
 private struct BundledPageView: UIViewRepresentable {
     let url: URL
+    let openExternal: (URL) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(openExternal: openExternal) }
+
+    final class Coordinator: NSObject, WKNavigationDelegate {
+        let openExternal: (URL) -> Void
+        init(openExternal: @escaping (URL) -> Void) { self.openExternal = openExternal }
+
+        func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
+                     decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void) {
+            guard let target = action.request.url, !target.isFileURL else {
+                decisionHandler(.allow)
+                return
+            }
+            decisionHandler(.cancel)
+            if action.navigationType == .linkActivated,
+               ["https", "http"].contains(target.scheme?.lowercased() ?? "") {
+                openExternal(target)
+            }
+        }
+    }
 
     func makeUIView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
+        config.defaultWebpagePreferences.allowsContentJavaScript = false
         // site.css hides the site's own nav and footer under .embedded; the
         // sheet supplies that chrome already.
         config.userContentController.addUserScript(
@@ -197,10 +219,19 @@ private struct BundledPageView: UIViewRepresentable {
                          injectionTime: .atDocumentEnd,
                          forMainFrameOnly: true))
         let view = WKWebView(frame: .zero, configuration: config)
+        view.navigationDelegate = context.coordinator
         view.isOpaque = false
         view.backgroundColor = .systemBackground
-        // read access to the whole bundle directory so the page can pull site.css
-        view.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
+        // Block subresources as well as navigations. These offline papers must
+        // never become an HTTP client outside the wallet's routing policy.
+        let rules = #"[{"trigger":{"url-filter":"^[a-zA-Z][a-zA-Z0-9+.-]*:"},"action":{"type":"block"}},{"trigger":{"url-filter":"^file:"},"action":{"type":"ignore-previous-rules"}}]"#
+        WKContentRuleListStore.default().compileContentRuleList(
+            forIdentifier: "winnow-offline-papers-v1", encodedContentRuleList: rules
+        ) { list, _ in
+            guard let list else { return } // fail closed if WebKit rejects the rules
+            view.configuration.userContentController.add(list)
+            view.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
+        }
         return view
     }
 
@@ -212,11 +243,13 @@ private struct BundledPageView: UIViewRepresentable {
 struct DesignPaperView: View {
     let resource: String
     let title: String
+    @Environment(\.openURL) private var openURL
+    @State private var externalURL: URL?
 
     var body: some View {
         Group {
             if let url = Bundle.main.url(forResource: resource, withExtension: "html") {
-                BundledPageView(url: url)
+                BundledPageView(url: url) { externalURL = $0 }
             } else {
                 ScrollView {
                     Text("The bundled copy of docs/\(resource).html could not be loaded.")
@@ -228,6 +261,17 @@ struct DesignPaperView: View {
         }
         .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
+        .alert("Open external browser?", isPresented: Binding(
+            get: { externalURL != nil }, set: { if !$0 { externalURL = nil } }
+        )) {
+            Button("Open browser") {
+                if let externalURL { openURL(externalURL) }
+                externalURL = nil
+            }
+            Button("Cancel", role: .cancel) { externalURL = nil }
+        } message: {
+            Text("Opening \(externalURL?.host ?? "this link") leaves Winnow’s routing protection. Your browser controls the connection and may reveal your IP address to the destination.")
+        }
     }
 }
 

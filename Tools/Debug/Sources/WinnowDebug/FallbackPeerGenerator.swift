@@ -1,43 +1,13 @@
 import WalletCore
 import Foundation
+import CryptoKit
 
-/// Release-path generator for the bundled mainnet fallback peers (#161), run
-/// by `scripts/generate-fallback-peers`.
-///
-/// The input is a census, not a crawl. The winnow-census CI crawls mainnet
-/// continuously — it descends from the btcnodes snapshot — and publishes a
-/// `peers.json` artifact (`--from-census` overrides where it is read from;
-/// the default is the published URL). Every clearnet entry is then
-/// re-verified *offline* against the invariants the committed list is held
-/// to: a public IP literal, the default port, one entry per netblock by the
-/// same `netblock` the pool's diversity policy uses, and a reported height
-/// within `PeerPool.staleTipTolerance` of the artifact's recorded tip in
-/// either direction — a peer ahead of the tip is not fresher, it is on
-/// another chain. An artifact that is not schema v1, or is more than a week
-/// old, is refused outright. The artifact's tor and i2p entries parse into
-/// the same model but are rendered nowhere: no transport can dial them yet.
-///
-/// `--from-crawl` keeps the pre-census input as a fallback. Candidates come
-/// from a crawl, not only from the seeds. DNS-seed results seed the dial
-/// queue — their services are unknown, so they are always dialled — and
-/// every peer that verifies is asked once, with `getaddr`, for its address
-/// book; the `addr` reply queues more candidates. Gossip arrives with each
-/// address's advertised services, so a candidate missing
-/// NODE_COMPACT_FILTERS, on a port the committed list may not carry, or not a
-/// public IP literal is skipped *before* dialling: most dials then reach a
-/// peer that could actually be listed, instead of being spent on one the
-/// handshake would refuse. The crawl is bounded by `--max-dials` so the run
-/// terminates even while gossip keeps the queue full.
-///
-/// The crawl's verification bar is not re-implemented: `PeerConnection.connect`
-/// already refuses any peer whose version does not advertise
-/// NODE_COMPACT_FILTERS, so a completed handshake *is* the check the
-/// hand-curated list was held to. The gossip pre-filter only saves dials;
-/// the handshake stays the authoritative check. Spread is enforced with the
-/// same `netblock` the pool's diversity policy uses.
-///
-/// The network part is `run`; everything it decides with is a pure function
-/// below, covered offline by `WinnowGenerateTests`.
+/// Generates release candidates from the canonical census artifact by default.
+/// The shared validator checks schema, observation age, addresses, diversity,
+/// height distance and size. Clearnet and Tor entries retain their source hash
+/// and observation date. This offline validation does not probe live peers or
+/// prove filter correctness; every selected wallet peer is checked again.
+/// Explicit --from-crawl retains the bounded live discovery path.
 enum FallbackPeerGenerator {
     /// A peer that completed the handshake, with what its version said —
     /// or, from a census artifact, an entry that re-verified offline, with
@@ -53,7 +23,7 @@ enum FallbackPeerGenerator {
         static let defaultOutput = "Sources/WalletCore/Network/Protocol/FallbackPeersGenerated.swift"
         /// Where the census artifact is read from when `--from-census` gives
         /// no URL or path: the winnow-census CI's published `peers.json`.
-        static let defaultCensusURL = "https://posix4e.github.io/winnow-census/peers.json"
+        static let defaultCensusURL = CensusCatalog.endpoint.absoluteString
 
         /// What feeds the run.
         enum Source: Equatable {
@@ -125,53 +95,49 @@ enum FallbackPeerGenerator {
     /// — the census CI did the reaching; this run decides what to trust.
     static func runCensus(_ options: Options, source: String) async throws {
         let data = try await censusData(from: source)
-        let artifact = try censusArtifact(from: data)
-        let peers = try verifiedClearnetPeers(from: artifact,
-                                              defaultPort: NetworkParams.mainnet.defaultPort,
-                                              today: Date())
-        guard peers.count >= options.floor else {
-            throw GenerateError.thinList("only \(peers.count) of the census's clearnet peers re-verified")
+        let catalog = try CensusCatalog.decode(data)
+        let peers = (catalog.networks["clearnet"] ?? []).map {
+            VerifiedPeer(endpoint: $0.endpoint, userAgent: $0.userAgent, startHeight: $0.startHeight)
         }
-        let text = render(peers, tip: artifact.tip, date: ISO8601DateFormatter().string(from: Date()),
-                          provenance: .census(artifactDate: artifact.date))
+        guard peers.count >= options.floor else { throw GenerateError.thinList("too few validated census peers") }
+        let hash = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        var text = render(peers, tip: catalog.tip, date: catalog.date + "T00:00:00Z",
+                          provenance: .census(artifactDate: catalog.date))
+        let tor = (catalog.networks["tor"] ?? []).map {
+            "        PeerEndpoint(host: \"\($0.host)\", port: \($0.port)),"
+        }.joined(separator: "\n")
+        text += """
+        // Source: \(commentSafe(source))
+        // Source SHA256: \(hash)
+        // Observation date: \(catalog.date); generated: \(ISO8601DateFormatter().string(from: Date()))
+        extension NetworkParams {
+            static let generatedMainnetTorFallbackPeers: [PeerEndpoint] = [
+        \(tor)
+            ]
+        }
+
+        """
         try Data(text.utf8).write(to: options.out, options: .atomic)
-        print("generator: wrote \(peers.count) peers from the winnow-census artifact of "
-              + "\(artifact.date) (tip \(artifact.tip)) to \(options.out.path)")
+        print("generator: wrote \(peers.count) clearnet and \(catalog.networks["tor"]?.count ?? 0) Tor candidates; observed \(catalog.date); SHA256 \(hash)")
     }
 
-    /// The artifact's bytes: fetched over http(s), or read from a file. A
-    /// URL goes to URLSession; anything else is a filesystem path.
     static func censusData(from source: String) async throws -> Data {
-        if let url = URL(string: source), let scheme = url.scheme,
-           scheme == "http" || scheme == "https" {
-            do {
-                let (data, response) = try await URLSession.shared.data(from: url)
-                guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-                    throw GenerateError.badCensus(
-                        "GET \(source) answered \((response as? HTTPURLResponse)?.statusCode ?? -1)")
-                }
-                return data
-            } catch let error as GenerateError {
-                throw error
-            } catch {
-                throw GenerateError.badCensus("GET \(source) failed: \(error.localizedDescription)")
-            }
+        if let url = URL(string: source), let scheme = url.scheme, ["http", "https"].contains(scheme) {
+            let client = RoutedHTTPClient(route: .direct)
+            defer { client.cancel() }
+            return try await client.get(url, maximumBytes: CensusCatalog.maximumBytes)
         }
-        let path = (source as NSString).expandingTildeInPath
-        guard let data = FileManager.default.contents(atPath: path) else {
-            throw GenerateError.badCensus("no census artifact at \(path)")
-        }
+        let url = URL(fileURLWithPath: (source as NSString).expandingTildeInPath)
+        let file = try FileHandle(forReadingFrom: url)
+        defer { try? file.close() }
+        let data = try file.read(upToCount: CensusCatalog.maximumBytes + 1) ?? Data()
+        guard data.count <= CensusCatalog.maximumBytes else { throw CensusCatalog.Invalid.size }
         return data
     }
 
-    /// Parse, refusing anything that is not the fixed schema-v1 shape: the
-    /// artifact is input, and input this rigid fails loud, never half-read.
     static func censusArtifact(from data: Data) throws -> CensusArtifact {
-        do {
-            return try JSONDecoder().decode(CensusArtifact.self, from: data)
-        } catch {
-            throw GenerateError.badCensus("not a schema-v1 peers.json: \(error.localizedDescription)")
-        }
+        guard data.count <= CensusCatalog.maximumBytes else { throw CensusCatalog.Invalid.size }
+        return try JSONDecoder().decode(CensusArtifact.self, from: data)
     }
 
     static func runCrawl(_ options: Options) async throws {
@@ -424,45 +390,23 @@ enum FallbackPeerGenerator {
     /// is not fresher, it is on another chain.
     static func verifiedClearnetPeers(from artifact: CensusArtifact, defaultPort: UInt16,
                                       today: Date) throws -> [VerifiedPeer] {
-        guard artifact.schemaVersion == 1 else {
-            throw GenerateError.badCensus("schemaVersion \(artifact.schemaVersion), this build parses 1")
+        let networks = Dictionary(uniqueKeysWithValues: OverlayNetwork.allCases.map { overlay in
+            (overlay.rawValue, (artifact.networks[overlay] ?? []).map {
+                CensusCatalog.Entry(host: $0.host, port: $0.port, userAgent: $0.userAgent, startHeight: $0.startHeight)
+            })
+        })
+        let catalog = try CensusCatalog(schemaVersion: artifact.schemaVersion, date: artifact.date,
+                                        tip: artifact.tip, networks: networks).validated(now: today)
+        return (catalog.networks["clearnet"] ?? []).map {
+            VerifiedPeer(endpoint: $0.endpoint, userAgent: $0.userAgent, startHeight: $0.startHeight)
         }
-        guard let artifactDay = censusDay(artifact.date) else {
-            throw GenerateError.badCensus("date \(artifact.date) is not yyyy-MM-dd")
-        }
-        let age = censusDayNumber(of: today) - artifactDay
-        guard age <= maximumCensusAgeDays else {
-            throw GenerateError.badCensus("dated \(artifact.date), \(age) days before today")
-        }
-        var blocks = Set<String>()
-        var kept: [VerifiedPeer] = []
-        for entry in artifact.networks[.clearnet] ?? [] {
-            let endpoint = PeerEndpoint(host: entry.host, port: entry.port)
-            let distance = Int64(entry.startHeight) - Int64(artifact.tip)
-            guard endpoint.port == defaultPort, let block = endpoint.netblock,
-                  abs(distance) <= PeerPool.staleTipTolerance,
-                  blocks.insert(block).inserted else { continue }
-            kept.append(VerifiedPeer(endpoint: endpoint, userAgent: entry.userAgent,
-                                     startHeight: entry.startHeight))
-        }
-        return kept
     }
 
     /// A yyyy-MM-dd day as a GMT day number, or nil when the text is not a
     /// real calendar day. The artifact's `date` is a day, not a timestamp,
     /// and days compare cleanly only in one time zone.
     static func censusDay(_ text: String) -> Int? {
-        let parts = text.split(separator: "-", omittingEmptySubsequences: false)
-        guard parts.count == 3, parts[0].count == 4, parts[1].count == 2, parts[2].count == 2,
-              let year = Int(parts[0]), let month = Int(parts[1]), let day = Int(parts[2]) else {
-            return nil
-        }
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = TimeZone(identifier: "GMT")!
-        guard let date = calendar.date(from: DateComponents(year: year, month: month, day: day)),
-              calendar.component(.month, from: date) == month,
-              calendar.component(.day, from: date) == day else { return nil }
-        return censusDayNumber(of: date)
+        CensusCatalog.day(text)
     }
 
     /// Days since the epoch, GMT. Dividing a timestamp by the day length is
@@ -508,30 +452,14 @@ enum FallbackPeerGenerator {
         }
         return """
         // GENERATED FILE — edit by regenerating, not by hand.
-        //
-        // scripts/generate-fallback-peers rewrites this file on the release path
-        // (#161) with `winnow-debug generate fallback-peers` (Tools/Debug). The input
-        // is the winnow-census CI's peers.json — a crawler that descends from the
-        // btcnodes snapshot and re-crawls mainnet continuously, so this list inherits
-        // the census's view of the network rather than the generating host's. Every
-        // clearnet entry is re-verified offline before it is written: public IP
-        // literal, port 8333, one per /16 by the same `PeerEndpoint.netblock` the
-        // pool's diversity policy uses, and a reported height within 100 of the
-        // artifact's recorded tip in either direction (ahead of the tip is another
-        // chain). With no usable artifact, `--from-crawl` crawls mainnet from the DNS
-        // seeds instead, dialling candidates pre-filtered by their advertised
-        // NODE_COMPACT_FILTERS bit with the same PeerConnection the app uses, whose
-        // handshake already refuses any peer not advertising that bit.
-        //
-        // The committed copy is the last verified generation and the build's fallback;
-        // a release regenerates so freshness tracks releases rather than memory.
-        // `PeerPolicyTests` validates this file on every CI run.
-        //
-        // What this is not, recorded so it is not over-claimed: the list inherits
-        // whatever the census — or, from a crawl, the generating host — could see,
-        // and generation is not reproducible: two runs give different lists. The
-        // generation log is kept as a release artifact so the list is auditable even
-        // though it is not reproducible.
+        // scripts/generate-fallback-peers validates the census artifact with the
+        // same policy as manual refresh. Selection from a fixed artifact is
+        // deterministic; the source hash and observation date identify evidence.
+        // Public clearnet endpoints use /16 IPv4 or /32 IPv6 diversity. Entries
+        // must report heights within 100 blocks of the reference tip. This does
+        // not establish filter correctness or that an endpoint is still online.
+        // --from-crawl instead performs bounded discovery and live handshakes.
+        // PeerPolicyTests checks the bundled list on every CI run.
         //
         \(generation)
         extension NetworkParams {

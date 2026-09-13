@@ -229,10 +229,10 @@ struct WinnowGenerateTests {
 
     @Test("anything that is not the fixed schema-v1 shape is refused, not half-read")
     func censusMalformed() {
-        #expect(throws: GenerateError.self) {
+        #expect(throws: (any Error).self) {
             _ = try FallbackPeerGenerator.censusArtifact(from: Data("not json".utf8))
         }
-        #expect(throws: GenerateError.self) {
+        #expect(throws: (any Error).self) {
             _ = try FallbackPeerGenerator.censusArtifact(from: Data("{}".utf8))
         }
         // An unknown network key: the schema is clearnet/tor/i2p, exactly.
@@ -240,7 +240,7 @@ struct WinnowGenerateTests {
         {"schemaVersion": 1, "date": "2026-09-12", "tip": 966774,
          "networks": {"clearnet": [], "fakenet": []}}
         """
-        #expect(throws: GenerateError.self) {
+        #expect(throws: (any Error).self) {
             _ = try FallbackPeerGenerator.censusArtifact(from: Data(unknownNetwork.utf8))
         }
     }
@@ -252,7 +252,7 @@ struct WinnowGenerateTests {
         defer { try? FileManager.default.removeItem(at: file) }
         try Data("{}".utf8).write(to: file)
         #expect(try await FallbackPeerGenerator.censusData(from: file.path) == Data("{}".utf8))
-        await #expect(throws: GenerateError.self) {
+        await #expect(throws: (any Error).self) {
             _ = try await FallbackPeerGenerator.censusData(from: file.path + ".missing")
         }
     }
@@ -262,30 +262,29 @@ struct WinnowGenerateTests {
         let tolerance = Int32(PeerPool.staleTipTolerance)
         let tip: Int32 = 966_774
         let checked = try FallbackPeerGenerator.verifiedClearnetPeers(from: artifact(tip: tip, clearnet: [
-            entry("47.206.253.100"),                       // kept
-            entry("47.206.1.1"),                           // second in its /16
-            entry("74.209.75.75", port: 18_333),           // the list is :8333 only
-            entry("node.example.com"),                     // no hostnames
-            entry("192.168.1.10"),                         // not a public literal
-            entry("9.9.9.9", height: tip - tolerance),     // kept: exactly at the floor
-            entry("8.8.8.8", height: tip - tolerance - 1), // stale
-            entry("1.1.1.1", height: tip + tolerance),     // kept: exactly at the ceiling
-            entry("2.2.2.2", height: tip + tolerance + 1), // ahead of tip: another chain
-            entry("2001:478:1:2::1"),                      // kept: v6 literal
-        ]), defaultPort: 8_333, today: today("2026-09-13"))
-        #expect(checked.map(\.endpoint.host) == ["47.206.253.100", "9.9.9.9", "1.1.1.1", "2001:478:1:2::1"])
-        #expect(checked.allSatisfy { $0.userAgent == "/Satoshi:31.1.0/" })
+            entry("47.206.253.100"), entry("9.9.9.9", height: tip - tolerance),
+            entry("1.1.1.1", height: tip + tolerance), entry("2001:478:1:2::1"),
+        ]), defaultPort: 8333, today: today("2026-09-13"))
+        #expect(checked.map(\.endpoint.host) == ["1.1.1.1", "2001:478:1:2::1", "47.206.253.100", "9.9.9.9"])
+        for bad in [entry("47.206.1.1"), entry("74.209.75.75", port: 18333), entry("node.example.com"),
+                    entry("192.168.1.10"), entry("8.8.8.8", height: tip - tolerance - 1),
+                    entry("2.2.2.2", height: tip + tolerance + 1)] {
+            #expect(throws: CensusCatalog.Invalid.self) {
+                try FallbackPeerGenerator.verifiedClearnetPeers(from: artifact(tip: tip, clearnet: [entry("47.206.253.100"), bad]),
+                    defaultPort: 8333, today: today("2026-09-13"))
+            }
+        }
     }
 
     @Test("a census artifact that is not schema v1, dated wrong, or too old is refused")
     func censusRefusals() throws {
         let peers = [entry("47.206.253.100")]
         let recent = try today("2026-09-13")
-        #expect(throws: GenerateError.self) {
+        #expect(throws: (any Error).self) {
             _ = try FallbackPeerGenerator.verifiedClearnetPeers(
                 from: artifact(clearnet: peers, schemaVersion: 2), defaultPort: 8_333, today: recent)
         }
-        #expect(throws: GenerateError.self) {
+        #expect(throws: (any Error).self) {
             _ = try FallbackPeerGenerator.verifiedClearnetPeers(
                 from: artifact(date: "not-a-date", clearnet: peers), defaultPort: 8_333, today: recent)
         }
@@ -295,13 +294,14 @@ struct WinnowGenerateTests {
         // Seven days old is the most an artifact may be; eight is refused.
         _ = try FallbackPeerGenerator.verifiedClearnetPeers(
             from: artifact(date: "2026-09-06", clearnet: peers), defaultPort: 8_333, today: recent)
-        #expect(throws: GenerateError.self) {
+        #expect(throws: (any Error).self) {
             _ = try FallbackPeerGenerator.verifiedClearnetPeers(
                 from: artifact(date: "2026-09-05", clearnet: peers), defaultPort: 8_333, today: recent)
         }
-        // An artifact from the future is fresher than today, not older.
-        _ = try FallbackPeerGenerator.verifiedClearnetPeers(
-            from: artifact(date: "2026-09-14", clearnet: peers), defaultPort: 8_333, today: recent)
+        #expect(throws: CensusCatalog.Invalid.future) {
+            try FallbackPeerGenerator.verifiedClearnetPeers(
+                from: artifact(date: "2026-09-14", clearnet: peers), defaultPort: 8_333, today: recent)
+        }
     }
 
     @Test("the census generation line names the artifact and its tip")

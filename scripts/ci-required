@@ -9,8 +9,8 @@ import sys
 
 
 PATTERNS = {
-    "ci": r"^(Sources/|Tools/|Tests/|AppTests/|UITests/|Package\.(swift|resolved)$|project\.yml$|\.swiftlint\.yml$|scripts/|\.github/workflows/(ci|node-tests)\.yml$|docs/(site\.css|mobile\.html|read-side\.html|write-side\.html|vaults\.html|import\.html)$)",
-    "node-tests": r"^(Sources/|Tests/|AppTests/|UITests/|Package\.(swift|resolved)$|project\.yml$|scripts/(signet-fixture|ios-simulator|install-xcodegen|ci-required|tests/test_ci_required\.py)$|\.github/workflows/node-tests\.yml$)",
+    "ci": r"^(TorBridge/|Sources/|Tools/|Tests/|AppTests/|UITests/|Package\.(swift|resolved)$|project\.yml$|\.swiftlint\.yml$|scripts/|\.github/workflows/(ci|node-tests)\.yml$|docs/(site\.css|mobile\.html|read-side\.html|write-side\.html|vaults\.html|import\.html)$)",
+    "node-tests": r"^(TorBridge/|Sources/|Tests/|AppTests/|UITests/|Package\.(swift|resolved)$|project\.yml$|scripts/(signet-fixture|ios-simulator|install-xcodegen|ci-required|tests/test_ci_required\.py)$|\.github/workflows/node-tests\.yml$)",
 }
 JOBS = {
     "ci": {"complexity", "package", "app-build", "package-tests-intel"},

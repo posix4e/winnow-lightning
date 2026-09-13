@@ -767,7 +767,7 @@ struct PeerPoolTests {
         await pool.stop()
         #expect(try Self.storedPeers(file).contains(goodEndpoint),
                 "stop persists the good peers before the reset")
-        await pool.forgetKnownGood()
+        try await pool.forgetKnownGood()
         #expect(!FileManager.default.fileExists(atPath: file.path),
                 "the persisted peers file is forgotten")
         #expect(await pool.isCoolingDown(goodEndpoint) == false,

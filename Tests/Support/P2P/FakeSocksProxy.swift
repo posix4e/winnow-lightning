@@ -10,15 +10,21 @@ public actor FakeSocksProxy {
     public private(set) var port: UInt16 = 0
     public private(set) var requestedHost: String?
     public private(set) var requestedPort: UInt16?
+    public private(set) var requestedHosts: [String] = []
     private let upstreamPort: UInt16?
     private let refuseWith: UInt8?
+    private let httpResponse: Data?
+    private let httpResponsesByHost: [String: Data]
     private var connections: [NWConnection] = []
 
     /// `upstreamPort` nil with `refuseWith` set answers every CONNECT with
     /// that reply code and closes.
-    public init(upstreamPort: UInt16?, refuseWith: UInt8? = nil) {
+    public init(upstreamPort: UInt16?, refuseWith: UInt8? = nil, httpResponse: Data? = nil,
+                httpResponsesByHost: [String: Data] = [:]) {
         self.upstreamPort = upstreamPort
         self.refuseWith = refuseWith
+        self.httpResponse = httpResponse
+        self.httpResponsesByHost = httpResponsesByHost
     }
 
     public var endpoint: PeerEndpoint { PeerEndpoint(host: "127.0.0.1", port: port) }
@@ -64,10 +70,17 @@ public actor FakeSocksProxy {
             let name = try await Self.read(client, exactly: Int(length[0]))
             let portBytes = try await Self.read(client, exactly: 2)
             requestedHost = String(decoding: name, as: UTF8.self)
+            requestedHosts.append(String(decoding: name, as: UTF8.self))
             requestedPort = UInt16(portBytes[0]) << 8 | UInt16(portBytes[1])
             if let refuseWith {
                 try await Self.write(client, Data([0x05, refuseWith, 0x00, 0x01, 0, 0, 0, 0, 0, 0]))
                 client.cancel()
+                return
+            }
+            if let httpResponse = httpResponsesByHost[requestedHost ?? ""] ?? httpResponse {
+                try await Self.write(client, Data([0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]))
+                _ = try await Self.read(client, exactly: 1)
+                try await Self.write(client, httpResponse)
                 return
             }
             guard let upstreamPort, let port = NWEndpoint.Port(rawValue: upstreamPort) else { client.cancel(); return }

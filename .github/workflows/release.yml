@@ -56,6 +56,12 @@ jobs:
           printf 'TESTFLIGHT_MARKETING_VERSION=%s\n' "$VERSION" >> "$GITHUB_ENV"
           printf 'TESTFLIGHT_BUILD_NUMBER=%s\n' "$GITHUB_RUN_NUMBER" >> "$GITHUB_ENV"
 
+      - name: Build pinned app Tor framework
+        run: |
+          scripts/install-rust
+          export PATH="$HOME/.cargo/bin:$PATH"
+          scripts/build-tor-bridge
+
       - name: Install pinned XcodeGen
         run: scripts/install-xcodegen
 

@@ -235,6 +235,7 @@ private struct PaymentDetailView: View {
     @Environment(AppModel.self) private var model
     @State private var editing: AppModel.PaymentRecipient?
     @State private var labelingSender = false
+    @State private var attachingDestination: PersonRecord?
     @State private var showFeeBump = false
     @State private var loading = false
     @State private var error: String?
@@ -286,6 +287,10 @@ private struct PaymentDetailView: View {
         }
         .navigationTitle("Payment")
         .sheet(item: $editing) { AddPersonView(person: $0.person, address: $0.address) }
+        .sheet(item: $attachingDestination) { person in
+            AddPersonView(person: person, txid: txid,
+                          senderCandidates: entry.map { model.senderCandidates(for: $0) } ?? [])
+        }
         .sheet(isPresented: $labelingSender) {
             AddPersonView(txid: txid,
                           senderCandidates: entry.map { model.senderCandidates(for: $0) } ?? [])
@@ -308,6 +313,11 @@ private struct PaymentDetailView: View {
                 if sender.payTo != nil {
                     Button("Send to \(sender.name)") { sendToPerson(sender.id) }
                         .accessibilityIdentifier("sendToSenderButton")
+                } else {
+                    Text("This label has no payment destination.")
+                    Button("Add destination for \(sender.name)") { attachingDestination = sender }
+                        .accessibilityIdentifier("attachSenderDestinationButton")
+                        .disabled(model.peopleStorageNotice != nil)
                 }
                 Button("Change sender") { labelingSender = true }
                     .accessibilityIdentifier("changeSenderButton")

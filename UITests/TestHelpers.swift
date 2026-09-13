@@ -100,6 +100,7 @@ extension XCTestCase {
     /// simulator), and every dismissal invariant in the app keys on that
     /// phase — so a test that skips the transition is not exercising the
     /// invariant, just racing it.
+    @MainActor
     func backgroundAndReturn(_ app: XCUIApplication) {
         // Not a home-press: on the iOS 26.5 simulator a home-press leaves the
         // scene fully foregrounded, so the `.background` phase the dismissal

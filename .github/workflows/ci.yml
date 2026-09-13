@@ -158,6 +158,12 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Build pinned app Tor framework
+        run: |
+          scripts/install-rust
+          export PATH="$HOME/.cargo/bin:$PATH"
+          scripts/build-tor-bridge
+
       - name: Install pinned XcodeGen
         run: scripts/install-xcodegen
       - name: Generate Xcode project

@@ -47,6 +47,17 @@ public struct SeedResolver: Sendable {
         }
     }
 
+    public static func routed(client: RoutedHTTPClient) -> SeedResolver {
+        .live(fetchJSON: { name, type in
+            var parts = URLComponents(url: defaultDoHEndpoint, resolvingAgainstBaseURL: false)!
+            parts.queryItems = [URLQueryItem(name: "name", value: name), URLQueryItem(name: "type", value: type)]
+            return try await client.get(parts.url!, maximumBytes: 128 * 1024, accept: "application/dns-json")
+        }, systemResolve: { host, port in
+            guard client.route == .direct, !Task.isCancelled else { return [] }
+            return getaddrinfo(host: host, port: port)
+        })
+    }
+
     public func resolve(host: String, port: UInt16, allowPrivate: Bool) async -> [PeerEndpoint] {
         await lookup(host, port, allowPrivate)
     }
@@ -76,6 +87,7 @@ public struct SeedResolver: Sendable {
         let fromDoH = await dohHosts(name: host, fetchJSON: fetchJSON)
         let doh = endpoints(hosts: fromDoH, port: port, allowPrivate: allowPrivate)
         if !doh.isEmpty { return doh }
+        guard !Task.isCancelled else { return [] }
         let system = systemResolve(host, port).map(\.host)
         return endpoints(hosts: system, port: port, allowPrivate: allowPrivate)
     }
