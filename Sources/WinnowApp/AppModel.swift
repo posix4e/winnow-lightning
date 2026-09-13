@@ -255,6 +255,9 @@ final class AppModel {
         }
     }
     private(set) var recipientByScript: [Data: PersonRecord] = [:]
+    /// Txid display hex → person id, mirrored from the people store so a
+    /// received payment can name its sender without an actor hop.
+    private(set) var senderByTxid: [String: String] = [:]
     private(set) var sharedSavings: [SharedSavings] = []
     /// Set when `people.json` could not be read. Shown in the recipient picker;
     /// the store refuses mutations meanwhile. Never blocks boot.
@@ -292,7 +295,9 @@ final class AppModel {
     private(set) var explorerProvider: ExplorerProvider
 
     /// The warned external block explorer. Presets cover the common sites;
-    /// `custom` uses whatever Esplora-compatible URL the owner typed.
+    /// `custom` uses whatever Esplora-compatible URL the owner typed. It is
+    /// contacted directly only on an explicit, warned tap — "Infer sender"
+    /// on a received payment, or an opened link — never in the background.
     enum ExplorerProvider: String, CaseIterable {
         case blockstream
         case mempool
@@ -922,6 +927,7 @@ final class AppModel {
         status = snapshot
         vaults = await vaultStore.all
         people = await peopleStore.all
+        senderByTxid = await peopleStore.senderLabels
         journalSnapshotIfChanged()
     }
 
@@ -1778,6 +1784,7 @@ final class AppModel {
             peopleStorageNotice = nil
         }
         people = await peopleStore.all
+        senderByTxid = await peopleStore.senderLabels
         vaults = await vaultStore.all
     }
 
@@ -1858,6 +1865,60 @@ final class AppModel {
     func updateRecipient(id: String, name: String? = nil, saved: Bool) async throws {
         try await peopleStore.updateRecipient(id: id, name: name, saved: saved)
         people = await peopleStore.all
+    }
+
+    /// The person a received payment is labelled as coming from, if anyone.
+    func receivedSender(_ entry: HistoryEntry) -> PersonRecord? {
+        guard let personID = senderByTxid[entry.txid.displayHex] else { return nil }
+        return people.first { $0.id == personID }
+    }
+
+    /// One address a received payment was funded from, reconstructed from
+    /// what the transaction's own inputs reveal (WalletCore's
+    /// `FundingSources`). An input that reveals nothing — taproot key-path,
+    /// coinbase, bare legacy scripts — yields no candidate.
+    struct SenderCandidate: Identifiable, Equatable {
+        /// The input index the address was reconstructed from.
+        var id: Int
+        var address: String
+        var scriptPubKey: Data
+        /// How the spent script was reconstructed.
+        var kind: FundingSources.Revelation
+    }
+
+    func senderCandidates(for entry: HistoryEntry) -> [SenderCandidate] {
+        Self.senderCandidates(entry, network: network)
+    }
+
+    /// Pure, like `paymentRecipients`: the distinct revealed funding
+    /// scripts in first-seen input order, each with its rendered address.
+    /// Empty when the raw transaction is missing or undecodable, or when no
+    /// input reveals a renderable script.
+    static func senderCandidates(_ entry: HistoryEntry, network: BitcoinNetwork) -> [SenderCandidate] {
+        guard let transaction = try? entry.transaction() else { return [] }
+        var seen: Set<Data> = []
+        return FundingSources.sources(of: transaction).compactMap { source in
+            guard let script = source.scriptPubKey, seen.insert(script).inserted,
+                  let address = AddressDecoder.address(for: script, network: network)
+            else { return nil }
+            return SenderCandidate(id: source.inputIndex, address: address,
+                                   scriptPubKey: script, kind: source.revelation)
+        }
+    }
+
+    /// Labels who a received payment came from. The store refuses unknown
+    /// people; the mirror follows it.
+    func labelReceivedSender(txid: Data, personID: String) async throws {
+        try await peopleStore.labelSender(txidHex: txid.displayHex, personID: personID)
+        people = await peopleStore.all
+        senderByTxid = await peopleStore.senderLabels
+        e2e?.journal("person.senderLabeled", fields: ["txid": txid.displayHex, "personID": personID])
+    }
+
+    func removeReceivedSenderLabel(txid: Data) async {
+        await peopleStore.removeSenderLabel(txidHex: txid.displayHex)
+        people = await peopleStore.all
+        senderByTxid = await peopleStore.senderLabels
     }
 
     struct PaymentRecipient: Identifiable {
@@ -2271,9 +2332,10 @@ final class AppModel {
         defaults.set(provider.rawValue, forKey: DefaultsKey.explorerProvider(network))
     }
 
-    /// The selected external block-explorer website. Winnow never contacts it
-    /// in the background; URLs derived here are opened only after a user taps
-    /// a link and accepts the privacy warning.
+    /// The selected external block-explorer website. Winnow contacts it
+    /// directly only when the user taps "Infer sender" on a received
+    /// payment, after the privacy warning; URLs derived here open only
+    /// after a tap accepts the same warning. Never in the background.
     var esploraBaseURL: URL {
         Self.explorerBaseURL(provider: explorerProvider,
                              customURLString: esploraURLString, network: network)
@@ -2315,6 +2377,19 @@ final class AppModel {
         esploraBaseURL
             .appending(path: "address")
             .appending(path: address)
+    }
+
+    /// The one direct explorer fetch: the funding addresses of `txid`,
+    /// resolved at the selected explorer. Called only from the received
+    /// payment's "Infer sender" action, after its privacy warning — never
+    /// in the background, never retried, never cached.
+    func lookupSenderOnline(txid: Data) async throws -> [String] {
+        let addresses = try await EsploraSenderLookup.fundingAddresses(txid: txid, baseURL: esploraBaseURL)
+        e2e?.journal("sender.lookupOnline", fields: [
+            "txid": txid.displayHex,
+            "explorer": esploraBaseURL.host ?? "",
+        ])
+        return addresses
     }
 
     // MARK: - Storage

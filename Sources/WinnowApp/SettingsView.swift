@@ -137,7 +137,7 @@ struct SettingsView: View {
                 } header: {
                     Text("External block explorer")
                 } footer: {
-                    Text("This is a link destination only. Winnow never contacts it for balances, history, fees, synchronization, or broadcasting. Tapping an address or transaction shows a privacy warning before opening the selected website. blockstream.info has no signet explorer, so that preset opens mempool.space while on signet.")
+                    Text("This is a link destination only. Winnow never contacts it for balances, history, fees, synchronization, or broadcasting. Tapping an address or transaction shows a privacy warning before opening the selected website. blockstream.info has no signet explorer, so that preset opens mempool.space while on signet. Opening a link, or tapping \"Infer sender\" on a received payment, contacts the selected website and shows a privacy warning first.")
                 }
                 }
 

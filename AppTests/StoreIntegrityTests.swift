@@ -154,6 +154,13 @@ private func vaultStoreFixture(
         mutate: { try await store.advanceReceiveIndex(id: record.id) })
 }
 
+/// The people file's envelope as a test reads it back: the records plus
+/// the sender-label map added after the file was a bare array of people.
+private struct PeopleFileProbe: Decodable {
+    var people: [PersonRecord]
+    var senderByTxid: [String: String]
+}
+
 /// The people store as the shapes see it. Its first persisting mutation is
 /// adding somebody, so `mutate` adds `newcomer`.
 private func peopleStoreFixture(
@@ -500,7 +507,7 @@ final class PeopleStoreSecurityTests: XCTestCase {
         } catch PeopleStorageError.nothingToSave {}
         let records = await store.all
         XCTAssertEqual(records.count, 1)
-        XCTAssertEqual(try JSONDecoder().decode([PersonRecord].self, from: Data(contentsOf: url)), records)
+        XCTAssertEqual(try JSONDecoder().decode(PeopleFileProbe.self, from: Data(contentsOf: url)).people, records)
         XCTAssertTrue(String(decoding: try Data(contentsOf: url), as: UTF8.self).contains("/<0;1>/*"),
                       "the file keeps key expressions readable")
     }
