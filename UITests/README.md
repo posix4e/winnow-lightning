@@ -22,3 +22,8 @@ uploads the result bundle, screenshots, and timing observations.
 [The testing guide](../docs/testing.html) explains those artifacts and limits.
 Screenshots do not turn a failed assertion into a pass; simulator evidence does
 not establish physical-device behavior.
+
+The receive journey asks for a local address label, rotates to a blank address,
+relaunches, then mines a payment to the older address and checks its note in
+history and payment details. The prompt and labeled payment have asserted
+screenshots; the mempool journey also exercises explicitly skipping a label.
