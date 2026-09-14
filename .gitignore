@@ -23,3 +23,7 @@ xcuserdata/
 
 # Local Python checks
 __pycache__/
+
+TorBridge/target/
+TorBridge/build/
+TorBridge/target-proof/

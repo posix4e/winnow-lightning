@@ -236,9 +236,15 @@ public struct HistoryEntry: Equatable, Sendable, Codable {
     /// The payment's outputs, authenticated by txid. Witnesses are not needed
     /// for displaying recipients. Older history loads this on demand.
     public var rawTransaction: Data?
+    /// The distinct funding scripts the inputs reveal (`FundingSources`),
+    /// computed while the full transaction — witnesses included — is in hand,
+    /// so received payments can name a funding address without keeping the
+    /// witnesses around. Empty for older entries until details reload.
+    public var fundingScripts: [Data]
 
     public init(txid: Data, height: UInt32, received: Int64, spent: Int64,
-                fee: Int64? = nil, replacedBy: Data? = nil, rawTransaction: Data? = nil) {
+                fee: Int64? = nil, replacedBy: Data? = nil, rawTransaction: Data? = nil,
+                fundingScripts: [Data] = []) {
         self.txid = txid
         self.height = height
         self.received = received
@@ -246,6 +252,7 @@ public struct HistoryEntry: Equatable, Sendable, Codable {
         self.fee = fee
         self.replacedBy = replacedBy
         self.rawTransaction = rawTransaction
+        self.fundingScripts = fundingScripts
     }
 
     public func transaction() throws -> Transaction? {
@@ -265,7 +272,7 @@ public struct HistoryEntry: Equatable, Sendable, Codable {
         return transaction
     }
 
-    private enum CodingKeys: String, CodingKey { case txid, height, received, spent, fee, replacedBy, rawTransaction }
+    private enum CodingKeys: String, CodingKey { case txid, height, received, spent, fee, replacedBy, rawTransaction, fundingScripts }
 
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -289,7 +296,8 @@ public struct HistoryEntry: Equatable, Sendable, Codable {
                   spent: try container.decode(Int64.self, forKey: .spent),
                   fee: try container.decodeIfPresent(Int64.self, forKey: .fee),
                   replacedBy: replacedBy,
-                  rawTransaction: try container.decodeIfPresent(Data.self, forKey: .rawTransaction))
+                  rawTransaction: try container.decodeIfPresent(Data.self, forKey: .rawTransaction),
+                  fundingScripts: try container.decodeIfPresent([Data].self, forKey: .fundingScripts) ?? [])
         _ = try transaction()
     }
 
@@ -302,6 +310,7 @@ public struct HistoryEntry: Equatable, Sendable, Codable {
         try container.encodeIfPresent(fee, forKey: .fee)
         try container.encodeIfPresent(replacedBy?.displayHex, forKey: .replacedBy)
         try container.encodeIfPresent(rawTransaction, forKey: .rawTransaction)
+        if !fundingScripts.isEmpty { try container.encode(fundingScripts, forKey: .fundingScripts) }
     }
 }
 
@@ -740,6 +749,7 @@ public actor Wallet {
         guard let index = state.history.firstIndex(where: { $0.txid == transaction.txid }) else { return }
         var updated = state
         updated.history[index].rawTransaction = transaction.serialized(includeWitness: false)
+        updated.history[index].fundingScripts = FundingSources.fundingScripts(of: transaction)
         _ = try updated.history[index].transaction()
         try persist(updated)
         state = updated
@@ -937,10 +947,12 @@ public actor Wallet {
             // Known pending send (height 0) reaching confirmation.
             state.history[existing].height = height
             state.history[existing].rawTransaction = tx.serialized(includeWitness: false)
+            state.history[existing].fundingScripts = FundingSources.fundingScripts(of: tx)
         } else {
             state.history.append(HistoryEntry(txid: txid, height: height,
                                               received: received, spent: spent, fee: fee,
-                                              rawTransaction: tx.serialized(includeWitness: false)))
+                                              rawTransaction: tx.serialized(includeWitness: false),
+                                              fundingScripts: FundingSources.fundingScripts(of: tx)))
         }
         state.pendingSends.removeAll { $0.txid == txid }
     }
@@ -1231,7 +1243,8 @@ public actor Wallet {
                                           received: prepared.change?.amount ?? 0,
                                           spent: prepared.selected.reduce(0) { $0 + $1.amount },
                                           fee: prepared.fee,
-                                          rawTransaction: signed.serialized(includeWitness: false)))
+                                          rawTransaction: signed.serialized(includeWitness: false),
+                                          fundingScripts: FundingSources.fundingScripts(of: signed)))
         updated.pendingSends.append(PendingSend(
             rawTransaction: signed.serialized(includeWitness: true), selected: prepared.selected,
             changeIndex: prepared.change == nil ? nil : prepared.changeIndex,
@@ -1341,7 +1354,8 @@ public actor Wallet {
         updated.history.append(HistoryEntry(
             txid: signed.txid, height: 0, received: prepared.change?.amount ?? 0,
             spent: prepared.selected.reduce(0) { $0 + $1.amount }, fee: prepared.built.fee,
-            rawTransaction: signed.serialized(includeWitness: false)))
+            rawTransaction: signed.serialized(includeWitness: false),
+            fundingScripts: FundingSources.fundingScripts(of: signed)))
         updated.pendingSends.remove(at: pendingIndex)
         updated.pendingSends.append(PendingSend(
             rawTransaction: signed.serialized(includeWitness: true), selected: prepared.selected,

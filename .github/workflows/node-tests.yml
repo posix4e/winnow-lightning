@@ -24,6 +24,10 @@ on:
         required: true
         type: boolean
 
+defaults:
+  run:
+    shell: bash --noprofile --norc -e -o pipefail {0}
+
 permissions:
   contents: read
 
@@ -81,7 +85,9 @@ jobs:
       - name: Sweep a fixture left by an interrupted run
         run: |
           pkill -f 'bitcoind -datadir=.*/winnow-signet-' || true
-          echo "WINNOW_DATADIR=$RUNNER_TEMP/winnow-signet-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+          RESULTS_DIR=$(mktemp -d "$RUNNER_TEMP/winnow-evidence-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB-XXXXXX")
+          echo "RESULTS_DIR=$RESULTS_DIR" >> "$GITHUB_ENV"
+          echo "WINNOW_DATADIR=$RESULTS_DIR/winnow-signet-fixture" >> "$GITHUB_ENV"
 
       - name: Start this run's isolated fixture
         run: |
@@ -107,7 +113,7 @@ jobs:
         run: |
           set -o pipefail
           swift test --filter DifferentialTests --no-parallel \
-            2>&1 | tee "$RUNNER_TEMP/differential.log"
+            2>&1 | tee "$RESULTS_DIR/differential.log"
 
       - name: Stop this run's fixture
         if: always()
@@ -121,17 +127,29 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: node-differential-${{ github.run_id }}
-          path: ${{ runner.temp }}/differential.log
+          path: ${{ env.RESULTS_DIR }}/differential.log
           if-no-files-found: error
           retention-days: 14
 
   ui:
+    name: ui-${{ matrix.device }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - device: iPhone
+            runner: [self-hosted, macOS, btc-swift, node-e2e]
+          # The Intel VM's iPad compositor aborts in CA::OGL::push_surface
+          # during lifecycle tests. Keep the full journey on native arm64;
+          # iPhone and package lanes retain Intel coverage.
+          - device: iPad
+            runner: macos-latest
     needs: changes
     if: >-
       needs.changes.outputs.required == 'true'
       && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
       && (contains('pull_request push schedule', github.event_name) || inputs.confirm_dedicated_fixture)
-    runs-on: [self-hosted, macOS, btc-swift, node-e2e]
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -139,12 +157,23 @@ jobs:
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
+      - name: Prepare the hosted Apple silicon fixture tools
+        if: matrix.device == 'iPad'
+        run: |
+          test "$(uname -m)" = arm64
+          brew install bitcoin
+          bitcoin-cli --version
+          sw_vers
+          xcodebuild -version
+
       - name: Stop simulator miners and fixtures left by an interrupted run
         run: |
           xcrun simctl shutdown all || true
           pkill -f WinnowAppUITests-Runner || true
           pkill -f 'bitcoind -datadir=.*/winnow-signet-' || true
-          echo "WINNOW_DATADIR=$RUNNER_TEMP/winnow-signet-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+          RESULTS_DIR=$(mktemp -d "$RUNNER_TEMP/winnow-evidence-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB-XXXXXX")
+          echo "RESULTS_DIR=$RESULTS_DIR" >> "$GITHUB_ENV"
+          echo "WINNOW_DATADIR=$RESULTS_DIR/winnow-signet-fixture" >> "$GITHUB_ENV"
 
       - name: Start this run's isolated fixture
         run: |
@@ -163,20 +192,35 @@ jobs:
           bitcoin-cli -datadir="$WINNOW_DATADIR" -rpcport="$WINNOW_RPC_PORT" getblockchaininfo \
             | python3 -c 'import json,sys; info=json.load(sys.stdin); assert info["chain"] == "signet" and info["blocks"] == 0, "expected a fresh signet fixture"'
 
+      - name: Python with standard TOML support
+        run: |
+          if ! brew list --versions python@3.12 >/dev/null 2>&1; then
+            brew install python@3.12
+          fi
+          python_prefix="$(brew --prefix python@3.12)"
+          "$python_prefix/bin/python3.12" -c 'import tomllib'
+          echo "$python_prefix/libexec/bin" >> "$GITHUB_PATH"
+
+      - name: Build pinned app Tor framework
+        run: |
+          scripts/install-rust
+          export PATH="$HOME/.cargo/bin:$PATH"
+          scripts/build-tor-bridge
+
       - name: Install pinned XcodeGen
         run: scripts/install-xcodegen
 
       - name: Generate project and simulator configuration
         run: |
           xcodegen
-          echo "SIMULATOR_ID=$(scripts/ios-simulator)" >> "$GITHUB_ENV"
-          mkdir -p "$RUNNER_TEMP/node-screenshots"
+          echo "SIMULATOR_ID=$(scripts/ios-simulator '${{ matrix.device }}')" >> "$GITHUB_ENV"
+          mkdir -p "$RESULTS_DIR/node-screenshots"
           {
             echo "WINNOW_NODE_HOST=$WINNOW_NODE_HOST"
             echo "WINNOW_P2P_PORT=$WINNOW_P2P_PORT"
             echo "WINNOW_RPC_PORT=$WINNOW_RPC_PORT"
             echo "WINNOW_DATADIR=$WINNOW_DATADIR"
-            echo "WINNOW_SCREENSHOT_DIR=$RUNNER_TEMP/node-screenshots"
+            echo "WINNOW_SCREENSHOT_DIR=$RESULTS_DIR/node-screenshots"
           } > "$HOME/.winnow-node.env"
 
       - name: App UI tests
@@ -185,10 +229,10 @@ jobs:
           xcodebuild test -project WinnowApp.xcodeproj -scheme WinnowApp \
             -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
             -derivedDataPath "$RUNNER_TEMP/winnow-node-app" \
-            -resultBundlePath "$RUNNER_TEMP/NodeUI.xcresult" \
+            -resultBundlePath "$RESULTS_DIR/NodeUI.xcresult" \
             -only-testing:WinnowAppUITests \
             -skipPackagePluginValidation -skipMacroValidation \
-            2>&1 | tee "$RUNNER_TEMP/node-ui.log"
+            2>&1 | tee "$RESULTS_DIR/node-ui.log"
 
       - name: Stop simulator miners and remove test configuration
         if: always()
@@ -208,10 +252,10 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: node-ui-${{ github.run_id }}
+          name: node-ui-${{ matrix.device }}-${{ github.run_id }}
           path: |
-            ${{ runner.temp }}/node-ui.log
-            ${{ runner.temp }}/NodeUI.xcresult
-            ${{ runner.temp }}/node-screenshots/
+            ${{ env.RESULTS_DIR }}/node-ui.log
+            ${{ env.RESULTS_DIR }}/NodeUI.xcresult
+            ${{ env.RESULTS_DIR }}/node-screenshots/
           if-no-files-found: error
           retention-days: 14

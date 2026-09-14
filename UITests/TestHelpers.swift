@@ -77,11 +77,45 @@ extension XCTestCase {
         for _ in 0 ... maxSwipes {
             _ = element.waitForExistence(timeout: 2)
             if ready() { return true }
-            let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: up ? 0.30 : 0.62))
-            let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: up ? 0.62 : 0.30))
+            // iPad forms are centered sheets. A drag at 30% of the whole
+            // display can land on the sheet's navigation bar instead of its
+            // content, moving the sheet without scrolling its fields.
+            let modal = app.collectionViews.allElementsBoundByIndex.last { view in
+                view.exists && view.frame.width > 0 && view.frame.width < app.frame.width * 0.9
+                    && view.frame.height > 100 && app.frame.intersects(view.frame)
+            }
+            let surface: XCUIElement = modal ?? app
+            let start = surface.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: up ? 0.30 : 0.62))
+            let end = surface.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: up ? 0.62 : 0.30))
             start.press(forDuration: 0.05, thenDragTo: end)
         }
         return ready()
+    }
+
+    /// The sync-progress section can put confirmation below an iPad sheet's
+    /// visible rows. First await the sheet, then scroll its actual content.
+    @MainActor
+    func backupConfirmationIsReachable(_ app: XCUIApplication) -> Bool {
+        guard app.navigationBars["Wallet backup"].waitForExistence(timeout: 30) else { return false }
+        return scrollUntilExists(app, app.switches["writtenDownToggle"], maxSwipes: 5)
+    }
+
+    @MainActor
+    func confirmBackupAndContinue(_ app: XCUIApplication) -> Bool {
+        let toggle = app.switches["writtenDownToggle"]
+        guard backupConfirmationIsReachable(app) else { return false }
+        let confirmed = poll(timeout: 20, interval: 1, "backup confirmation switched on") {
+            let thumb = toggle.children(matching: .switch).firstMatch
+            if (thumb.exists ? thumb.value : toggle.value) as? String == "1" { return true }
+            app.flipSwitch(toggle)
+            return false
+        }
+        guard confirmed else { return false }
+        let done = app.buttons["backupDoneButton"]
+        guard scrollUntilExists(app, done, maxSwipes: 5),
+              poll(timeout: 10, interval: 1, "backup Done enabled", condition: { done.isEnabled }) else { return false }
+        done.tap()
+        return true
     }
 
     /// Polls `condition` until it holds or the deadline passes (explicit
@@ -108,6 +142,7 @@ extension XCTestCase {
     /// simulator), and every dismissal invariant in the app keys on that
     /// phase — so a test that skips the transition is not exercising the
     /// invariant, just racing it.
+    @MainActor
     func backgroundAndReturn(_ app: XCUIApplication) {
         // Not a home-press: on the iOS 26.5 simulator a home-press leaves the
         // scene fully foregrounded, so the `.background` phase the dismissal
@@ -180,5 +215,18 @@ extension XCUIApplication {
         } else {
             container.coordinate(withNormalizedOffset: CGVector(dx: 0.92, dy: 0.5)).tap()
         }
+    }
+}
+
+@MainActor
+extension XCUIApplication {
+    /// iPadOS exposes its floating tabs as cells instead of an iPhone TabBar.
+    /// Keep the same asserted journeys on each platform's native tab layout.
+    func navigationTab(_ title: String) -> XCUIElement {
+        let phone = tabBars.buttons[title]
+        if phone.exists { return phone }
+        let floating = cells[title].firstMatch
+        if floating.exists { return floating }
+        return buttons[title].firstMatch
     }
 }

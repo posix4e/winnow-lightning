@@ -13,7 +13,7 @@
 # App Store (never part of `all`; run by .github/workflows/appstore-submit.yml
 # on a manual dispatch): appstore-status, appstore-attach, appstore-notes,
 # appstore-submit. They act on one App Store version, APPSTORE_VERSION_ID
-# (the 1.0 version created in App Store Connect) or the version whose string
+# (an explicitly selected editable record) or the version whose string
 # is APPSTORE_VERSION_STRING; attach a processed build to it, set its What's
 # New, and create a review submission. appstore-submit refuses to run unless
 # APPSTORE_CONFIRM_SUBMIT=yes.
@@ -36,9 +36,8 @@ EXPECTED_MARKETING_VERSION="${TESTFLIGHT_MARKETING_VERSION:-}"
 # succeeded and the release still failed here. Default: 30 minutes.
 BUILD_WAIT_ATTEMPTS="${TESTFLIGHT_BUILD_WAIT_ATTEMPTS:-90}"
 BUILD_WAIT_SECONDS="${TESTFLIGHT_BUILD_WAIT_SECONDS:-20}"
-# App Store review, issue #7. The version id is the 1.0 record already in
-# App Store Connect; a version string finds it instead when the id is unset.
-APPSTORE_VERSION_ID="${APPSTORE_VERSION_ID-15a15f27-9d88-40d7-8e06-0efd5619b301}"
+# Never default to a historical record: it may already be released.
+APPSTORE_VERSION_ID="${APPSTORE_VERSION_ID:-}"
 APPSTORE_VERSION_STRING="${APPSTORE_VERSION_STRING:-$EXPECTED_MARKETING_VERSION}"
 APPSTORE_WHATS_NEW_FILE="${APPSTORE_WHATS_NEW_FILE:-docs/appstore-whats-new.txt}"
 APPSTORE_CONFIRM_SUBMIT="${APPSTORE_CONFIRM_SUBMIT:-}"
@@ -305,7 +304,7 @@ print(rows[0]["id"])
 }
 
 version_json() {
-  asc GET "/appStoreVersions/$(version_id)?include=build,appStoreVersionLocalizations&fields[appStoreVersions]=versionString,appVersionState,platform,releaseType,createdDate&fields[builds]=version,processingState,uploadedDate&fields[appStoreVersionLocalizations]=locale,whatsNew,description,keywords,supportUrl,marketingUrl,promotionalText"
+  asc GET "/appStoreVersions/$(version_id)?include=build,appStoreVersionLocalizations&fields[appStoreVersions]=versionString,appVersionState,platform,releaseType,createdDate,build,appStoreVersionLocalizations&fields[builds]=version,processingState,uploadedDate&fields[appStoreVersionLocalizations]=locale,whatsNew,description,keywords,supportUrl,marketingUrl,promotionalText"
 }
 
 version_state() {
@@ -429,7 +428,7 @@ step_appstore_status() {
   tmp=$(mktemp -d)
   version_json > "$tmp/version.json"
   asc GET "/appStoreVersions/$vid/appStoreVersionLocalizations?include=appScreenshotSets&fields[appScreenshotSets]=screenshotDisplayType&limit=200" > "$tmp/localizations.json"
-  asc GET "/apps/$aid/appInfos?include=appInfoLocalizations,primaryCategory&fields[appInfos]=state,appStoreAgeRating&fields[appInfoLocalizations]=locale,name,subtitle,privacyPolicyUrl&fields[appCategories]=platforms" > "$tmp/appinfos.json"
+  asc GET "/apps/$aid/appInfos?include=appInfoLocalizations,primaryCategory&fields[appInfos]=state,appStoreAgeRating,appInfoLocalizations,primaryCategory&fields[appInfoLocalizations]=locale,name,subtitle,privacyPolicyUrl&fields[appCategories]=platforms" > "$tmp/appinfos.json"
   open_review_submissions > "$tmp/submissions.json"
   python3 - "$tmp" <<'EOF'
 import json, pathlib, sys
@@ -477,7 +476,9 @@ else:
 
 infos = appinfos["data"]
 info_included = {(row["type"], row["id"]): row for row in appinfos.get("included", [])}
-active = infos[0] if infos else None
+active = next((row for row in infos if row.get("attributes", {}).get("state") == attributes.get("appVersionState")), None)
+if active is None and len(infos) == 1:
+    active = infos[0]
 if active:
     a = active["attributes"]
     category = (active.get("relationships", {}).get("primaryCategory", {}) or {}).get("data") or {}

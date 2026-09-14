@@ -50,3 +50,18 @@ The ordinary, shared, and phone-plus-Core journeys use the same Send form and
 review. Shared payments continue directly to approvals. The Core journey also
 checks leaving and restarting the signing exchange, the completed payment, and
 restoring the earlier backup to find the remaining balance.
+
+The sender-label captures (`40-save-sender`, `41-send-to-person`, and
+`43-infer-sender`) are unchanged originals captured locally on 2026-09-13 with an
+iPhone 17 Pro simulator against the disposable custom signet fixture, from the
+`feature/people-labels` working tree. The `senders` and `sender-lookup` journeys
+both passed in the same run (`winnow-kimi-t1718.xcresult`), covering the revealed
+funding address attaching with its warning, the label persisting across a
+restart, paying the sender back, and the warned loopback-explorer inference for
+a taproot key-path payment.
+
+The peer-reset capture (`42-peer-reset`) is an unchanged original captured
+locally on 2026-09-13 with an iPhone 17 Pro simulator against the disposable
+custom signet fixture, from the `feature/peer-reset` working tree. The `network`
+journey's reset scenario passed in the same run (`winnow-kimi-t19.xcresult`):
+the remembered good peers are forgotten and the manual fixture peer dials back.

@@ -59,6 +59,39 @@ public struct PeerEndpoint: Equatable, Sendable, Codable, Hashable, CustomString
     }
 
     public var description: String { "\(host):\(port)" }
+
+    /// Which overlay dialing this endpoint needs. The pool consults it to
+    /// keep endpoints out of a queue that cannot reach them: a tor or i2p
+    /// peer without a transport can never answer, and a dial that must fail
+    /// must not spend a slot in the race.
+    public var overlay: OverlayNetwork { OverlayNetwork(ofHost: host) }
+}
+
+/// The overlay network an endpoint is reached over, by host suffix.
+///
+/// Classification exists to *separate* dial queues, not to route anything:
+/// a `.onion` (RFC 7686) or `.i2p` name resolves only inside its own overlay,
+/// so until a transport that speaks one exists the classification's job is to
+/// keep those endpoints out of the clearnet queue. Clearnet — IP literals
+/// and ordinary DNS names alike — is what `PeerConnection` dials directly.
+public enum OverlayNetwork: String, Sendable, Codable, CaseIterable {
+    case clearnet
+    case tor
+    case i2p
+
+    /// `.onion` is Tor; `.b32.i2p`, like every `.i2p` name, is I2P; anything
+    /// else is clearnet. Hostnames are case-insensitive, so the suffix test
+    /// is too.
+    public init(ofHost host: String) {
+        let lowered = host.lowercased()
+        if lowered.hasSuffix(".onion") {
+            self = .tor
+        } else if lowered.hasSuffix(".i2p") {
+            self = .i2p
+        } else {
+            self = .clearnet
+        }
+    }
 }
 
 /// Unsolicited things a peer tells us outside request/response exchanges.
@@ -146,7 +179,20 @@ public actor PeerConnection {
 
     /// TCP connect + version handshake. Throws `missingCompactFilters` when
     /// the peer cannot serve BIP157 filters.
+    private var permanentlyClosed = false
+
     public func connect(timeout: Duration = .seconds(20)) async throws {
+        try Task.checkCancellation()
+        try await withTaskCancellationHandler {
+            try await connectOnce(timeout: timeout)
+        } onCancel: {
+            Task { await self.disconnect() }
+        }
+    }
+
+    private func connectOnce(timeout: Duration) async throws {
+        try Task.checkCancellation()
+        guard !permanentlyClosed else { throw PeerError.notConnected }
         guard connection == nil else { return }
         // Through a proxy, the TCP connection is to the proxy; the peer's
         // name travels inside the SOCKS request.
@@ -174,6 +220,10 @@ public actor PeerConnection {
 
         receiveTask = Task { await self.receiveLoop(connection) }
 
+        try await exchangeVersion(timeout: timeout)
+    }
+
+    private func exchangeVersion(timeout: Duration) async throws {
         // version → version + verack → verack (BIP handshake order).
         let version = VersionMessage(
             version: Self.protocolVersion,
@@ -192,12 +242,12 @@ public actor PeerConnection {
             guard case let .version(theirVersion) = theirVersionMessage else {
                 throw PeerError.handshakeFailed("expected version")
             }
-            guard theirVersion.services & Self.nodeCompactFilters != 0 else {
-                throw PeerError.missingCompactFilters(services: theirVersion.services)
-            }
             peerServices = theirVersion.services
             peerUserAgent = theirVersion.userAgent
             peerStartHeight = theirVersion.startHeight
+            guard theirVersion.services & Self.nodeCompactFilters != 0 else {
+                throw PeerError.missingCompactFilters(services: theirVersion.services)
+            }
             // The peer's verack may already be in our receive buffer (it is
             // sent on receipt of our version), so the waiter consults the
             // backlog first — no ordering assumption here.
@@ -216,6 +266,7 @@ public actor PeerConnection {
 
     /// Cleanly closes the connection and finishes all event streams.
     public func disconnect() {
+        permanentlyClosed = true
         teardown(error: nil)
     }
 

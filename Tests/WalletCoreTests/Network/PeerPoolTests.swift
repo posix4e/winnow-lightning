@@ -736,6 +736,58 @@ struct PeerPoolTests {
         #expect(await peer.isConnected)
         await peer.disconnect()
     }
+
+    /// "Reset and shuffle peers" (the Advanced settings control): everything
+    /// the pool learned is forgotten — file, cooldowns, session bans — while
+    /// the owner's manual peers, being instructions and not memories, stay.
+    @Test("forgetKnownGood clears the file and session state; manual peers survive")
+    func forgetKnownGoodResetsDiscovery() async throws {
+        let synthetic = makeSyntheticChain(length: 4, watchHeight: 2)
+        let good = LoopbackNode(params: synthetic.params, chain: synthetic.blocks)
+        try await good.start()
+        defer { Task { await good.stop() } }
+        let goodEndpoint = await good.endpoint
+        // A peer that only ever existed as a memory: nothing listens here.
+        let ghost = PeerEndpoint(host: "127.0.0.1", port: 29_999)
+
+        let file = tempFileURL("peers-forget.json")
+        defer { try? FileManager.default.removeItem(at: file) }
+        try JSONEncoder().encode([goodEndpoint, ghost]).write(to: file)
+
+        let pool = PeerPool(params: synthetic.params, peerCount: 1,
+                            manualPeers: [goodEndpoint], peersFileURL: file,
+                            dialTimeout: .seconds(2))
+        await pool.start()
+        #expect(await pool.connectedPeers().count == 1)
+        if let peer = await pool.connectedPeers().first {
+            await pool.transportFailure(peer, reason: "timed out waiting for headers")
+        }
+        #expect(await pool.isCoolingDown(goodEndpoint))
+
+        await pool.stop()
+        #expect(try Self.storedPeers(file).contains(goodEndpoint),
+                "stop persists the good peers before the reset")
+        try await pool.forgetKnownGood()
+        #expect(!FileManager.default.fileExists(atPath: file.path),
+                "the persisted peers file is forgotten")
+        #expect(await pool.isCoolingDown(goodEndpoint) == false,
+                "cooldowns die with the reset")
+
+        // A rebuilt pool dials from instructions alone: the ghost never
+        // comes back, and the manual peer reconnects with no memory of the
+        // cooldown.
+        let rebuilt = PeerPool(params: synthetic.params, peerCount: 1,
+                               manualPeers: [goodEndpoint], peersFileURL: file,
+                               dialTimeout: .seconds(2))
+        await rebuilt.start()
+        let rebuiltPeers = await rebuilt.connectedPeers()
+        #expect(rebuiltPeers.count == 1)
+        #expect(await rebuiltPeers.first?.endpoint == goodEndpoint)
+        #expect(await rebuilt.isCoolingDown(goodEndpoint) == false)
+        await rebuilt.stop()
+        #expect(try Self.storedPeers(file).sorted { $0.port < $1.port } == [goodEndpoint],
+                "the re-persisted file holds only peers that actually served")
+    }
 }
 
 /// A clock the test advances explicitly, so a cooldown can expire without the

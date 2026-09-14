@@ -33,6 +33,9 @@ struct SendReviewInputs: Equatable {
 struct SendView: View {
     @Environment(AppModel.self) private var model
     @Binding var accountID: String?
+    /// Set from outside ("Send to <person>" on a received payment) to open
+    /// the form pre-addressed; consumed once, like `accountID`.
+    @Binding var personID: String?
 
     private struct Approval: Identifiable {
         let record: VaultRecord
@@ -108,10 +111,14 @@ struct SendView: View {
             .id(sentTxid != nil ? "sent" : preview != nil ? "review" : "form")
             .navigationTitle(sentTxid != nil ? "Payment" : preview != nil ? "Review payment" : "Send")
             .navigationBarTitleDisplayMode(.inline)
+            // iPad and hardware keyboards can supply Return even for a
+            // decimal pad. End editing just as the accessory Done button does.
+            .onSubmit { focusedField = nil }
             .toolbar {
                 ToolbarItemGroup(placement: .keyboard) {
                     Spacer()
                     Button("Done") { focusedField = nil }
+                        .accessibilityIdentifier("sendKeyboardDone")
                 }
             }
             .sheet(isPresented: $showRecipients) {
@@ -140,6 +147,11 @@ struct SendView: View {
                 if sentTxid == nil, !sending { preview = nil }
             }
             .onChange(of: accountID) { _, _ in reset() }
+            // A "Send to <person>" request can arrive while this view does
+            // not exist yet (the tab is created lazily): consume it on
+            // appear as well as on later changes.
+            .onAppear { consumeRequestedPerson() }
+            .onChange(of: personID) { _, _ in consumeRequestedPerson() }
             .onChange(of: model.walletID) { _, _ in accountID = nil; reset() }
             .onChange(of: model.vaults.map(\.id)) { _, ids in
                 if let accountID, !ids.contains(accountID) { self.accountID = nil }
@@ -311,6 +323,12 @@ struct SendView: View {
 
     private func reviewWarnings(_ preview: AppModel.SendPreview) -> some View {
         Group {
+            if let recipient = preview.recipient, recipient.hasUnverifiedFundingDestination {
+                Section {
+                    Label("This destination was inferred from transaction funding. Winnow has not verified that it belongs to \(recipient.name). Confirm it with them before sending.", systemImage: "exclamationmark.triangle")
+                        .accessibilityIdentifier("unverifiedFundingWarning")
+                }
+            }
             if let recipient = preview.recipient, !recipient.derivesFreshAddresses {
                 Section {
                     Label("This address has been saved for reuse. Repeated payments can be linked. Ask \(recipient.name) for a fresh address or Winnow contact card.", systemImage: "eye")
@@ -483,6 +501,14 @@ struct SendView: View {
         feeFloorNotice = false
         confirmedHeight = nil
         error = nil
+    }
+
+    /// Applies an outside "Send to <person>" request exactly once.
+    private func consumeRequestedPerson() {
+        guard let requested = personID else { return }
+        reset()
+        selectedPersonID = requested
+        personID = nil
     }
 
     /// Follows the broadcast: TxBroadcaster events (announced → a peer asked

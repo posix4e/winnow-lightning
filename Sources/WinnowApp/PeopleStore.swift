@@ -8,7 +8,7 @@ struct PersonRecord: Codable, Equatable, Identifiable, Sendable {
     /// Opaque; a UUID string.
     var id: String
     var name: String
-    /// Absent for a signer-only person.
+    /// Absent for a signer-only or label-only person.
     var payTo: PersonPayTo?
     /// A validated script-path signer expression, `[fp/path]xpub…/<0;1>/*`.
     var signerKey: String?
@@ -17,6 +17,14 @@ struct PersonRecord: Codable, Equatable, Identifiable, Sendable {
     /// Nil in older files: payable recipients were all saved. Keep the record
     /// when hiding a shortcut so past names and address counters survive.
     var savedRecipient: Bool?
+    enum DestinationProvenance: String, Codable, Sendable {
+        case supplied, localFunding, explorerFunding
+    }
+    var destinationProvenance: DestinationProvenance?
+    var destinationSource: String?
+    var hasUnverifiedFundingDestination: Bool {
+        destinationProvenance == .localFunding || destinationProvenance == .explorerFunding
+    }
 
     var canCoOwnSavings: Bool { signerKey != nil }
     var derivesFreshAddresses: Bool { payTo?.derivesFreshAddresses == true }
@@ -33,7 +41,6 @@ enum PeopleStorageError: Error, Equatable, LocalizedError {
     case invalidState(String)
     case damaged
     case duplicate(existingName: String)
-    case nothingToSave
     case unknownPerson
     case tooMany
 
@@ -45,8 +52,6 @@ enum PeopleStorageError: Error, Equatable, LocalizedError {
             "Winnow could not safely read your saved recipients, so they cannot be changed until the file is readable again."
         case let .duplicate(existingName):
             "That key already belongs to \(existingName)."
-        case .nothingToSave:
-            "Paste a card, a public account key or an address before saving."
         case .unknownPerson:
             "That person is no longer in your list."
         case .tooMany:
@@ -55,7 +60,8 @@ enum PeopleStorageError: Error, Equatable, LocalizedError {
     }
 }
 
-/// Local recipient names, public keys, and address counters. Mirrors `VaultStore`: one JSON file per network, a
+/// Local recipient names, public keys, address counters, and per-payment
+/// sender labels. Mirrors `VaultStore`: one JSON file per network, a
 /// strict validation that fails the whole snapshot closed, and a rollback
 /// on any failed write. Differs in one way: damage is not fatal to the app.
 /// A vault holds money; a person is a public key and a name. So a damaged
@@ -63,9 +69,15 @@ enum PeopleStorageError: Error, Equatable, LocalizedError {
 /// reads again, while the rest of the wallet carries on.
 actor PeopleStore {
     static let maximumPeople = 1_000
+    /// Sender labels share the file and its bound: a label names a payment,
+    /// never a key, so the map cannot outgrow the people list's ceiling.
+    static let maximumSenderLabels = 1_000
     static let maximumNextIndex = VaultStore.maximumNextIndex
 
     private var records: [PersonRecord] = []
+    /// Txid display hex → person id: who a received payment is labelled as
+    /// coming from. Persisted in the same file as the records.
+    private var senderByTxid: [String: String] = [:]
     private var storageURL: URL?
     private var network: BitcoinNetwork = .signet
     private var isDamaged = false
@@ -85,41 +97,115 @@ actor PeopleStore {
         isDamaged = false
         guard let storageURL else {
             records = []
+            senderByTxid = [:]
             return .missing
         }
         guard FileManager.default.fileExists(atPath: storageURL.path) else {
             records = []
+            senderByTxid = [:]
             return .missing
         }
         do {
             let data = try Data(contentsOf: storageURL)
-            let decoded = try JSONDecoder().decode([PersonRecord].self, from: data)
-            try Self.validate(decoded, network: network)
-            records = decoded
+            let payload = try Self.decodePayload(data)
+            try Self.validate(payload.people, senderByTxid: payload.senderByTxid, network: network)
+            records = payload.people
+            senderByTxid = payload.senderByTxid
             return .loaded
         } catch {
             records = []
+            senderByTxid = [:]
             isDamaged = true
             return .damaged(Self.damagedStorageMessage)
         }
     }
 
+    /// The file's payload. The file was a bare array of people before sender
+    /// labels existed, and that older shape still decodes — as an envelope
+    /// without any labels.
+    private struct PersistedPayload: Codable {
+        var people: [PersonRecord]
+        var senderByTxid: [String: String]
+
+        init(people: [PersonRecord], senderByTxid: [String: String] = [:]) {
+            self.people = people
+            self.senderByTxid = senderByTxid
+        }
+
+        init(from decoder: any Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            people = try container.decode([PersonRecord].self, forKey: .people)
+            senderByTxid = try container.decodeIfPresent([String: String].self, forKey: .senderByTxid) ?? [:]
+        }
+    }
+
+    private static func decodePayload(_ data: Data) throws -> PersistedPayload {
+        if let envelope = try? JSONDecoder().decode(PersistedPayload.self, from: data) {
+            return envelope
+        }
+        return PersistedPayload(people: try JSONDecoder().decode([PersonRecord].self, from: data))
+    }
+
     var all: [PersonRecord] { records }
+
+    /// Txid display hex → person id, as last persisted or mutated.
+    var senderLabels: [String: String] { senderByTxid }
+
+    /// The person labelled as the sender of the transaction with display
+    /// hex `txidHex`. Nil when the payment is unlabelled — or when the
+    /// person is gone, a dangling label being pruned on the next write.
+    func sender(forTxidHex txidHex: String) -> PersonRecord? {
+        guard let personID = senderByTxid[txidHex] else { return nil }
+        return records.first { $0.id == personID }
+    }
 
     func record(id: String) -> PersonRecord? {
         records.first { $0.id == id }
     }
 
+    /// Labels a received payment with the person who paid it. The person
+    /// must exist; the map is capped like the people list.
+    func labelSender(txidHex: String, personID: String) throws {
+        guard !isDamaged else { throw PeopleStorageError.damaged }
+        guard records.contains(where: { $0.id == personID }) else {
+            throw PeopleStorageError.unknownPerson
+        }
+        guard senderByTxid[txidHex] != nil || senderByTxid.count < Self.maximumSenderLabels else {
+            throw PeopleStorageError.tooMany
+        }
+        try mutateLabels { $0[txidHex] = personID }
+    }
+
+    /// Drops one payment's sender label, if it has one.
+    func removeSenderLabel(txidHex: String) {
+        guard senderByTxid[txidHex] != nil else { return }
+        try? mutateLabels { $0[txidHex] = nil }
+    }
+
+    /// Removes the person outright, and every sender label naming them.
+    /// Hiding a shortcut (`updateRecipient(id:saved:)`) keeps the record —
+    /// and its labels — so past names survive; this forgets.
+    func remove(id: String) throws {
+        guard !isDamaged else { throw PeopleStorageError.damaged }
+        guard records.contains(where: { $0.id == id }) else {
+            throw PeopleStorageError.unknownPerson
+        }
+        try mutate { $0.removeAll { $0.id == id } }
+    }
+
     @discardableResult
-    func add(name: String, payTo: PersonPayTo?, signerKey: String?) throws -> PersonRecord {
+    func add(name: String, payTo: PersonPayTo?, signerKey: String?,
+             provenance: PersonRecord.DestinationProvenance? = nil, source: String? = nil) throws -> PersonRecord {
         guard !isDamaged else { throw PeopleStorageError.damaged }
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty else {
             throw PeopleStorageError.invalidState("a person needs a name")
         }
-        guard payTo != nil || signerKey != nil else { throw PeopleStorageError.nothingToSave }
+        // payTo and signerKey may both be absent: a name alone labels a
+        // received payment, and keys can only ever be added by re-saving.
         let candidate = PersonRecord(id: UUID().uuidString, name: trimmedName,
-                                     payTo: payTo, signerKey: signerKey)
+                                     payTo: payTo, signerKey: signerKey,
+                                     destinationProvenance: provenance, destinationSource: source)
         if let existing = try Self.firstSharingAKey(with: candidate, among: records, network: network) {
             if !existing.isSavedRecipient, payTo != nil, existing.payTo == payTo, existing.signerKey == signerKey {
                 return try updateRecipient(id: existing.id, name: trimmedName, saved: true)
@@ -143,6 +229,27 @@ actor PeopleStore {
         }[position]
     }
 
+    /// A name-only record acquires a destination only through explicit selection.
+    /// Existing destinations are immutable here so past payments retain meaning.
+    func attachDestination(id: String, payTo: PersonPayTo, provenance: PersonRecord.DestinationProvenance,
+                           source: String? = nil) throws {
+        guard !isDamaged else { throw PeopleStorageError.damaged }
+        guard let index = records.firstIndex(where: { $0.id == id }), records[index].payTo == nil else {
+            throw PeopleStorageError.invalidState("only a name-only contact can attach a destination")
+        }
+        var candidate = records[index]
+        candidate.payTo = payTo
+        if let duplicate = try Self.firstSharingAKey(with: candidate, among: records.filter { $0.id != id }, network: network) {
+            throw PeopleStorageError.duplicate(existingName: duplicate.name)
+        }
+        try mutate {
+            $0[index].payTo = payTo
+            $0[index].destinationProvenance = provenance
+            $0[index].destinationSource = source
+            $0[index].savedRecipient = true
+        }
+    }
+
     /// Moves the person's payment counter past `index`. Monotonic, so a
     /// resumed send that already advanced it is a no-op, and never called
     /// for a preview that was cancelled.
@@ -157,21 +264,44 @@ actor PeopleStore {
     }
 
     /// Applies `change` to a copy, validates, persists, and keeps the copy
-    /// only when every step succeeded.
+    /// only when every step succeeded. Labels naming a person the change
+    /// removed are pruned here — writes never leave a dangling label, even
+    /// though reads tolerate one.
     @discardableResult
     private func mutate(_ change: (inout [PersonRecord]) -> Void) throws -> [PersonRecord] {
         var candidate = records
         change(&candidate)
-        try Self.validate(candidate, network: network)
+        let surviving = Set(candidate.map(\.id))
+        let candidateLabels = senderByTxid.filter { surviving.contains($0.value) }
+        try Self.validate(candidate, senderByTxid: candidateLabels, network: network)
         let previous = records
+        let previousLabels = senderByTxid
         records = candidate
+        senderByTxid = candidateLabels
         do {
             try persist()
         } catch {
             records = previous
+            senderByTxid = previousLabels
             throw error
         }
         return records
+    }
+
+    /// The labels half of `mutate`: the same validate-persist-rollback
+    /// spine, with the records untouched.
+    private func mutateLabels(_ change: (inout [String: String]) -> Void) throws {
+        var candidate = senderByTxid
+        change(&candidate)
+        try Self.validate(records, senderByTxid: candidate, network: network)
+        let previous = senderByTxid
+        senderByTxid = candidate
+        do {
+            try persist()
+        } catch {
+            senderByTxid = previous
+            throw error
+        }
     }
 
     private static let damagedStorageMessage =
@@ -197,9 +327,18 @@ actor PeopleStore {
         return nil
     }
 
-    private static func validate(_ records: [PersonRecord], network: BitcoinNetwork) throws {
+    private static func validate(_ records: [PersonRecord], senderByTxid: [String: String] = [:],
+                                 network: BitcoinNetwork) throws {
         guard records.count <= maximumPeople else {
             throw PeopleStorageError.invalidState("too many people")
+        }
+        guard senderByTxid.count <= maximumSenderLabels else {
+            throw PeopleStorageError.invalidState("too many sender labels")
+        }
+        for txidHex in senderByTxid.keys {
+            guard txidHex.count == 64, Data(hex: txidHex) != nil else {
+                throw PeopleStorageError.invalidState("a sender label has an invalid transaction id")
+            }
         }
         var ids = Set<String>()
         var payIdentities = Set<Data>()
@@ -214,13 +353,11 @@ actor PeopleStore {
         }
     }
 
-    /// What every person needs, whatever keys they carry.
+    /// What every person needs, whatever keys they carry — or do not: a
+    /// label-only person holds a name and no keys at all.
     private static func validateShape(_ record: PersonRecord) throws {
         guard !record.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw PeopleStorageError.invalidState("a person has no name")
-        }
-        guard record.payTo != nil || record.signerKey != nil else {
-            throw PeopleStorageError.invalidState("a person has no keys")
         }
         guard record.nextPaymentIndex <= maximumNextIndex else {
             throw PeopleStorageError.invalidState("payment index is out of range")
@@ -262,7 +399,7 @@ actor PeopleStore {
         guard let storageURL else { return }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-        let data = try encoder.encode(records)
+        let data = try encoder.encode(PersistedPayload(people: records, senderByTxid: senderByTxid))
         try writeData(data, storageURL)
     }
 }

@@ -78,11 +78,29 @@ jobs:
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
+      - name: Python with standard TOML support
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+
       - name: Package and debugging tool tests
         run: |
           scripts/check-dependencies
           swift test
           scripts/ci-debug
+
+      - name: Observe proxy routing with packet capture
+        timeout-minutes: 5
+        run: scripts/check-route-packets "$RUNNER_TEMP/route-packets"
+
+      - name: Preserve routing packet evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: route-packets-${{ github.run_id }}
+          path: ${{ runner.temp }}/route-packets/
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Release-build production package and reject first-party warnings
         run: >-
@@ -158,6 +176,17 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Python with standard TOML support
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+
+      - name: Build pinned app Tor framework
+        run: |
+          scripts/install-rust
+          export PATH="$HOME/.cargo/bin:$PATH"
+          scripts/build-tor-bridge
+
       - name: Install pinned XcodeGen
         run: scripts/install-xcodegen
       - name: Generate Xcode project

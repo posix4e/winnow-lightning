@@ -222,7 +222,7 @@ private struct MnemonicBackupView: View {
         NavigationStack {
             List {
                 Section {
-                    Text("Write these \(words.count) words down in order and keep them private. You'll also need a backup file from Settings to restore your history and shared accounts.")
+                    Text("Write these \(words.count) words down, in order, and keep them offline. These words protect your signing keys. Keep an exported wallet bundle too: Winnow needs both to restore your wallet.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }

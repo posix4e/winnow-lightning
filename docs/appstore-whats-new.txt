@@ -1,8 +1,5 @@
-Winnow keeps your bitcoin on your phone and reads the chain straight from ordinary Bitcoin nodes. No account, no server, no company in the middle.
-
-This first release:
-• Send and receive with fresh Taproot addresses.
-• One Send screen for ordinary, shared, and extra-device accounts, with the account and fee shown before approval.
-• Saved recipients: name a past payment and choose the recipient from Send. Save a payment card to use a fresh address each time.
-• Shared savings: hold money together with the people you choose, and decide how many of you must approve before it moves.
-• Advanced mode for the test network, your own peers, chain verification and the raw multisig tools.
+• Support for iPad and the iOS app on Apple silicon Macs.
+• Optional Tor routing for Bitcoin peers, discovery, peer-list downloads and consented explorer lookups. Tor is off by default and never silently falls back to a direct connection.
+• Refresh the public census peer list in Advanced settings, or separately reset and shuffle automatic peers while preserving manual settings.
+• Add local name-only labels to received payments. Attach a destination only when you choose one, with consent before each explorer lookup.
+• Updated privacy papers and clearer explanations of peer discovery, address reuse and external-browser routing.
