@@ -1,0 +1,635 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 0110c02..0b8cc3c 100755
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -245,3 +245,17 @@ harness = false
+ #lightning-liquidity = { path = "../rust-lightning/lightning-liquidity" }
+ #lightning-macros = { path = "../rust-lightning/lightning-macros" }
+ #lightning-dns-resolver = { path = "../rust-lightning/lightning-dns-resolver" }
++
++[patch."https://github.com/lightningdevkit/rust-lightning"]
++lightning = { path = "../pq-rust-lightning/lightning" }
++lightning-types = { path = "../pq-rust-lightning/lightning-types" }
++lightning-invoice = { path = "../pq-rust-lightning/lightning-invoice" }
++lightning-net-tokio = { path = "../pq-rust-lightning/lightning-net-tokio" }
++lightning-persister = { path = "../pq-rust-lightning/lightning-persister" }
++lightning-background-processor = { path = "../pq-rust-lightning/lightning-background-processor" }
++lightning-rapid-gossip-sync = { path = "../pq-rust-lightning/lightning-rapid-gossip-sync" }
++lightning-block-sync = { path = "../pq-rust-lightning/lightning-block-sync" }
++lightning-transaction-sync = { path = "../pq-rust-lightning/lightning-transaction-sync" }
++lightning-liquidity = { path = "../pq-rust-lightning/lightning-liquidity" }
++lightning-macros = { path = "../pq-rust-lightning/lightning-macros" }
++lightning-dns-resolver = { path = "../pq-rust-lightning/lightning-dns-resolver" }
+diff --git a/src/config.rs b/src/config.rs
+index 65e2561..d23f693 100644
+--- a/src/config.rs
++++ b/src/config.rs
+@@ -486,6 +486,8 @@ pub(crate) fn default_user_config(config: &Config) -> UserConfig {
+ 	user_config.channel_handshake_config.negotiate_anchor_zero_fee_commitments =
+ 		config.anchor_channels_config.enable_zero_fee_commitments;
+ 	user_config.reject_inbound_splices = false;
++	user_config.require_post_quantum_payments = true;
++	user_config.require_post_quantum_inbound = true;
+ 
+ 	if may_announce_channel(config).is_err() {
+ 		user_config.accept_forwards_to_priv_channels = false;
+diff --git a/src/connection.rs b/src/connection.rs
+index ccb6f98..c8487d5 100644
+--- a/src/connection.rs
++++ b/src/connection.rs
+@@ -56,6 +56,7 @@ where
+ 	L::Target: LdkLogger,
+ {
+ 	pending_connections: PendingConnections,
++	pq_peer_keys: Mutex<HashMap<PublicKey, [u8; lightning::ln::peer_handler::PQ_KEM_EK_LEN]>>,
+ 	peer_manager: Arc<PeerManager>,
+ 	tor_proxy_config: Option<TorConfig>,
+ 	keys_manager: Arc<KeysManager>,
+@@ -71,8 +72,13 @@ where
+ 		keys_manager: Arc<KeysManager>, logger: L,
+ 	) -> Self {
+ 		let pending_connections = Mutex::new(HashMap::new());
++		let pq_peer_keys = Mutex::new(HashMap::new());
+ 
+-		Self { pending_connections, peer_manager, tor_proxy_config, keys_manager, logger }
++		Self { pending_connections, pq_peer_keys, peer_manager, tor_proxy_config, keys_manager, logger }
++	}
++
++	pub(crate) fn register_pq_peer(&self, node_id: PublicKey, kem_key: [u8; lightning::ln::peer_handler::PQ_KEM_EK_LEN]) {
++		self.pq_peer_keys.lock().expect("lock").insert(node_id, kem_key);
+ 	}
+ 
+ 	pub(crate) async fn connect_peer_if_necessary(
+@@ -116,6 +122,7 @@ where
+ 		&self, node_id: PublicKey, addr: SocketAddress,
+ 	) -> Result<(), Error> {
+ 		log_info!(self.logger, "Connecting to peer: {}@{}", node_id, addr);
++		let kem_key = self.pq_peer_keys.lock().expect("lock").get(&node_id).copied().ok_or(Error::ConnectionFailed)?;
+ 
+ 		match addr {
+ 			SocketAddress::OnionV2(old_onion_addr) => {
+@@ -126,70 +133,7 @@ where
+ 				);
+ 				Err(Error::InvalidSocketAddress)
+ 			},
+-			SocketAddress::OnionV3 { .. } => {
+-				let proxy_config = self.tor_proxy_config.as_ref().ok_or_else(|| {
+-					log_error!(
+-						self.logger,
+-						"Failed to resolve network address {:?}: Tor usage is not configured.",
+-						addr
+-					);
+-					Error::InvalidSocketAddress
+-				})?;
+-				let resolved_addrs: Vec<_> =
+-					tokio::net::lookup_host(proxy_config.proxy_address.to_string())
+-						.await
+-						.map_err(|e| {
+-							log_error!(
+-								self.logger,
+-								"Failed to resolve Tor proxy network address {}: {}",
+-								proxy_config.proxy_address,
+-								e
+-							);
+-							Error::InvalidSocketAddress
+-						})?
+-						.collect();
+-
+-				if resolved_addrs.is_empty() {
+-					log_error!(
+-						self.logger,
+-						"Failed to resolve Tor proxy network address {}",
+-						proxy_config.proxy_address
+-					);
+-					return Err(Error::InvalidSocketAddress);
+-				}
+-
+-				let mut res = Err(Error::ConnectionFailed);
+-				let mut had_failures = false;
+-				for proxy_addr in resolved_addrs {
+-					let connection_future = lightning_net_tokio::tor_connect_outbound(
+-						Arc::clone(&self.peer_manager),
+-						node_id,
+-						addr.clone(),
+-						proxy_addr,
+-						Arc::clone(&self.keys_manager),
+-					);
+-					res = self.await_connection(connection_future, node_id, addr.clone()).await;
+-					if res.is_ok() {
+-						if had_failures {
+-							log_info!(
+-								self.logger,
+-								"Successfully connected to peer {}@{} via resolved proxy address {} after previous attempts failed.",
+-								node_id, addr, proxy_addr
+-							);
+-						}
+-						break;
+-					}
+-					had_failures = true;
+-					log_debug!(
+-						self.logger,
+-						"Failed to connect to peer {}@{} via resolved proxy address {}.",
+-						node_id,
+-						addr,
+-						proxy_addr
+-					);
+-				}
+-				res
+-			},
++			SocketAddress::OnionV3 { .. } => Err(Error::InvalidSocketAddress),
+ 			_ => {
+ 				let resolved_addrs: Vec<_> = tokio::net::lookup_host(addr.to_string())
+ 					.await
+@@ -212,9 +156,10 @@ where
+ 				let mut res = Err(Error::ConnectionFailed);
+ 				let mut had_failures = false;
+ 				for socket_addr in resolved_addrs {
+-					let connection_future = lightning_net_tokio::connect_outbound(
++					let connection_future = lightning_net_tokio::connect_outbound_pq(
+ 						Arc::clone(&self.peer_manager),
+ 						node_id,
++						kem_key,
+ 						socket_addr,
+ 					);
+ 					res = self.await_connection(connection_future, node_id, addr.clone()).await;
+diff --git a/src/data_store.rs b/src/data_store.rs
+index a9fe0d0..7fd51b3 100644
+--- a/src/data_store.rs
++++ b/src/data_store.rs
+@@ -752,7 +752,7 @@ mod tests {
+ 
+ 	use lightning::util::persist::{PageToken, PaginatedKVStore, PaginatedListResponse};
+ 	use lightning::util::test_utils::TestLogger;
+-	use lightning::{impl_writeable_tlv_based, io};
++	use lightning::{impl_ser_tlv_based, io};
+ 	use tokio::sync::Notify;
+ 
+ 	use super::*;
+@@ -802,7 +802,7 @@ mod tests {
+ 			hex_utils::to_vec(s)?.try_into().ok().map(|id| Self { id })
+ 		}
+ 	}
+-	impl_writeable_tlv_based!(TestObjectId, { (0, id, required) });
++	impl_ser_tlv_based!(TestObjectId, { (0, id, required) });
+ 
+ 	struct TestObjectUpdate {
+ 		id: TestObjectId,
+@@ -858,7 +858,7 @@ mod tests {
+ 		}
+ 	}
+ 
+-	impl_writeable_tlv_based!(TestObject, {
++	impl_ser_tlv_based!(TestObject, {
+ 		(0, id, required),
+ 		(2, data, required),
+ 		(4, extra, option),
+diff --git a/src/event.rs b/src/event.rs
+index 0a35697..ff5e404 100644
+--- a/src/event.rs
++++ b/src/event.rs
+@@ -30,7 +30,7 @@ use lightning::util::config::{ChannelConfigOverrides, ChannelConfigUpdate};
+ use lightning::util::errors::APIError;
+ use lightning::util::persist::KVStore;
+ use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
+-use lightning::{impl_writeable_tlv_based, impl_writeable_tlv_based_enum};
++use lightning::{impl_ser_tlv_based, impl_ser_tlv_based_enum};
+ use lightning_liquidity::lsps2::utils::compute_opening_fee;
+ use lightning_types::payment::{PaymentHash, PaymentPreimage};
+ 
+@@ -84,7 +84,7 @@ pub struct HTLCLocator {
+ 	pub node_id: Option<PublicKey>,
+ }
+ 
+-impl_writeable_tlv_based!(HTLCLocator, {
++impl_ser_tlv_based!(HTLCLocator, {
+ 	(1, channel_id, required),
+ 	(3, user_channel_id, option),
+ 	(5, node_id, option),
+@@ -308,7 +308,7 @@ pub enum Event {
+ 	},
+ }
+ 
+-impl_writeable_tlv_based_enum!(Event,
++impl_ser_tlv_based_enum!(Event,
+ 	(0, PaymentSuccessful) => {
+ 		(0, payment_hash, required),
+ 		(1, fee_paid_msat, option),
+@@ -2342,7 +2342,7 @@ mod tests {
+ 		},
+ 	}
+ 
+-	impl_writeable_tlv_based_enum!(LegacyEvent,
++	impl_ser_tlv_based_enum!(LegacyEvent,
+ 		(5, ChannelClosed) => {
+ 			(0, channel_id, required),
+ 			(1, counterparty_node_id, option),
+diff --git a/src/io/utils.rs b/src/io/utils.rs
+index 30fc0c6..8598a03 100644
+--- a/src/io/utils.rs
++++ b/src/io/utils.rs
+@@ -779,7 +779,7 @@ mod read_objects_tests {
+ 	use std::num::NonZeroUsize;
+ 	use std::sync::Arc;
+ 
+-	use lightning::impl_writeable_tlv_based;
++	use lightning::impl_ser_tlv_based;
+ 	use lightning::util::persist::{KVStore, PageToken, PaginatedKVStore, PaginatedListResponse};
+ 	use lightning::util::ser::Writeable;
+ 	use lightning::util::test_utils::TestLogger;
+@@ -796,7 +796,7 @@ mod read_objects_tests {
+ 	struct TestObject {
+ 		id: u32,
+ 	}
+-	impl_writeable_tlv_based!(TestObject, { (0, id, required) });
++	impl_ser_tlv_based!(TestObject, { (0, id, required) });
+ 
+ 	/// Writes `num_objects` objects with ascending ids, so that the highest id is the most
+ 	/// recently created one.
+diff --git a/src/io/vss_store.rs b/src/io/vss_store.rs
+index 6a44be0..78466bd 100644
+--- a/src/io/vss_store.rs
++++ b/src/io/vss_store.rs
+@@ -21,7 +21,7 @@ use bitcoin::bip32::{ChildNumber, Xpriv};
+ use bitcoin::hashes::{sha256, Hash, HashEngine, Hmac, HmacEngine};
+ use bitcoin::key::Secp256k1;
+ use bitcoin::Network;
+-use lightning::impl_writeable_tlv_based_enum;
++use lightning::impl_ser_tlv_based_enum;
+ use lightning::io::{self, Error, ErrorKind};
+ use lightning::sign::{EntropySource as LdkEntropySource, RandomBytes};
+ use lightning::util::persist::{
+@@ -67,7 +67,7 @@ enum VssSchemaVersion {
+ 	V1,
+ }
+ 
+-impl_writeable_tlv_based_enum!(VssSchemaVersion,
++impl_ser_tlv_based_enum!(VssSchemaVersion,
+ 	(0, V0) => {},
+ 	(1, V1) => {},
+ );
+diff --git a/src/lib.rs b/src/lib.rs
+index 821304a..796c6e6 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -152,7 +152,7 @@ use graph::NetworkGraph;
+ use io::utils::update_and_persist_node_metrics;
+ pub use lightning;
+ use lightning::chain::BlockLocator;
+-use lightning::impl_writeable_tlv_based;
++use lightning::impl_ser_tlv_based;
+ use lightning::ln::chan_utils::FUNDING_TRANSACTION_WITNESS_WEIGHT;
+ use lightning::ln::channel_state::ChannelDetails as LdkChannelDetails;
+ pub use lightning::ln::channel_state::ChannelShutdownState;
+@@ -513,7 +513,7 @@ impl Node {
+ 											return;
+ 										},
+ 									};
+-									lightning_net_tokio::setup_inbound(
++									lightning_net_tokio::setup_inbound_pq(
+ 										Arc::clone(&peer_mgr),
+ 										tcp_stream,
+ 									)
+@@ -1258,6 +1258,24 @@ impl Node {
+ 			.collect()
+ 	}
+ 
++	/// Register an independently verified ML-KEM public key for a PQLN peer.
++	/// Register persisted peers before calling `start` so reconnections use the PQ handshake.
++	pub fn register_pq_peer(
++		&self, node_id: PublicKey, kem_key: [u8; lightning::ln::peer_handler::PQ_KEM_EK_LEN],
++	) {
++		self.connection_manager.register_pq_peer(node_id, kem_key);
++	}
++
++	/// Return the node's ML-DSA public key for out-of-band pinning.
++	pub fn pq_node_id(&self) -> Option<[u8; lightning::sign::pq::PQ_PUBLIC_KEY_LEN]> {
++		lightning::sign::NodeSigner::get_pq_node_id(self.keys_manager.as_ref())
++	}
++
++	/// Return the node's ML-KEM public key for out-of-band pinning.
++	pub fn pq_kem_node_id(&self) -> Option<[u8; lightning::ln::peer_handler::PQ_KEM_EK_LEN]> {
++		lightning::sign::NodeSigner::get_pq_kem_node_id(self.keys_manager.as_ref())
++	}
++
+ 	/// Connect to a node on the peer-to-peer network.
+ 	///
+ 	/// If `persist` is set to `true`, we'll remember the peer and reconnect to it on restart.
+@@ -2506,7 +2524,7 @@ impl PersistedNodeMetrics {
+ 	}
+ }
+ 
+-impl_writeable_tlv_based!(NodeMetrics, {
++impl_ser_tlv_based!(NodeMetrics, {
+ 	(0, latest_lightning_wallet_sync_timestamp, option),
+ 	(1, latest_pathfinding_scores_sync_timestamp, option),
+ 	(2, latest_onchain_wallet_sync_timestamp, option),
+@@ -2590,7 +2608,7 @@ mod tests {
+ 			latest_pathfinding_scores_sync_timestamp: Option<u64>,
+ 			latest_node_announcement_broadcast_timestamp: Option<u64>,
+ 		}
+-		impl_writeable_tlv_based!(OldNodeMetrics, {
++		impl_ser_tlv_based!(OldNodeMetrics, {
+ 			(0, latest_lightning_wallet_sync_timestamp, option),
+ 			(1, latest_pathfinding_scores_sync_timestamp, option),
+ 			(2, latest_onchain_wallet_sync_timestamp, option),
+diff --git a/src/payment/asynchronous/static_invoice_store.rs b/src/payment/asynchronous/static_invoice_store.rs
+index f1e2378..85d9479 100644
+--- a/src/payment/asynchronous/static_invoice_store.rs
++++ b/src/payment/asynchronous/static_invoice_store.rs
+@@ -13,7 +13,7 @@ use std::time::Duration;
+ use bitcoin::hashes::sha256::Hash as Sha256;
+ use bitcoin::hashes::Hash;
+ use lightning::blinded_path::message::BlindedMessagePath;
+-use lightning::impl_writeable_tlv_based;
++use lightning::impl_ser_tlv_based;
+ use lightning::offers::static_invoice::StaticInvoice;
+ use lightning::util::persist::KVStore;
+ use lightning::util::ser::{Readable, Writeable};
+@@ -28,7 +28,7 @@ struct PersistedStaticInvoice {
+ 	request_path: BlindedMessagePath,
+ }
+ 
+-impl_writeable_tlv_based!(PersistedStaticInvoice, {
++impl_ser_tlv_based!(PersistedStaticInvoice, {
+ 	(0, invoice, required),
+ 	(2, request_path, required)
+ });
+diff --git a/src/payment/bolt11.rs b/src/payment/bolt11.rs
+index 5f0a70c..459c08c 100644
+--- a/src/payment/bolt11.rs
++++ b/src/payment/bolt11.rs
+@@ -13,7 +13,7 @@ use std::sync::{Arc, RwLock};
+ 
+ use bitcoin::hashes::sha256::Hash as Sha256;
+ use bitcoin::hashes::Hash;
+-use lightning::impl_writeable_tlv_based;
++use lightning::impl_ser_tlv_based;
+ use lightning::ln::channelmanager::{
+ 	Bolt11InvoiceParameters, OptionalBolt11PaymentParams, PaymentId,
+ };
+@@ -55,7 +55,7 @@ pub(crate) struct PaymentMetadata {
+ 	pub(crate) lsps2_parameters: Option<LSPS2Parameters>,
+ }
+ 
+-impl_writeable_tlv_based!(PaymentMetadata, {
++impl_ser_tlv_based!(PaymentMetadata, {
+ 	(0, lsps2_parameters, option),
+ });
+ 
+@@ -245,7 +245,7 @@ impl Bolt11Payment {
+ 				let payee_pubkey = invoice.recover_payee_pub_key();
+ 				log_info!(
+ 					self.logger,
+-					"Initiated sending {} msat to {}",
++					"Initiated sending {} msat to {:?}",
+ 					payment_amount_msat,
+ 					payee_pubkey
+ 				);
+@@ -269,6 +269,10 @@ impl Bolt11Payment {
+ 
+ 				Ok(payment_id)
+ 			},
++			Err(Bolt11PaymentError::PqVerificationFailed) => {
++				log_error!(self.logger, "PQLN invoice verification failed");
++				Err(Error::InvalidInvoice)
++			},
+ 			Err(Bolt11PaymentError::InvalidAmount) => {
+ 				log_error!(self.logger, "{}", invalid_amount_log);
+ 				return Err(Error::InvalidInvoice);
+diff --git a/src/payment/pending_payment_store.rs b/src/payment/pending_payment_store.rs
+index 30a1135..a0fad89 100644
+--- a/src/payment/pending_payment_store.rs
++++ b/src/payment/pending_payment_store.rs
+@@ -6,7 +6,7 @@
+ // accordance with one or both of these licenses.
+ 
+ use bitcoin::Txid;
+-use lightning::impl_writeable_tlv_based;
++use lightning::impl_ser_tlv_based;
+ use lightning::ln::channelmanager::PaymentId;
+ 
+ use crate::data_store::{StorableObject, StorableObjectUpdate};
+@@ -30,7 +30,7 @@ pub(crate) struct FundingTxCandidate {
+ 	pub fee_paid_msat: Option<u64>,
+ }
+ 
+-impl_writeable_tlv_based!(FundingTxCandidate, {
++impl_ser_tlv_based!(FundingTxCandidate, {
+ 	(0, txid, required),
+ 	(2, amount_msat, option),
+ 	(4, fee_paid_msat, option),
+@@ -62,7 +62,7 @@ impl PendingPaymentDetails {
+ 	}
+ }
+ 
+-impl_writeable_tlv_based!(PendingPaymentDetails, {
++impl_ser_tlv_based!(PendingPaymentDetails, {
+ 	(0, details, required),
+ 	(2, conflicting_txids, optional_vec),
+ 	(4, candidates, optional_vec),
+diff --git a/src/payment/store.rs b/src/payment/store.rs
+index 3163ed1..793dc02 100644
+--- a/src/payment/store.rs
++++ b/src/payment/store.rs
+@@ -16,8 +16,8 @@ use lightning::ln::types::ChannelId;
+ use lightning::offers::offer::OfferId;
+ use lightning::util::ser::{Readable, Writeable};
+ use lightning::{
+-	_init_and_read_len_prefixed_tlv_fields, impl_writeable_tlv_based,
+-	impl_writeable_tlv_based_enum, write_tlv_fields,
++	_init_and_read_len_prefixed_tlv_fields, impl_ser_tlv_based,
++	impl_ser_tlv_based_enum, write_tlv_fields,
+ };
+ use lightning_types::payment::{PaymentHash, PaymentPreimage, PaymentSecret};
+ use lightning_types::string::UntrustedString;
+@@ -374,7 +374,7 @@ pub enum PaymentDirection {
+ 	Outbound,
+ }
+ 
+-impl_writeable_tlv_based_enum!(PaymentDirection,
++impl_ser_tlv_based_enum!(PaymentDirection,
+ 	(0, Inbound) => {},
+ 	(1, Outbound) => {}
+ );
+@@ -391,7 +391,7 @@ pub enum PaymentStatus {
+ 	Failed,
+ }
+ 
+-impl_writeable_tlv_based_enum!(PaymentStatus,
++impl_ser_tlv_based_enum!(PaymentStatus,
+ 	(0, Pending) => {},
+ 	(2, Succeeded) => {},
+ 	(4, Failed) => {}
+@@ -407,7 +407,7 @@ pub struct Channel {
+ 	pub channel_id: ChannelId,
+ }
+ 
+-impl_writeable_tlv_based!(Channel, {
++impl_ser_tlv_based!(Channel, {
+ 	(0, counterparty_node_id, required),
+ 	(2, channel_id, required),
+ });
+@@ -467,7 +467,7 @@ pub enum TransactionType {
+ 	},
+ }
+ 
+-impl_writeable_tlv_based_enum!(TransactionType,
++impl_ser_tlv_based_enum!(TransactionType,
+ 	(0, Funding) => {
+ 		(0, channels, optional_vec),
+ 	},
+@@ -649,7 +649,7 @@ pub enum PaymentKind {
+ 	},
+ }
+ 
+-impl_writeable_tlv_based_enum!(PaymentKind,
++impl_ser_tlv_based_enum!(PaymentKind,
+ 	(0, Onchain) => {
+ 		(0, txid, required),
+ 		(1, tx_type, option),
+@@ -709,7 +709,7 @@ pub enum ConfirmationStatus {
+ 	Unconfirmed,
+ }
+ 
+-impl_writeable_tlv_based_enum!(ConfirmationStatus,
++impl_ser_tlv_based_enum!(ConfirmationStatus,
+ 	(0, Confirmed) => {
+ 		(0, block_hash, required),
+ 		(2, height, required),
+@@ -734,7 +734,7 @@ pub struct LSPS2Parameters {
+ 	pub max_proportional_opening_fee_ppm_msat: Option<u64>,
+ }
+ 
+-impl_writeable_tlv_based!(LSPS2Parameters, {
++impl_ser_tlv_based!(LSPS2Parameters, {
+ 	(0, max_total_opening_fee_msat, option),
+ 	(2, max_proportional_opening_fee_ppm_msat, option),
+ });
+@@ -866,7 +866,7 @@ mod tests {
+ 		pub status: PaymentStatus,
+ 	}
+ 
+-	impl_writeable_tlv_based!(OldPaymentDetails, {
++	impl_ser_tlv_based!(OldPaymentDetails, {
+ 		(0, hash, required),
+ 		(2, preimage, required),
+ 		(4, secret, required),
+@@ -965,7 +965,7 @@ mod tests {
+ 		status: ConfirmationStatus,
+ 	}
+ 
+-	impl_writeable_tlv_based!(OldOnchainKind, {
++	impl_ser_tlv_based!(OldOnchainKind, {
+ 		(0, txid, required),
+ 		(2, status, required),
+ 	});
+@@ -1487,7 +1487,7 @@ mod tests {
+ 		lsp_fee_limits: LSPS2Parameters,
+ 	}
+ 
+-	impl_writeable_tlv_based!(LegacyBolt11JitKind, {
++	impl_ser_tlv_based!(LegacyBolt11JitKind, {
+ 		(0, hash, required),
+ 		(1, counterparty_skimmed_fee_msat, option),
+ 		(2, preimage, option),
+diff --git a/src/peer_store.rs b/src/peer_store.rs
+index 8345bf7..2e7fdd2 100644
+--- a/src/peer_store.rs
++++ b/src/peer_store.rs
+@@ -10,7 +10,7 @@ use std::ops::Deref;
+ use std::sync::{Arc, RwLock};
+ 
+ use bitcoin::secp256k1::PublicKey;
+-use lightning::impl_writeable_tlv_based;
++use lightning::impl_ser_tlv_based;
+ use lightning::util::persist::KVStore;
+ use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
+ 
+@@ -163,7 +163,7 @@ pub(crate) struct PeerInfo {
+ 	pub address: SocketAddress,
+ }
+ 
+-impl_writeable_tlv_based!(PeerInfo, {
++impl_ser_tlv_based!(PeerInfo, {
+ 	(0, node_id, required),
+ 	(2, address, required),
+ });
+diff --git a/src/types.rs b/src/types.rs
+index 1a61daa..7297db3 100644
+--- a/src/types.rs
++++ b/src/types.rs
+@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
+ use bitcoin::secp256k1::PublicKey;
+ use bitcoin::{OutPoint, ScriptBuf};
+ use lightning::chain::chainmonitor;
+-use lightning::impl_writeable_tlv_based;
++use lightning::impl_ser_tlv_based;
+ use lightning::ln::channel_state::{
+ 	ChannelDetails as LdkChannelDetails, ChannelShutdownState, CounterpartyForwardingInfo,
+ };
+@@ -703,7 +703,7 @@ pub struct CustomTlvRecord {
+ 	pub value: Vec<u8>,
+ }
+ 
+-impl_writeable_tlv_based!(CustomTlvRecord, {
++impl_ser_tlv_based!(CustomTlvRecord, {
+ 	(0, type_num, required),
+ 	(2, value, required),
+ });
+diff --git a/src/wallet/mod.rs b/src/wallet/mod.rs
+index b9c12b4..3fe13cd 100644
+--- a/src/wallet/mod.rs
++++ b/src/wallet/mod.rs
+@@ -2523,6 +2523,30 @@ impl NodeSigner for WalletKeysManager {
+ 	fn sign_message(&self, msg: &[u8]) -> Result<String, ()> {
+ 		self.inner.sign_message(msg)
+ 	}
++
++	fn get_pq_node_id(&self) -> Option<[u8; lightning::sign::pq::PQ_PUBLIC_KEY_LEN]> {
++		self.inner.get_pq_node_id()
++	}
++
++	fn sign_pq_gossip_message(
++		&self, msg: UnsignedGossipMessage<'_>,
++	) -> Option<[u8; lightning::sign::pq::PQ_SIGNATURE_LEN]> {
++		self.inner.sign_pq_gossip_message(msg)
++	}
++
++	fn sign_pq_bolt11_invoice(
++		&self, msg: &[u8],
++	) -> Option<[u8; lightning::sign::pq::PQ_SIGNATURE_LEN]> {
++		self.inner.sign_pq_bolt11_invoice(msg)
++	}
++
++	fn get_pq_kem_node_id(&self) -> Option<[u8; lightning::ln::peer_handler::PQ_KEM_EK_LEN]> {
++		self.inner.get_pq_kem_node_id()
++	}
++
++	fn pq_kem_decapsulate(&self, ciphertext: &[u8; 1088]) -> Option<[u8; 32]> {
++		self.inner.pq_kem_decapsulate(ciphertext)
++	}
+ }
+ 
+ impl OutputSpender for WalletKeysManager {
+diff --git a/src/wallet/persist.rs b/src/wallet/persist.rs
+index 6384d0f..296a586 100644
+--- a/src/wallet/persist.rs
++++ b/src/wallet/persist.rs
+@@ -11,7 +11,7 @@ use std::sync::Arc;
+ 
+ use bdk_chain::Merge;
+ use bdk_wallet::{AsyncWalletPersister, ChangeSet};
+-use lightning::impl_writeable_tlv_based;
++use lightning::impl_ser_tlv_based;
+ use lightning::util::persist::KVStore;
+ use lightning::util::ser::{Readable, Writeable};
+ 
+@@ -39,7 +39,7 @@ struct AddressPoolRecord {
+ 	indices: Vec<u32>,
+ }
+ 
+-impl_writeable_tlv_based!(AddressPoolRecord, {
++impl_ser_tlv_based!(AddressPoolRecord, {
+ 	(0, indices, required_vec),
+ });
+ 

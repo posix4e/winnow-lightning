@@ -1,0 +1,27 @@
+[package]
+name = "pq-light-client"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[dependencies]
+ldk-node = { path = "../../.deps/ldk-node", default-features = false, features = ["chain-esplora", "storage-sqlite"] }
+lightning = { path = "../../.deps/pq-rust-lightning/lightning", features = ["post-quantum"] }
+lightning-invoice = { path = "../../.deps/pq-rust-lightning/lightning-invoice", features = ["std", "post-quantum"] }
+lightning-net-tokio = { path = "../../.deps/pq-rust-lightning/lightning-net-tokio", features = ["post-quantum"] }
+pq-invoice-verify = { path = "../pq-invoice-verify" }
+
+[patch."https://github.com/lightningdevkit/rust-lightning"]
+lightning = { path = "../../.deps/pq-rust-lightning/lightning" }
+lightning-types = { path = "../../.deps/pq-rust-lightning/lightning-types" }
+lightning-invoice = { path = "../../.deps/pq-rust-lightning/lightning-invoice" }
+lightning-net-tokio = { path = "../../.deps/pq-rust-lightning/lightning-net-tokio" }
+lightning-persister = { path = "../../.deps/pq-rust-lightning/lightning-persister" }
+lightning-background-processor = { path = "../../.deps/pq-rust-lightning/lightning-background-processor" }
+lightning-rapid-gossip-sync = { path = "../../.deps/pq-rust-lightning/lightning-rapid-gossip-sync" }
+lightning-block-sync = { path = "../../.deps/pq-rust-lightning/lightning-block-sync" }
+lightning-transaction-sync = { path = "../../.deps/pq-rust-lightning/lightning-transaction-sync" }
+lightning-liquidity = { path = "../../.deps/pq-rust-lightning/lightning-liquidity" }
+lightning-macros = { path = "../../.deps/pq-rust-lightning/lightning-macros" }
+lightning-dns-resolver = { path = "../../.deps/pq-rust-lightning/lightning-dns-resolver" }

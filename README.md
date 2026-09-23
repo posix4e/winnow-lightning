@@ -1,30 +1,56 @@
 # Winnow Lightning research
 
-A separate research fork of [Winnow](https://github.com/winnowwallet/winnow)'s direct-peer light-client approach for **post-quantum Lightning**. It reuses Winnow's `WalletCore` at a pinned revision, has its own Git history, and does not change the Winnow app. The current prototype has two independently runnable parts:
+A separate research fork of [Winnow](https://github.com/winnowwallet/winnow)'s light-client approach for **post-quantum Lightning**. It reuses Winnow's `WalletCore` at a pinned revision, has its own Git history, and does not change the Winnow app. The current prototype has three parts:
 
 | Part | What works now |
 | --- | --- |
+| `pq-light-client` | A regtest-only LDK Node wallet and channel manager backed by Esplora. It uses the PQLN fork for PQ peer transport, channels, invoice creation, and fail-closed payment routing. An interactive CLI can fund its wallet, connect to a PQ peer, open a channel, create an invoice, and send a payment after checking a separately trusted ML-DSA key. |
 | `ChainWatch` | Reads Bitcoin headers and BIP157/158 compact filters directly from peers on regtest or signet. Watches a prospective channel funding script and, when given its outpoint, detects a later spend. Persists observations and rolls them back on a reorganization. |
 | `pq-invoice-verify` | Checks a BOLT 11 invoice's classical signature and PQLN ML-DSA signature against an independently trusted payee key. Missing, unanchored, invalid, or expired invoices fail closed. |
 
-**A spendable Lightning light client is the next step.** The two parts are not yet connected to an LDK `ChannelManager`, so this repository cannot open channels or send payments. See [Integration path](docs/integration.md).
+`pq-light-client` is a **research regtest client**, not a production wallet. It does not require a local Bitcoin full node, but its Esplora source is a trusted server dependency. The separate direct-peer `ChainWatch` is not yet the node's chain source. A two-node regtest run completed PQ transport, channel funding, a hybrid ML-KEM payment, receipt, and a second payment after restart. See [Integration path](docs/integration.md).
 
 ## Why this shape
 
 [PQLN](https://arxiv.org/abs/2609.13781) is a promising research extension to Lightning's off-chain gossip, transport, invoices, offers, and payment onions. Its [authors' implementation](https://github.com/ahmet-kurt/pq-rust-lightning) explicitly leaves funding, commitment, and penalty transactions under Bitcoin's current signatures. Its [sample node](https://github.com/ahmet-kurt/pq-ldk-sample) uses Bitcoin Core RPC, so it is a protocol reference rather than the light-client foundation here. The authors also say their fork is a research artifact and that its protocol identifiers still need BOLT assignment ([design discussion](https://delvingbitcoin.org/t/pqln-post-quantum-security-for-the-bitcoin-lightning-networks-off-chain-surfaces/2893)).
 
-`ChainWatch` reuses Winnow's Bitcoin P2P library at a pinned revision. This is a source dependency in this repository; no source files or settings are added to Winnow. Its regtest smoke test runs a temporary Bitcoin Core **peer** as the fixture, but the client communicates with that peer over the Bitcoin P2P port, never RPC.
+`ChainWatch` reuses Winnow's Bitcoin P2P library at a pinned revision. This is a source dependency in this repository; no source files or settings are added to Winnow. Its regtest smoke test runs a temporary Bitcoin Core **peer** as the fixture, but the watcher communicates with that peer over the Bitcoin P2P port, never RPC. The payment-capable node currently talks to Esplora instead.
 
 ## Build and check
 
-Requires Swift 6, Rust 1.75+, Git, and a C compiler. The regtest smoke also needs Bitcoin Core 31.1, Python 3, and `jq`.
+Requires Swift 6, Rust 1.85+, Git, and a C compiler. The regtest smoke also needs Bitcoin Core 31.1, Python 3, and `jq`.
 
 ```sh
 ./scripts/bootstrap.sh
 ./scripts/check.sh
 ```
 
-`bootstrap.sh` checks out the exact upstream revisions listed in [Dependencies](#dependencies) under ignored `.deps/`. `check.sh` runs the Rust and Swift tests, then funds and spends a test output on a disposable regtest node. It removes that node when finished.
+`bootstrap.sh` checks out the exact upstream revisions listed in [Dependencies](#dependencies) under ignored `.deps/` and applies the reviewed LDK Node compatibility patch. `check.sh` builds and tests the Rust and Swift components, then funds and spends a test output on a disposable regtest node. It removes that node when finished. The funding/spend smoke verifies `ChainWatch`, not a Lightning payment.
+
+## Try the regtest Lightning light client
+
+Provide a regtest [Esplora-compatible server](https://github.com/Blockstream/esplora/blob/master/API.md) and a compatible PQLN peer. The client saves its mnemonic and node state under `state/`; keep that directory private and use only disposable regtest funds. The [two-node regtest walkthrough](docs/regtest-journey.md) gives a complete local setup.
+
+```sh
+cargo run --manifest-path crates/pq-light-client/Cargo.toml -- \
+  state/alice http://127.0.0.1:8094/regtest/api 127.0.0.1:9736
+```
+
+At the prompt:
+
+```text
+address
+identity
+sync
+balance
+connect PEER_NODE_ID 127.0.0.1:9737 PEER_ML_KEM_KEY_HEX_FILE
+open-public PEER_NODE_ID 100000
+channels
+invoice 1000 Research payment
+pay INVOICE_FILE TRUSTED_PAYEE_ML_DSA_KEY_HEX_FILE
+```
+
+Fund the printed on-chain address and run `sync` before opening a channel. Each node writes `node-id.txt`, `pq-kem-key.hex`, and `pq-node-key.hex` into its state directory so another local regtest node can pin its public keys. For any remote peer, verify those keys through an authenticated channel outside this client. `connect` saves the peer for restart; `open` creates a private channel, while `open-public` creates an announced channel when a listening address is configured. PQ payments require every hop's ML-KEM key to be available in authenticated PQLN gossip, so a newly opened private channel alone may not provide a payable PQ route. Payment failure is expected in that case; the client never falls back to a classical onion. Keep the client online while a channel holds funds.
 
 ## Use the chain watcher
 
@@ -60,5 +86,6 @@ The verifier returns success only for a valid, unexpired invoice with a PQLN sig
 | --- | --- | --- |
 | [PQLN rust-lightning fork](https://github.com/ahmet-kurt/pq-rust-lightning) | `1d7dda453dd385f3ede84c39eed5d20afe34e02a` | ML-DSA invoice verification and reference protocol code |
 | [Winnow](https://github.com/winnowwallet/winnow) | `a1cc6fbaf6f0d3d68c675e1a78e8d5b8311767f7` | Bitcoin P2P headers and compact-filter client |
+| [LDK Node](https://github.com/lightningdevkit/ldk-node) | `b812128c51c0171f510d81847b3ed18f0c34a294` | Regtest wallet, channel manager, Esplora sync, and persistence; adapted by [`patches/ldk-node-pqln.patch`](patches/ldk-node-pqln.patch) |
 
-The upstream projects remain in `.deps/` and are not vendored or modified. `Cargo.lock` records the Rust dependency graph.
+The upstream projects remain in ignored `.deps/` and are not vendored into this repo. The LDK Node checkout receives a local patch after checkout; the upstream repository is unchanged. Each Rust crate has its own `Cargo.lock`.
