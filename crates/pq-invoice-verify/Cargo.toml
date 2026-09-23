@@ -1,0 +1,10 @@
+[package]
+name = "pq-invoice-verify"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[dependencies]
+lightning = { path = "../../.deps/pq-rust-lightning/lightning", features = ["post-quantum"] }
+lightning-invoice = { path = "../../.deps/pq-rust-lightning/lightning-invoice", features = ["std", "post-quantum"] }
