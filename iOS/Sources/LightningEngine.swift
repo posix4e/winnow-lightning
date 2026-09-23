@@ -39,7 +39,7 @@ struct ChannelSummary: Identifiable {
 }
 
 enum LightningSetupError: LocalizedError {
-    case missingServer
+    case missingBitcoinPeer
     case badHex(String, Int)
     case keychain(OSStatus)
     case random(OSStatus)
@@ -48,7 +48,7 @@ enum LightningSetupError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .missingServer: return "Enter your regtest Esplora URL first."
+        case .missingBitcoinPeer: return "Enter the address of a regtest Bitcoin peer first."
         case let .badHex(name, bytes): return "\(name) needs exactly \(bytes * 2) hexadecimal characters."
         case let .keychain(status): return "Could not open the local seed in Keychain (\(status))."
         case let .random(status): return "Could not create a local seed (\(status))."
@@ -120,21 +120,19 @@ final class LightningEngine {
     private var cachedAddress = ""
     private var recentEvents: [String] = []
 
-    func start(server: String, listenAddress: String, announceAddress: String,
+    func start(bitcoinPeer: String, listenAddress: String, announceAddress: String,
                peer: PeerConfiguration, savedPins: [PeerPin],
                completion: @escaping (Result<LightningSnapshot, Error>) -> Void) {
         queue.async {
             do {
-                let url = server.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard let parsed = URL(string: url), ["http", "https"].contains(parsed.scheme?.lowercased() ?? ""), parsed.host != nil else {
-                    throw LightningSetupError.missingServer
-                }
+                let address = bitcoinPeer.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !address.isEmpty else { throw LightningSetupError.missingBitcoinPeer }
                 if let existing = self.node { try? existing.stop(); self.node = nil }
                 let seed = try SeedStore.loadOrCreate()
                 let entropy = try NodeEntropy.fromSeedBytes(seedBytes: seed)
                 let builder = Builder()
                 builder.setNetwork(network: .regtest)
-                builder.setChainSourceEsplora(serverUrl: url, syncConfig: nil)
+                builder.setChainSourceP2p(peer: address)
                 builder.setGossipSourceP2p()
                 let listen = listenAddress.trimmingCharacters(in: .whitespacesAndNewlines)
                 let announce = announceAddress.trimmingCharacters(in: .whitespacesAndNewlines)

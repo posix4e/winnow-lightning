@@ -1,89 +1,77 @@
-# Two-node regtest journey
+# Two-node direct-peer regtest journey
 
-This exercises the payment-capable light client with disposable Bitcoin regtest funds. The client uses Esplora for chain data; Bitcoin Core runs only inside the test fixture. The example below uses Blockstream's [Esplora Docker image](https://github.com/Blockstream/esplora) for Apple Silicon. Use the corresponding image tag for another CPU architecture.
+This tests a PQLN payment using disposable regtest funds. The Lightning clients talk to Bitcoin Core only through Bitcoin P2P. Core's RPC interface is used by the fixture commands to mine blocks.
 
-## Start the chain fixture
+## Bitcoin peer
 
-From the repository root:
+From the repository root, with Bitcoin Core installed:
 
 ```sh
 ./scripts/bootstrap.sh
-docker run -d --rm --name winnow-lightning-esplora \
-  -p 127.0.0.1:8094:80 \
-  -e NO_PRECACHE=1 -e ENABLE_LIGHTMODE=1 \
-  blockstream/esplora:latest-arm64 \
-  bash -c '/srv/explorer/run.sh bitcoin-regtest explorer'
+mkdir -p state/bitcoin-regtest-fixture
+FIXTURE="$PWD/state/bitcoin-regtest-fixture"
+bitcoind -regtest -datadir="$FIXTURE" -daemon -server=1 \
+  -blockfilterindex=1 -peerblockfilters=1 -txindex=1 -fallbackfee=0.00001
+bitcoin-cli -regtest -datadir="$FIXTURE" createwallet winnow-test
+MINING_ADDRESS=$(bitcoin-cli -regtest -datadir="$FIXTURE" -rpcwallet=winnow-test getnewaddress)
+bitcoin-cli -regtest -datadir="$FIXTURE" -rpcwallet=winnow-test \
+  generatetoaddress 110 "$MINING_ADDRESS" >/dev/null
 ```
 
-Wait until `curl http://127.0.0.1:8094/regtest/api/blocks/tip/height` returns a number. The fixture mines 100 blocks at startup. Then create a funding wallet in its Bitcoin Core instance:
+Regtest P2P normally listens on port `18444`. For a phone, make this port reachable on the LAN and enter the peer's LAN address in the app. The phone does not need RPC access.
 
-```sh
-docker exec winnow-lightning-esplora /srv/explorer/bitcoin/bin/bitcoin-cli \
-  -regtest -datadir=/data/bitcoin createwallet winnow-test
-```
+## Lightning nodes
 
-## Start Alice and Bob
-
-Run these in separate terminals:
+Run Alice and Bob in separate terminals:
 
 ```sh
 cargo run --manifest-path crates/pq-light-client/Cargo.toml -- \
-  state/regtest-alice http://127.0.0.1:8094/regtest/api 127.0.0.1:9736
+  state/regtest-alice 127.0.0.1:18444 127.0.0.1:9736
 ```
 
 ```sh
 cargo run --manifest-path crates/pq-light-client/Cargo.toml -- \
-  state/regtest-bob http://127.0.0.1:8094/regtest/api 127.0.0.1:9737
+  state/regtest-bob 127.0.0.1:18444 127.0.0.1:9737
 ```
 
-The nodes write their public identity files under their state directories. Use `cat state/regtest-bob/node-id.txt` to get Bob's node ID. In Alice's prompt, run `address` and copy the printed address.
-
-## Fund and open
-
-In a third terminal, mine spendable fixture coins, then send 0.01 regtest BTC to Alice's address:
+Alice's `address` command prints her funding address. Bob's public ID is in `state/regtest-bob/node-id.txt`. Wait for initial block synchronization, then fund Alice in a third terminal:
 
 ```sh
-mining_address=$(docker exec winnow-lightning-esplora \
-  /srv/explorer/bitcoin/bin/bitcoin-cli -regtest -datadir=/data/bitcoin \
-  -rpcwallet=winnow-test getnewaddress)
-docker exec winnow-lightning-esplora /srv/explorer/bitcoin/bin/bitcoin-cli \
-  -regtest -datadir=/data/bitcoin -rpcwallet=winnow-test \
-  generatetoaddress 101 "$mining_address" >/dev/null
-docker exec winnow-lightning-esplora /srv/explorer/bitcoin/bin/bitcoin-cli \
-  -regtest -datadir=/data/bitcoin -rpcwallet=winnow-test \
-  sendtoaddress ALICE_ADDRESS 0.01
-docker exec winnow-lightning-esplora /srv/explorer/bitcoin/bin/bitcoin-cli \
-  -regtest -datadir=/data/bitcoin -rpcwallet=winnow-test \
-  generatetoaddress 2 "$mining_address" >/dev/null
+FIXTURE="$PWD/state/bitcoin-regtest-fixture"
+MINING_ADDRESS=$(bitcoin-cli -regtest -datadir="$FIXTURE" -rpcwallet=winnow-test getnewaddress)
+bitcoin-cli -regtest -datadir="$FIXTURE" -rpcwallet=winnow-test \
+  sendtoaddress ALICE_ADDRESS 0.002
+bitcoin-cli -regtest -datadir="$FIXTURE" -rpcwallet=winnow-test \
+  generatetoaddress 1 "$MINING_ADDRESS" >/dev/null
 ```
 
-Replace `ALICE_ADDRESS` with Alice's printed address. In Alice's prompt, run `sync` and `balance`; the total on-chain balance should be 1,000,000 sats. Connect using Bob's independently checked node ID and ML-KEM key:
+Replace `ALICE_ADDRESS` with the printed address. Run `sync` and `balance` at Alice; the wallet should show 200,000 sats. Then connect to Bob and open a public channel:
 
 ```text
 connect BOB_NODE_ID 127.0.0.1:9737 state/regtest-bob/pq-kem-key.hex
 open-public BOB_NODE_ID 100000
 ```
 
-Replace `BOB_NODE_ID` with the contents of `state/regtest-bob/node-id.txt`. Alice and Bob should report `ChannelPending`. Mine seven blocks with the fixture command above, changing `2` to `7`. Run `sync` in both prompts. Both should report `ChannelReady`, and `channels` should show `is_usable: true`.
+Replace `BOB_NODE_ID` with the contents of Bob's `node-id.txt`. Check that the funding transaction appears in Bitcoin Core's mempool, then mine six blocks:
 
-## Pay a PQLN invoice
+```sh
+bitcoin-cli -regtest -datadir="$FIXTURE" getrawmempool
+bitcoin-cli -regtest -datadir="$FIXTURE" -rpcwallet=winnow-test \
+  generatetoaddress 6 "$MINING_ADDRESS" >/dev/null
+```
 
-In Bob's prompt:
+Alice and Bob should both report `ChannelReady`; `channels` should show `is_usable: true`. At Bob, create an invoice:
 
 ```text
 invoice-file 1000 state/regtest-bob/invoice.txt Test payment
 ```
 
-The CLI runs from the repository root, so the path above is relative to that root. In Alice's prompt:
+At Alice, pay against Bob's independently trusted ML-DSA key:
 
 ```text
 pay state/regtest-bob/invoice.txt state/regtest-bob/pq-node-key.hex
 ```
 
-Alice verifies the invoice against Bob's pinned ML-DSA key before sending. Expect `PaymentSuccessful` at Alice and `PaymentReceived` at Bob. Alice's `state/regtest-alice/node/ldk_node.log` should contain `PQ: built hybrid ML-KEM payment onion`.
+Expect `PaymentSuccessful` at Alice and `PaymentReceived` at Bob. Restart both clients with the same state directories and pay a second invoice to check persistence. Stop the fixture with `bitcoin-cli -regtest -datadir="$FIXTURE" stop`.
 
-Use `quit` in both prompts and restart the same commands. `channels` should still show a usable channel; create another invoice and pay it to check persistence and PQ reconnection. When finished, stop the fixture with `docker stop winnow-lightning-esplora`.
-
-This walkthrough uses a public regtest channel so authenticated PQLN gossip can provide the ML-KEM route key. It has no offline watchtower and must not be used with real funds.
-
-On September 23, 2026, this journey was run with two local nodes and the Blockstream Esplora regtest container: a 100,000 sat channel reached `ChannelReady`, a 1,000 msat invoice reached `PaymentSuccessful` and `PaymentReceived`, both nodes restarted with `is_usable: true`, and a 2,000 msat invoice was paid successfully. Alice's log recorded a hybrid ML-KEM onion over one hop. The automated `scripts/check.sh` still covers the independent filter watcher and unit tests; this two-node journey is manual.
+This public regtest channel lets authenticated PQLN gossip provide the ML-KEM route key. Keep the clients online while channel funds exist; there is no watchtower or background iPhone service. On September 23, 2026, this journey completed both payments, including one after restart, without Esplora. The automated `scripts/check.sh` still covers only the independent watcher and unit tests.

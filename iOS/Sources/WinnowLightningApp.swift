@@ -23,7 +23,7 @@ struct WinnowLightningApp: App {
 
 @MainActor
 final class LightningModel: ObservableObject {
-    @Published var server = UserDefaults.standard.string(forKey: "esplora") ?? ""
+    @Published var bitcoinPeer = UserDefaults.standard.string(forKey: "bitcoinPeer") ?? ""
     @Published var listenAddress = UserDefaults.standard.string(forKey: "listenAddress") ?? "0.0.0.0:9735"
     @Published var announceAddress = UserDefaults.standard.string(forKey: "announceAddress") ?? ""
     @Published var peerNodeID = UserDefaults.standard.string(forKey: "peerNodeID") ?? ""
@@ -55,7 +55,7 @@ final class LightningModel: ObservableObject {
         shouldRun = true
         isBusy = true
         notice = "Starting regtest node…"
-        engine.start(server: server, listenAddress: listenAddress,
+        engine.start(bitcoinPeer: bitcoinPeer, listenAddress: listenAddress,
                      announceAddress: announceAddress, peer: peer, savedPins: savedPins) { result in
             DispatchQueue.main.async {
                 self.isBusy = false
@@ -170,7 +170,7 @@ final class LightningModel: ObservableObject {
 
     private func saveSettings() {
         let defaults = UserDefaults.standard
-        defaults.set(server, forKey: "esplora")
+        defaults.set(bitcoinPeer, forKey: "bitcoinPeer")
         defaults.set(listenAddress, forKey: "listenAddress")
         defaults.set(announceAddress, forKey: "announceAddress")
         defaults.set(peerNodeID, forKey: "peerNodeID")
@@ -249,7 +249,7 @@ private struct WalletView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("PQLN / REGTEST").font(.caption.weight(.bold)).tracking(2).foregroundStyle(Palette.mint)
                     Text("Lightning, in a lab.").font(.largeTitle.bold())
-                    Text("A light client using an Esplora server and pinned quantum-resistant peer keys.")
+                    Text("A light client connecting to Bitcoin peers and using pinned quantum-resistant Lightning peer keys.")
                         .font(.subheadline).foregroundStyle(Palette.muted)
                 }.padding(.vertical, 8)
 
@@ -260,7 +260,7 @@ private struct WalletView: View {
                         Spacer()
                         if model.isBusy { ProgressView() }
                     }
-                    Text(model.notice.isEmpty ? "Enter a regtest Esplora URL in Setup, then start." : model.notice)
+                    Text(model.notice.isEmpty ? "Enter a regtest Bitcoin peer in Setup, then start." : model.notice)
                         .font(.footnote).foregroundStyle(Palette.muted)
                     Button(model.snapshot == nil ? "Start node" : "Stop node") {
                         model.snapshot == nil ? model.start() : model.stop()
@@ -424,15 +424,15 @@ private struct SettingsView: View {
 
     var body: some View {
         Form {
-            Section("Chain source") {
-                TextField("http://your-regtest-esplora:3002", text: $model.server)
+            Section("Bitcoin peer") {
+                TextField("192.168.1.8:18444", text: $model.bitcoinPeer)
                     .textInputAutocapitalization(.never).autocorrectionDisabled()
                     .keyboardType(.URL)
-                Text("The phone connects directly to your Esplora server. Use an address reachable from the phone; localhost points to the phone itself.")
+                Text("The phone connects to this Bitcoin peer over Bitcoin P2P. Use its regtest P2P port and an address reachable from the phone.")
                     .font(.footnote).foregroundStyle(.secondary)
-                Text("An HTTP server can observe wallet queries and those requests are unencrypted. Use a trusted local server or HTTPS.")
+                Text("This prototype reads full regtest blocks to keep channel monitors up to date. Keep the app open while it holds channel funds.")
                     .font(.footnote).foregroundStyle(.secondary)
-                Button("Start with this server") { model.start() }.disabled(model.isBusy)
+                Button("Start with this peer") { model.start() }.disabled(model.isBusy)
             }
             Section("Peer reachability") {
                 TextField("Listen address", text: $model.listenAddress)

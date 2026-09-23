@@ -186,11 +186,11 @@ fn command(node: &Node, state: &Path, peers: &mut Vec<Peer>, line: &str) -> Resu
 fn run() -> Result<(), String> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() == 2 && args[1] == "--help" {
-        println!("usage: pq-light-client STATE_DIR REGTEST_ESPLORA_URL [LISTEN_ADDRESS]");
+        println!("usage: pq-light-client STATE_DIR BITCOIN_PEER_HOST:PORT [LISTEN_ADDRESS]");
         return Ok(());
     }
     if args.len() < 3 || args.len() > 4 {
-        return Err("usage: pq-light-client STATE_DIR REGTEST_ESPLORA_URL [LISTEN_ADDRESS]".into());
+        return Err("usage: pq-light-client STATE_DIR BITCOIN_PEER_HOST:PORT [LISTEN_ADDRESS]".into());
     }
     let state = PathBuf::from(&args[1]);
     fs::create_dir_all(&state).map_err(|error| error.to_string())?;
@@ -203,7 +203,7 @@ fn run() -> Result<(), String> {
     let mut peers = read_peers(&state)?;
     let mut builder = Builder::new();
     builder.set_network(Network::Regtest);
-    builder.set_chain_source_esplora(args[2].clone(), None);
+    builder.set_chain_source_p2p(args[2].clone());
     builder.set_gossip_source_p2p();
     builder.set_node_alias("winnow-pqln-regtest".to_string()).map_err(|e| e.to_string())?;
     if let Some(listen) = args.get(3) {

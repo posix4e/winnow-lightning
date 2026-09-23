@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 "$ROOT/scripts/bootstrap.sh"
 cd "$ROOT/.deps/ldk-node"
 
-FEATURES="uniffi,chain-esplora,storage-sqlite,lightning/post-quantum,lightning-invoice/post-quantum,lightning-net-tokio/post-quantum"
+FEATURES="uniffi,chain-p2p,storage-sqlite,lightning/post-quantum,lightning-invoice/post-quantum,lightning-net-tokio/post-quantum"
 BINDINGS="bindings/swift"
 export IPHONEOS_DEPLOYMENT_TARGET=17.0
 

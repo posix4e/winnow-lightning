@@ -15,7 +15,7 @@
     <key>NSAppTransportSecurity</key>
     <dict><key>NSAllowsArbitraryLoads</key><true/></dict>
     <key>NSLocalNetworkUsageDescription</key>
-    <string>Connect to your regtest Lightning peer and Esplora server on your local network.</string>
+    <string>Connect to regtest Bitcoin and Lightning peers on your local network.</string>
     <key>UIApplicationSceneManifest</key>
     <dict><key>UIApplicationSupportsMultipleScenes</key><false/></dict>
     <key>UILaunchScreen</key><dict/>
