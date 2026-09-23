@@ -48,7 +48,7 @@ enum LightningSetupError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .missingBitcoinPeer: return "Enter the address of a regtest Bitcoin peer first."
+        case .missingBitcoinPeer: return "Enter two different regtest Bitcoin peer addresses first."
         case let .badHex(name, bytes): return "\(name) needs exactly \(bytes * 2) hexadecimal characters."
         case let .keychain(status): return "Could not open the local seed in Keychain (\(status))."
         case let .random(status): return "Could not create a local seed (\(status))."
@@ -120,19 +120,20 @@ final class LightningEngine {
     private var cachedAddress = ""
     private var recentEvents: [String] = []
 
-    func start(bitcoinPeer: String, listenAddress: String, announceAddress: String,
+    func start(bitcoinPeer: String, secondBitcoinPeer: String, listenAddress: String, announceAddress: String,
                peer: PeerConfiguration, savedPins: [PeerPin],
                completion: @escaping (Result<LightningSnapshot, Error>) -> Void) {
         queue.async {
             do {
                 let address = bitcoinPeer.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !address.isEmpty else { throw LightningSetupError.missingBitcoinPeer }
+                let secondAddress = secondBitcoinPeer.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !address.isEmpty && !secondAddress.isEmpty && address != secondAddress else { throw LightningSetupError.missingBitcoinPeer }
                 if let existing = self.node { try? existing.stop(); self.node = nil }
                 let seed = try SeedStore.loadOrCreate()
                 let entropy = try NodeEntropy.fromSeedBytes(seedBytes: seed)
                 let builder = Builder()
                 builder.setNetwork(network: .regtest)
-                builder.setChainSourceP2p(peer: address)
+                builder.setChainSourceP2p(peer: "\(address),\(secondAddress)")
                 builder.setGossipSourceP2p()
                 let listen = listenAddress.trimmingCharacters(in: .whitespacesAndNewlines)
                 let announce = announceAddress.trimmingCharacters(in: .whitespacesAndNewlines)

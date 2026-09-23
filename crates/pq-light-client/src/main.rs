@@ -105,8 +105,16 @@ fn load_or_create_entropy(state: &Path) -> Result<NodeEntropy, String> {
 fn command(node: &Node, state: &Path, peers: &mut Vec<Peer>, line: &str) -> Result<bool, String> {
     let mut words = line.split_whitespace();
     match words.next() {
-        Some("help") => println!("address | identity | sync | balance | status | channels | connect NODE_ID ADDRESS KEM_KEY_FILE | open NODE_ID SATS | open-public NODE_ID SATS | invoice MSAT DESCRIPTION | invoice-file MSAT OUTPUT_FILE DESCRIPTION | pay INVOICE_FILE TRUSTED_ML_DSA_KEY_FILE | quit"),
+        Some("help") => println!("address | identity | sync | balance | status | channels | test-watch REGTEST_ADDRESS | connect NODE_ID ADDRESS KEM_KEY_FILE | open NODE_ID SATS | open-public NODE_ID SATS | invoice MSAT DESCRIPTION | invoice-file MSAT OUTPUT_FILE DESCRIPTION | pay INVOICE_FILE TRUSTED_ML_DSA_KEY_FILE | quit"),
         Some("address") => println!("{}", node.onchain_payment().new_address().map_err(|e| e.to_string())?),
+        Some("test-watch") => {
+            let address = ldk_node::bitcoin::Address::from_str(words.next().ok_or("missing address")?)
+                .map_err(|e| e.to_string())?.require_network(ldk_node::bitcoin::Network::Regtest)
+                .map_err(|e| e.to_string())?;
+            if words.next().is_some() { return Err("too many arguments".into()); }
+            node.test_watch_script(address.script_pubkey());
+            println!("test watch registered");
+        }
         Some("identity") => {
             println!("node id: {}", node.node_id());
             println!("ML-DSA: {}", node.pq_node_id().map(|key| encode_hex(&key)).ok_or("PQ identity unavailable")?);
@@ -186,11 +194,11 @@ fn command(node: &Node, state: &Path, peers: &mut Vec<Peer>, line: &str) -> Resu
 fn run() -> Result<(), String> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() == 2 && args[1] == "--help" {
-        println!("usage: pq-light-client STATE_DIR BITCOIN_PEER_HOST:PORT [LISTEN_ADDRESS]");
+        println!("usage: pq-light-client STATE_DIR PEER1_HOST:PORT,PEER2_HOST:PORT [LISTEN_ADDRESS]");
         return Ok(());
     }
     if args.len() < 3 || args.len() > 4 {
-        return Err("usage: pq-light-client STATE_DIR BITCOIN_PEER_HOST:PORT [LISTEN_ADDRESS]".into());
+        return Err("usage: pq-light-client STATE_DIR PEER1_HOST:PORT,PEER2_HOST:PORT [LISTEN_ADDRESS]".into());
     }
     let state = PathBuf::from(&args[1]);
     fs::create_dir_all(&state).map_err(|error| error.to_string())?;

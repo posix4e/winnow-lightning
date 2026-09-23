@@ -24,6 +24,7 @@ struct WinnowLightningApp: App {
 @MainActor
 final class LightningModel: ObservableObject {
     @Published var bitcoinPeer = UserDefaults.standard.string(forKey: "bitcoinPeer") ?? ""
+    @Published var secondBitcoinPeer = UserDefaults.standard.string(forKey: "secondBitcoinPeer") ?? ""
     @Published var listenAddress = UserDefaults.standard.string(forKey: "listenAddress") ?? "0.0.0.0:9735"
     @Published var announceAddress = UserDefaults.standard.string(forKey: "announceAddress") ?? ""
     @Published var peerNodeID = UserDefaults.standard.string(forKey: "peerNodeID") ?? ""
@@ -55,7 +56,7 @@ final class LightningModel: ObservableObject {
         shouldRun = true
         isBusy = true
         notice = "Starting regtest node…"
-        engine.start(bitcoinPeer: bitcoinPeer, listenAddress: listenAddress,
+        engine.start(bitcoinPeer: bitcoinPeer, secondBitcoinPeer: secondBitcoinPeer, listenAddress: listenAddress,
                      announceAddress: announceAddress, peer: peer, savedPins: savedPins) { result in
             DispatchQueue.main.async {
                 self.isBusy = false
@@ -171,6 +172,7 @@ final class LightningModel: ObservableObject {
     private func saveSettings() {
         let defaults = UserDefaults.standard
         defaults.set(bitcoinPeer, forKey: "bitcoinPeer")
+        defaults.set(secondBitcoinPeer, forKey: "secondBitcoinPeer")
         defaults.set(listenAddress, forKey: "listenAddress")
         defaults.set(announceAddress, forKey: "announceAddress")
         defaults.set(peerNodeID, forKey: "peerNodeID")
@@ -260,7 +262,7 @@ private struct WalletView: View {
                         Spacer()
                         if model.isBusy { ProgressView() }
                     }
-                    Text(model.notice.isEmpty ? "Enter a regtest Bitcoin peer in Setup, then start." : model.notice)
+                    Text(model.notice.isEmpty ? "Enter two regtest Bitcoin peers in Setup, then start." : model.notice)
                         .font(.footnote).foregroundStyle(Palette.muted)
                     Button(model.snapshot == nil ? "Start node" : "Stop node") {
                         model.snapshot == nil ? model.start() : model.stop()
@@ -424,15 +426,18 @@ private struct SettingsView: View {
 
     var body: some View {
         Form {
-            Section("Bitcoin peer") {
-                TextField("192.168.1.8:18444", text: $model.bitcoinPeer)
+            Section("Bitcoin peers") {
+                TextField("First peer, e.g. 192.168.1.8:18444", text: $model.bitcoinPeer)
                     .textInputAutocapitalization(.never).autocorrectionDisabled()
                     .keyboardType(.URL)
-                Text("The phone connects to this Bitcoin peer over Bitcoin P2P. Use its regtest P2P port and an address reachable from the phone.")
+                TextField("Second peer, e.g. 192.168.1.9:18444", text: $model.secondBitcoinPeer)
+                    .textInputAutocapitalization(.never).autocorrectionDisabled()
+                    .keyboardType(.URL)
+                Text("Use two separately operated regtest peers reachable from the phone. The wallet compares their compact filter commitments before scanning blocks.")
                     .font(.footnote).foregroundStyle(.secondary)
-                Text("This prototype reads full regtest blocks to keep channel monitors up to date. Keep the app open while it holds channel funds.")
+                Text("Keep the app open while it holds channel funds.")
                     .font(.footnote).foregroundStyle(.secondary)
-                Button("Start with this peer") { model.start() }.disabled(model.isBusy)
+                Button("Start with these peers") { model.start() }.disabled(model.isBusy)
             }
             Section("Peer reachability") {
                 TextField("Listen address", text: $model.listenAddress)

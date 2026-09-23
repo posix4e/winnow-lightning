@@ -1,16 +1,17 @@
 diff --git a/Cargo.toml b/Cargo.toml
-index 0110c02..5f9830b 100755
+index 0110c02..7fe56d3 100755
 --- a/Cargo.toml
 +++ b/Cargo.toml
-@@ -52,6 +52,7 @@ chain-electrum = [
+@@ -52,6 +52,8 @@ chain-electrum = [
  	"lightning-transaction-sync/electrum-rustls-ring",
  ]
  chain-bitcoind = ["dep:lightning-block-sync"]
 +chain-p2p = ["dep:lightning-block-sync", "dep:bip157"]
++chain-p2p-test-hooks = ["chain-p2p"]
  storage-sqlite = ["dep:rusqlite"]
  storage-filesystem = ["dep:lightning-persister"]
  storage-vss = ["dep:vss-client", "dep:prost"]
-@@ -103,6 +104,7 @@ bdk_chain = { version = "0.23.3", default-features = false, features = ["std"] }
+@@ -103,6 +105,7 @@ bdk_chain = { version = "0.23.3", default-features = false, features = ["std"] }
  bdk_esplora = { version = "0.22.2", default-features = false, features = ["async-https-rustls", "tokio"], optional = true }
  bdk_electrum = { version = "0.24.0", default-features = false, features = ["use-rustls-ring"], optional = true }
  bdk_wallet = { version = "3.1.0", default-features = false, features = ["std", "keys-bip39"]}
@@ -18,7 +19,7 @@ index 0110c02..5f9830b 100755
  
  bitreq = { version = "0.3", default-features = false, features = ["async-https", "json-using-serde"] }
  rustls = { version = "0.23", default-features = false }
-@@ -245,3 +247,17 @@ harness = false
+@@ -245,3 +248,17 @@ harness = false
  #lightning-liquidity = { path = "../rust-lightning/lightning-liquidity" }
  #lightning-macros = { path = "../rust-lightning/lightning-macros" }
  #lightning-dns-resolver = { path = "../rust-lightning/lightning-dns-resolver" }
@@ -91,7 +92,7 @@ index b85c717..583b724 100644
  		Some(ChainDataSourceConfig::Esplora { server_url, headers, sync_config }) => {
  			let sync_config = sync_config.unwrap_or(EsploraSyncConfig::default());
 diff --git a/src/chain/mod.rs b/src/chain/mod.rs
-index f01c1c8..3b8fd57 100644
+index f01c1c8..88ea86e 100644
 --- a/src/chain/mod.rs
 +++ b/src/chain/mod.rs
 @@ -11,6 +11,8 @@ pub(crate) mod bitcoind;
@@ -112,7 +113,7 @@ index f01c1c8..3b8fd57 100644
  #[cfg(feature = "chain-bitcoind")]
  use crate::config::BitcoindRestClientConfig;
  #[cfg(feature = "chain-electrum")]
-@@ -157,9 +161,20 @@ enum ChainSourceKind {
+@@ -157,9 +161,25 @@ enum ChainSourceKind {
  	Electrum(ElectrumChainSource),
  	#[cfg(feature = "chain-bitcoind")]
  	Bitcoind(BitcoindChainSource),
@@ -121,6 +122,11 @@ index f01c1c8..3b8fd57 100644
  }
  
  impl ChainSource {
++	#[cfg(feature = "chain-p2p-test-hooks")]
++	pub(crate) fn test_watch_script(&self, script: bitcoin::ScriptBuf) {
++		if let ChainSourceKind::P2p(source) = &self.kind { source.register_tx(&script); }
++	}
++
 +	#[cfg(feature = "chain-p2p")]
 +	pub(crate) fn new_p2p(
 +		peer: String, fee_estimator: Arc<OnchainFeeEstimator>, tx_broadcaster: Arc<Broadcaster>,
@@ -133,7 +139,7 @@ index f01c1c8..3b8fd57 100644
  	#[cfg(feature = "chain-esplora")]
  	pub(crate) fn new_esplora(
  		server_url: String, headers: HashMap<String, String>, sync_config: EsploraSyncConfig,
-@@ -254,6 +269,8 @@ impl ChainSource {
+@@ -254,6 +274,8 @@ impl ChainSource {
  
  	pub(crate) fn start(&self, runtime: Arc<Runtime>) -> Result<(), Error> {
  		match &self.kind {
@@ -142,7 +148,7 @@ index f01c1c8..3b8fd57 100644
  			#[cfg(feature = "chain-electrum")]
  			ChainSourceKind::Electrum(electrum_chain_source) => electrum_chain_source.start(runtime)?,
  			_ => {
-@@ -265,6 +282,8 @@ impl ChainSource {
+@@ -265,6 +287,8 @@ impl ChainSource {
  
  	pub(crate) fn stop(&self) {
  		match &self.kind {
@@ -151,7 +157,7 @@ index f01c1c8..3b8fd57 100644
  			#[cfg(feature = "chain-electrum")]
  			ChainSourceKind::Electrum(electrum_chain_source) => electrum_chain_source.stop(),
  			_ => {
-@@ -275,6 +294,8 @@ impl ChainSource {
+@@ -275,6 +299,8 @@ impl ChainSource {
  
  	pub(crate) fn begin_shutdown(&self) {
  		match &self.kind {
@@ -160,7 +166,7 @@ index f01c1c8..3b8fd57 100644
  			#[cfg(feature = "chain-electrum")]
  			ChainSourceKind::Electrum(electrum_chain_source) => electrum_chain_source.begin_shutdown(),
  			_ => {
-@@ -306,6 +327,8 @@ impl ChainSource {
+@@ -306,6 +332,8 @@ impl ChainSource {
  			ChainSourceKind::Electrum { .. } => true,
  			#[cfg(feature = "chain-bitcoind")]
  			ChainSourceKind::Bitcoind { .. } => false,
@@ -169,7 +175,7 @@ index f01c1c8..3b8fd57 100644
  		}
  	}
  
-@@ -315,6 +338,8 @@ impl ChainSource {
+@@ -315,6 +343,8 @@ impl ChainSource {
  		output_sweeper: Arc<Sweeper>,
  	) {
  		match &self.kind {
@@ -178,7 +184,7 @@ index f01c1c8..3b8fd57 100644
  			#[cfg(feature = "chain-esplora")]
  			ChainSourceKind::Esplora(esplora_chain_source) => {
  				if let Some(background_sync_config) =
-@@ -457,6 +482,8 @@ impl ChainSource {
+@@ -457,6 +487,8 @@ impl ChainSource {
  				// `ChainPoller`. So nothing to do here.
  				unreachable!("Onchain wallet will be synced via chain polling")
  			},
@@ -187,7 +193,7 @@ index f01c1c8..3b8fd57 100644
  		}
  	}
  
-@@ -485,6 +512,8 @@ impl ChainSource {
+@@ -485,6 +517,8 @@ impl ChainSource {
  				// `ChainPoller`. So nothing to do here.
  				unreachable!("Lightning wallet will be synced via chain polling")
  			},
@@ -196,7 +202,7 @@ index f01c1c8..3b8fd57 100644
  		}
  	}
  
-@@ -496,6 +525,8 @@ impl ChainSource {
+@@ -496,6 +530,8 @@ impl ChainSource {
  		let _ = (&onchain_wallet, &channel_manager, &chain_monitor, &output_sweeper);
  
  		match &self.kind {
@@ -205,7 +211,7 @@ index f01c1c8..3b8fd57 100644
  			#[cfg(feature = "chain-esplora")]
  			ChainSourceKind::Esplora { .. } => {
  				// In Esplora mode we sync lightning and onchain wallets via
-@@ -524,6 +555,8 @@ impl ChainSource {
+@@ -524,6 +560,8 @@ impl ChainSource {
  
  	pub(crate) async fn update_fee_rate_estimates(&self) -> Result<(), Error> {
  		match &self.kind {
@@ -214,7 +220,7 @@ index f01c1c8..3b8fd57 100644
  			#[cfg(feature = "chain-esplora")]
  			ChainSourceKind::Esplora(esplora_chain_source) => {
  				esplora_chain_source.update_fee_rate_estimates().await
-@@ -547,6 +580,8 @@ impl ChainSource {
+@@ -547,6 +585,8 @@ impl ChainSource {
  		}
  
  		match &self.kind {
@@ -223,7 +229,7 @@ index f01c1c8..3b8fd57 100644
  			#[cfg(feature = "chain-esplora")]
  			ChainSourceKind::Esplora(esplora_chain_source) => {
  				esplora_chain_source.validate_zero_fee_commitments_support().await
-@@ -593,6 +628,8 @@ impl ChainSource {
+@@ -593,6 +633,8 @@ impl ChainSource {
  					};
  					let package = package.into_sorted_transactions();
  					match &self.kind {
@@ -232,7 +238,7 @@ index f01c1c8..3b8fd57 100644
  						#[cfg(feature = "chain-esplora")]
  						ChainSourceKind::Esplora(esplora_chain_source) => {
  							esplora_chain_source.process_transaction_broadcast(package).await
-@@ -616,6 +653,8 @@ impl Filter for ChainSource {
+@@ -616,6 +658,8 @@ impl Filter for ChainSource {
  	fn register_tx(&self, txid: &Txid, script_pubkey: &Script) {
  		self.registered_txids.lock().expect("lock").insert(*txid);
  		match &self.kind {
@@ -241,7 +247,7 @@ index f01c1c8..3b8fd57 100644
  			#[cfg(feature = "chain-esplora")]
  			ChainSourceKind::Esplora(esplora_chain_source) => {
  				esplora_chain_source.register_tx(txid, script_pubkey)
-@@ -630,6 +669,8 @@ impl Filter for ChainSource {
+@@ -630,6 +674,8 @@ impl Filter for ChainSource {
  	}
  	fn register_output(&self, output: lightning::chain::WatchedOutput) {
  		match &self.kind {
@@ -252,10 +258,10 @@ index f01c1c8..3b8fd57 100644
  			#[cfg(feature = "chain-electrum")]
 diff --git a/src/chain/p2p.rs b/src/chain/p2p.rs
 new file mode 100644
-index 0000000..6008a4e
+index 0000000..d8489ad
 --- /dev/null
 +++ b/src/chain/p2p.rs
-@@ -0,0 +1,358 @@
+@@ -0,0 +1,415 @@
 +// Regtest-only direct Bitcoin peer backend using BIP 157/158 compact filters.
 +use std::collections::{HashMap, HashSet};
 +use std::io;
@@ -267,7 +273,7 @@ index 0000000..6008a4e
 +use bip157::{Builder as PeerBuilder, Client, Event, IndexedFilter, Package, Requester};
 +use bitcoin::pow::Work;
 +use bitcoin::{BlockHash, FeeRate, Network, ScriptBuf};
-+use lightning::chain::{BlockLocator, Listen};
++use lightning::chain::{BlockLocator, Confirm, Listen};
 +use lightning_block_sync::init::synchronize_listeners;
 +use lightning_block_sync::poll::{ChainPoller, ChainTip, ValidatedBlockHeader};
 +use lightning_block_sync::{BlockData, BlockHeaderData, BlockSource, BlockSourceError, SpvClient};
@@ -336,6 +342,9 @@ index 0000000..6008a4e
 +	known_headers: Mutex<HashMap<BlockHash, BlockHeaderData>>,
 +	filters: Mutex<HashMap<BlockHash, IndexedFilter>>,
 +	channel_scripts: Mutex<HashSet<ScriptBuf>>,
++	pending_scripts: Mutex<Vec<(u64, ScriptBuf)>>,
++	watch_version: AtomicU64,
++	synced_watch_version: AtomicU64,
 +	wallet: RwLock<std::sync::Weak<Wallet>>,
 +	skipped_blocks: AtomicU64,
 +	fetched_blocks: AtomicU64,
@@ -345,12 +354,23 @@ index 0000000..6008a4e
 +	fn new(network: Network) -> Self {
 +		Self { network, requester: RwLock::new(None), ready: AtomicBool::new(false), stopped: AtomicBool::new(false),
 +			known_headers: Mutex::new(HashMap::new()), filters: Mutex::new(HashMap::new()),
-+			channel_scripts: Mutex::new(HashSet::new()), wallet: RwLock::new(std::sync::Weak::new()),
++			channel_scripts: Mutex::new(HashSet::new()), pending_scripts: Mutex::new(Vec::new()),
++			watch_version: AtomicU64::new(0), synced_watch_version: AtomicU64::new(0),
++			wallet: RwLock::new(std::sync::Weak::new()),
 +			skipped_blocks: AtomicU64::new(0), fetched_blocks: AtomicU64::new(0) }
 +	}
 +
 +	fn watch_script(&self, script: ScriptBuf) {
-+		self.channel_scripts.lock().expect("lock").insert(script);
++		if self.channel_scripts.lock().expect("lock").insert(script.clone()) {
++			let mut pending = self.pending_scripts.lock().expect("lock");
++			let version = self.watch_version.fetch_add(1, Ordering::AcqRel) + 1;
++			pending.push((version, script));
++		}
++	}
++
++	fn mark_watches_synced(&self, version: u64) {
++		self.synced_watch_version.store(version, Ordering::Release);
++		self.pending_scripts.lock().expect("lock").retain(|(v, _)| *v > version);
 +	}
 +
 +	fn scripts_to_watch(&self) -> Result<HashSet<ScriptBuf>, BlockSourceError> {
@@ -436,7 +456,7 @@ index 0000000..6008a4e
 +}
 +
 +pub(super) struct P2pChainSource {
-+	peer: SocketAddr,
++	peers: [SocketAddr; 2],
 +	block_source: Arc<PeerBlockSource>,
 +	spv_client: tokio::sync::Mutex<Option<PeerSpvClient>>,
 +	latest_tip: RwLock<Option<ValidatedBlockHeader>>,
@@ -450,8 +470,11 @@ index 0000000..6008a4e
 +impl P2pChainSource {
 +	pub(super) fn new(peer: String, fee_estimator: Arc<OnchainFeeEstimator>, config: Arc<Config>, logger: Arc<Logger>) -> Result<Self, ()> {
 +		if config.network != Network::Regtest { return Err(()); }
-+		let peer = peer.parse().map_err(|_| ())?;
-+		Ok(Self { peer, block_source: Arc::new(PeerBlockSource::new(config.network)), spv_client: tokio::sync::Mutex::new(None),
++		let mut addresses = peer.split(',').map(str::trim);
++		let first: SocketAddr = addresses.next().ok_or(())?.parse().map_err(|_| ())?;
++		let second: SocketAddr = addresses.next().ok_or(())?.parse().map_err(|_| ())?;
++		if addresses.next().is_some() || first == second { return Err(()); }
++		Ok(Self { peers: [first, second], block_source: Arc::new(PeerBlockSource::new(config.network)), spv_client: tokio::sync::Mutex::new(None),
 +			latest_tip: RwLock::new(None), wallet_polling_status: Mutex::new(WalletSyncStatus::Completed),
 +			fee_estimator, config, logger, last_logged_counts: Mutex::new((0, 0)) })
 +	}
@@ -471,12 +494,12 @@ index 0000000..6008a4e
 +		let source = Arc::clone(&self.block_source);
 +		let logger = Arc::clone(&self.logger);
 +		let network = self.config.network;
-+		let peer = self.peer;
++		let peers = self.peers;
 +		runtime.spawn_background_task(async move {
 +			loop {
 +				if source.stopped.load(Ordering::Acquire) { break; }
-+				let (node, client) = PeerBuilder::new(network).add_peer(peer).whitelist_only()
-+					.required_peers(1).fetch_witness_data().build();
++				let (node, client) = PeerBuilder::new(network).add_peer(peers[0]).add_peer(peers[1]).whitelist_only()
++					.required_peers(2).fetch_witness_data().build();
 +				let Client { requester, mut info_rx, mut warn_rx, mut event_rx } = client;
 +				*source.requester.write().expect("lock") = Some(requester);
 +				let event_source = Arc::clone(&source);
@@ -535,6 +558,7 @@ index 0000000..6008a4e
 +
 +	async fn initial_sync(&self, wallet: Arc<Wallet>, manager: Arc<ChannelManager>, monitor: Arc<ChainMonitor>, sweeper: Arc<Sweeper>) -> Result<(), Error> {
 +		if !self.block_source.ready.load(Ordering::Acquire) { return Err(Error::ConnectionFailed); }
++		let watch_version = self.block_source.watch_version.load(Ordering::Acquire);
 +		let mut listeners = vec![
 +			(wallet.current_best_block(), &*wallet as &(dyn Listen + Send + Sync)),
 +			(manager.current_best_block(), &*manager as &(dyn Listen + Send + Sync)),
@@ -551,6 +575,7 @@ index 0000000..6008a4e
 +		let poller = ChainPoller::new(Arc::clone(&self.block_source), self.config.network);
 +		*self.spv_client.lock().await = Some(SpvClient::new(tip, poller, cache, listener));
 +		*self.latest_tip.write().expect("lock") = Some(tip);
++		self.block_source.mark_watches_synced(watch_version);
 +		log_info!(self.logger, "Direct Bitcoin peer initial sync complete at height {}", tip.height);
 +		self.log_filter_counts();
 +		Ok(())
@@ -569,14 +594,52 @@ index 0000000..6008a4e
 +	async fn poll_inner(&self, wallet: Arc<Wallet>, manager: Arc<ChannelManager>, monitor: Arc<ChainMonitor>, sweeper: Arc<Sweeper>) -> Result<(), Error> {
 +		*self.block_source.wallet.write().expect("lock") = Arc::downgrade(&wallet);
 +		if !self.block_source.ready.load(Ordering::Acquire) { return Err(Error::ConnectionFailed); }
-+		if self.spv_client.lock().await.is_none() { self.initial_sync(wallet, manager, monitor, sweeper).await?; }
++		if self.spv_client.lock().await.is_none() { self.initial_sync(Arc::clone(&wallet), Arc::clone(&manager), Arc::clone(&monitor), Arc::clone(&sweeper)).await?; }
 +		let mut client = self.spv_client.lock().await;
 +		match client.as_mut().expect("initial sync").poll_best_tip().await {
 +			Ok((ChainTip::Better(tip), true)) => *self.latest_tip.write().expect("lock") = Some(tip),
 +			Ok(_) => {},
 +			Err(error) => { log_error!(self.logger, "Bitcoin peer chain polling failed: {:?}", error); return Err(Error::TxSyncFailed); },
 +		}
++		drop(client);
++		self.replay_new_watches(&wallet, &manager, &monitor, &sweeper).await?;
 +		self.log_filter_counts();
++		Ok(())
++	}
++
++	async fn replay_new_watches(&self, wallet: &Arc<Wallet>, manager: &Arc<ChannelManager>,
++		monitor: &Arc<ChainMonitor>, sweeper: &Arc<Sweeper>) -> Result<(), Error> {
++		let synced = self.block_source.synced_watch_version.load(Ordering::Acquire);
++		let version = self.block_source.watch_version.load(Ordering::Acquire);
++		if version == synced { return Ok(()); }
++		let scripts: Vec<_> = self.block_source.pending_scripts.lock().expect("lock").iter()
++			.filter(|(v, _)| *v > synced && *v <= version).map(|(_, script)| script.clone()).collect();
++		let tip = self.latest_tip.read().expect("lock").ok_or(Error::TxSyncFailed)?;
++		let requester = self.block_source.requester().map_err(|_| Error::ConnectionFailed)?;
++		let candidates: Vec<_> = self.block_source.filters.lock().expect("lock").values()
++			.filter(|filter| filter.height() <= tip.height && filter.contains_any(scripts.iter()))
++			.map(|filter| (filter.height(), filter.block_hash())).collect();
++		let mut candidates = candidates;
++		candidates.sort_unstable_by_key(|(height, _)| *height);
++		let mut earliest = None;
++		for (height, hash) in candidates {
++			let header = self.block_source.header_at(&requester, height).await.map_err(|_| Error::TxSyncFailed)?;
++			if header.block_hash() != hash { continue; }
++			let block = match self.block_source.get_block(&hash).await.map_err(|_| Error::TxSyncFailed)? {
++				BlockData::FullBlock(block) if block.check_merkle_root() && block.check_witness_commitment() => block,
++				_ => return Err(Error::TxSyncFailed),
++			};
++			wallet.apply_historical_block(&block, height).await?;
++			let txdata: Vec<_> = block.txdata.iter().enumerate().collect();
++			manager.transactions_confirmed(&block.header, &txdata, height);
++			monitor.transactions_confirmed(&block.header, &txdata, height);
++			sweeper.transactions_confirmed(&block.header, &txdata, height);
++			earliest.get_or_insert(height);
++		}
++		self.block_source.mark_watches_synced(version);
++		if let Some(height) = earliest {
++			log_info!(self.logger, "Bitcoin watch replayed from height {} through {}", height, tip.height);
++		}
 +		Ok(())
 +	}
 +
@@ -875,7 +938,7 @@ index 6a44be0..78466bd 100644
  	(1, V1) => {},
  );
 diff --git a/src/lib.rs b/src/lib.rs
-index 821304a..7d5f6de 100644
+index 821304a..d66b708 100644
 --- a/src/lib.rs
 +++ b/src/lib.rs
 @@ -84,7 +84,8 @@
@@ -897,7 +960,20 @@ index 821304a..7d5f6de 100644
  use lightning::ln::chan_utils::FUNDING_TRANSACTION_WITNESS_WEIGHT;
  use lightning::ln::channel_state::ChannelDetails as LdkChannelDetails;
  pub use lightning::ln::channel_state::ChannelShutdownState;
-@@ -513,7 +514,7 @@ impl Node {
+@@ -284,6 +285,12 @@ pub struct Node {
+ }
+ 
+ impl Node {
++	/// Regtest integration hook. Disabled in the iOS build.
++	#[cfg(feature = "chain-p2p-test-hooks")]
++	pub fn test_watch_script(&self, script: bitcoin::ScriptBuf) {
++		self.chain_source.test_watch_script(script);
++	}
++
+ 	/// Starts the necessary background tasks, such as handling events coming from user input,
+ 	/// LDK/BDK, and the peer-to-peer network.
+ 	///
+@@ -513,7 +520,7 @@ impl Node {
  											return;
  										},
  									};
@@ -906,7 +982,7 @@ index 821304a..7d5f6de 100644
  										Arc::clone(&peer_mgr),
  										tcp_stream,
  									)
-@@ -1175,6 +1176,44 @@ impl Node {
+@@ -1175,6 +1182,44 @@ impl Node {
  	}
  }
  
@@ -951,7 +1027,7 @@ index 821304a..7d5f6de 100644
  #[cfg(all(feature = "unified-payments", feature = "uniffi"))]
  #[uniffi::export]
  impl Node {
-@@ -1258,6 +1297,24 @@ impl Node {
+@@ -1258,6 +1303,24 @@ impl Node {
  			.collect()
  	}
  
@@ -976,7 +1052,7 @@ index 821304a..7d5f6de 100644
  	/// Connect to a node on the peer-to-peer network.
  	///
  	/// If `persist` is set to `true`, we'll remember the peer and reconnect to it on restart.
-@@ -2506,7 +2563,7 @@ impl PersistedNodeMetrics {
+@@ -2506,7 +2569,7 @@ impl PersistedNodeMetrics {
  	}
  }
  
@@ -985,7 +1061,7 @@ index 821304a..7d5f6de 100644
  	(0, latest_lightning_wallet_sync_timestamp, option),
  	(1, latest_pathfinding_scores_sync_timestamp, option),
  	(2, latest_onchain_wallet_sync_timestamp, option),
-@@ -2590,7 +2647,7 @@ mod tests {
+@@ -2590,7 +2653,7 @@ mod tests {
  			latest_pathfinding_scores_sync_timestamp: Option<u64>,
  			latest_node_announcement_broadcast_timestamp: Option<u64>,
  		}
@@ -1239,10 +1315,31 @@ index 1a61daa..7297db3 100644
  	(2, value, required),
  });
 diff --git a/src/wallet/mod.rs b/src/wallet/mod.rs
-index b9c12b4..e2bd034 100644
+index b9c12b4..ba02a26 100644
 --- a/src/wallet/mod.rs
 +++ b/src/wallet/mod.rs
-@@ -209,6 +209,15 @@ impl Wallet {
+@@ -173,6 +173,20 @@ pub(crate) struct Wallet {
+ }
+ 
+ impl Wallet {
++	#[cfg(feature = "chain-p2p")]
++	pub(crate) async fn apply_historical_block(&self, block: &bitcoin::Block, height: u32) -> Result<(), Error> {
++		let mut update = Update::default();
++		let anchor = bdk_chain::ConfirmationBlockTime {
++			block_id: bdk_chain::BlockId { height, hash: block.block_hash() },
++			confirmation_time: block.header.time as u64,
++		};
++		for tx in &block.txdata {
++			update.tx_update.anchors.insert((anchor, tx.compute_txid()));
++			update.tx_update.txs.push(Arc::new(tx.clone()));
++		}
++		self.apply_update(update).await
++	}
++
+ 	pub(crate) fn new(
+ 		wallet: bdk_wallet::PersistedWallet<KVStoreWalletPersister>,
+ 		wallet_persister: KVStoreWalletPersister, persisted_pool_indices: Vec<u32>,
+@@ -209,6 +223,15 @@ impl Wallet {
  		self.inner.lock().expect("lock").start_sync_with_revealed_spks().build()
  	}
  
@@ -1258,7 +1355,7 @@ index b9c12b4..e2bd034 100644
  	pub(crate) fn get_cached_txs(&self) -> Vec<Arc<Transaction>> {
  		self.inner.lock().expect("lock").tx_graph().full_txs().map(|tx_node| tx_node.tx).collect()
  	}
-@@ -224,7 +233,7 @@ impl Wallet {
+@@ -224,7 +247,7 @@ impl Wallet {
  			.collect()
  	}
  
@@ -1267,7 +1364,7 @@ index b9c12b4..e2bd034 100644
  	pub(crate) fn current_best_block(&self) -> BlockLocator {
  		let checkpoint = self.inner.lock().expect("lock").latest_checkpoint();
  		let mut current_block = Some(checkpoint.clone());
-@@ -2313,13 +2322,13 @@ fn aggregate_local_stakes(candidate: &FundingCandidate) -> LocalStakeAggregate {
+@@ -2313,13 +2336,13 @@ fn aggregate_local_stakes(candidate: &FundingCandidate) -> LocalStakeAggregate {
  
  impl Listen for Wallet {
  	fn filtered_block_connected(
@@ -1286,7 +1383,7 @@ index b9c12b4..e2bd034 100644
  	}
  
  	fn block_connected(&self, block: &bitcoin::Block, height: u32) {
-@@ -2523,6 +2532,30 @@ impl NodeSigner for WalletKeysManager {
+@@ -2523,6 +2546,30 @@ impl NodeSigner for WalletKeysManager {
  	fn sign_message(&self, msg: &[u8]) -> Result<String, ()> {
  		self.inner.sign_message(msg)
  	}

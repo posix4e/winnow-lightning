@@ -30,7 +30,7 @@ def wait_for(predicate, message, timeout=90):
 
 
 class Node:
-    def __init__(self, name, fixture, peer_port, listen_port):
+    def __init__(self, name, fixture, peer_port, second_peer_port, listen_port):
         self.state = fixture / name
         self.listen_port = listen_port
         self.output_path = fixture / f"{name}.out"
@@ -39,7 +39,7 @@ class Node:
         self.log_path = self.state / "node/ldk_node.log"
         old_syncs = self.log_path.read_text(errors="ignore").count("Direct Bitcoin peer initial sync complete") if self.log_path.exists() else 0
         self.process = subprocess.Popen(
-            [str(CLIENT), str(self.state), f"127.0.0.1:{peer_port}", f"127.0.0.1:{listen_port}"],
+            [str(CLIENT), str(self.state), f"127.0.0.1:{peer_port},127.0.0.1:{second_peer_port}", f"127.0.0.1:{listen_port}"],
             stdin=subprocess.PIPE, stdout=self.output, stderr=subprocess.STDOUT, text=True,
         )
         wait_for(
@@ -56,7 +56,11 @@ class Node:
         previous = len(self.text())
         self.process.stdin.write(command + "\n")
         self.process.stdin.flush()
-        return wait_for(lambda: (tail if marker in (tail := self.text()[previous:]) else None), marker, timeout)
+        try:
+            return wait_for(lambda: (tail if marker in (tail := self.text()[previous:]) else None), marker, timeout)
+        except RuntimeError as error:
+            log = self.log_path.read_text(errors="ignore")[-2500:] if self.log_path.exists() else ""
+            raise RuntimeError(f"{error}; node output: {self.text()[-1500:]}; log: {log}") from error
 
     def event(self, marker, timeout=90, since=None):
         start = self.output_start if since is None else since
@@ -77,7 +81,9 @@ def main():
         fixture = Path(directory)
         datadir = fixture / "bitcoin"
         datadir.mkdir()
-        rpc_port, peer_port, alice_port, bob_port = (port() for _ in range(4))
+        second_dir = fixture / "bitcoin-second"
+        second_dir.mkdir()
+        rpc_port, peer_port, second_rpc, second_peer_port, alice_port, bob_port = (port() for _ in range(6))
 
         def btc(*args):
             return subprocess.check_output(
@@ -85,10 +91,22 @@ def main():
                 text=True, stderr=subprocess.DEVNULL,
             ).strip()
 
+        def second(*args):
+            return subprocess.check_output(
+                ["bitcoin-cli", f"-datadir={second_dir}", "-regtest", f"-rpcport={second_rpc}", *args],
+                text=True, stderr=subprocess.DEVNULL,
+            ).strip()
+
         subprocess.run([
             "bitcoind", f"-datadir={datadir}", "-regtest", "-server=1", "-listen=1",
             "-bind=127.0.0.1", "-rpcbind=127.0.0.1", "-rpcallowip=127.0.0.1",
             f"-rpcport={rpc_port}", f"-port={peer_port}", "-blockfilterindex=1",
+            "-peerblockfilters=1", "-txindex=1", "-fallbackfee=0.0001", "-daemon",
+        ], check=True, stdout=subprocess.DEVNULL)
+        subprocess.run([
+            "bitcoind", f"-datadir={second_dir}", "-regtest", "-server=1", "-listen=1",
+            "-bind=127.0.0.1", "-rpcbind=127.0.0.1", "-rpcallowip=127.0.0.1",
+            f"-rpcport={second_rpc}", f"-port={second_peer_port}", "-blockfilterindex=1",
             "-peerblockfilters=1", "-txindex=1", "-fallbackfee=0.0001", "-daemon",
         ], check=True, stdout=subprocess.DEVNULL)
         alice = bob = None
@@ -101,16 +119,30 @@ def main():
                     time.sleep(0.25)
             else:
                 raise RuntimeError("bitcoind did not start")
+            for _ in range(80):
+                try:
+                    second("getblockchaininfo")
+                    break
+                except subprocess.CalledProcessError:
+                    time.sleep(0.25)
+            else:
+                raise RuntimeError("second bitcoind did not start")
+            btc("addnode", f"127.0.0.1:{second_peer_port}", "onetry")
             btc("createwallet", "mine")
             mine = btc("getnewaddress")
             btc("generatetoaddress", "101", mine)
-            alice = Node("alice", fixture, peer_port, alice_port)
-            bob = Node("bob", fixture, peer_port, bob_port)
+            wait_for(lambda: second("getblockcount") == "101", "second peer chain sync")
+            alice = Node("alice", fixture, peer_port, second_peer_port, alice_port)
+            bob = Node("bob", fixture, peer_port, second_peer_port, bob_port)
             address = re.search(r"bcrt1[0-9a-z]{20,}", alice.send("address", "bcrt1")).group()
+            late_address = btc("getnewaddress")
+            btc("sendtoaddress", late_address, "0.00100000")
+            btc("generatetoaddress", "1", mine)
+            wait_for(lambda: second("getblockcount") == btc("getblockcount"), "second peer historical watch block")
             btc("sendtoaddress", address, "0.00200000")
             btc("generatetoaddress", "1", mine)
+            wait_for(lambda: second("getblockcount") == btc("getblockcount"), "second peer funding block")
             def funded():
-                alice.send("sync", "wallet synced")
                 return "total_onchain_balance_sats: 200000" in alice.send("balance", "BalanceDetails")
             wait_for(funded, "funded Alice wallet", 60)
             alice_id = (alice.state / "node-id.txt").read_text().strip()
@@ -120,6 +152,7 @@ def main():
             alice.send(f"open-public {bob_id} 100000", "channel opening started")
             wait_for(lambda: json.loads(btc("getrawmempool")), "channel funding broadcast", 60)
             btc("generatetoaddress", "6", mine)
+            wait_for(lambda: second("getblockcount") == btc("getblockcount"), "second peer channel block")
             alice.event("ChannelReady", 120)
             bob.event("ChannelReady", 120)
             assert "is_usable: true" in alice.send("channels", "is_usable:")
@@ -133,10 +166,13 @@ def main():
             alice.send(f"pay {invoice} {bob.state / 'pq-node-key.hex'}", "payment started")
             alice.event("PaymentSuccessful", 90, alice_before)
             bob.event("PaymentReceived", 90, bob_before)
+            alice.send(f"test-watch {late_address}", "test watch registered")
+            wait_for(lambda: "Bitcoin watch replayed from height 102" in alice.log_path.read_text(errors="ignore"), "late watch replay", 90)
+            assert "is_usable: true" in alice.send("channels", "is_usable:")
             alice.stop()
             bob.stop()
-            alice = Node("alice", fixture, peer_port, alice_port)
-            bob = Node("bob", fixture, peer_port, bob_port)
+            alice = Node("alice", fixture, peer_port, second_peer_port, alice_port)
+            bob = Node("bob", fixture, peer_port, second_peer_port, bob_port)
             assert "is_usable: true" in alice.send("channels", "is_usable:")
             bob.send(f"invoice-file 2000 {invoice} restart", "invoice saved")
             alice_before, bob_before = len(alice.text()), len(bob.text())
@@ -144,6 +180,7 @@ def main():
             alice.event("PaymentSuccessful", 90, alice_before)
             bob.event("PaymentReceived", 90, bob_before)
             invalidated = btc("generatetoaddress", "1", mine)
+            wait_for(lambda: second("getblockcount") == btc("getblockcount"), "second peer reorg target")
             block_hash = json.loads(invalidated)[0]
             wait_for(
                 lambda: block_hash in alice.log_path.read_text(errors="ignore")
@@ -152,6 +189,7 @@ def main():
             )
             btc("invalidateblock", block_hash)
             btc("generatetoaddress", "2", btc("getnewaddress"))
+            wait_for(lambda: second("getbestblockhash") == btc("getbestblockhash"), "second peer reorganization")
             wait_for(lambda: "blocks_disconnected" in alice.log_path.read_text(errors="ignore"), "chain reorganization", 60)
             bob.send(f"invoice-file 3000 {invoice} reorg", "invoice saved")
             alice_before, bob_before = len(alice.text()), len(bob.text())
@@ -171,6 +209,10 @@ def main():
                         node.process.kill()
             try:
                 btc("stop")
+            except (FileNotFoundError, subprocess.CalledProcessError):
+                pass
+            try:
+                second("stop")
             except (FileNotFoundError, subprocess.CalledProcessError):
                 pass
 

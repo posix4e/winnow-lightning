@@ -9,7 +9,7 @@ A separate research fork of [Winnow](https://github.com/winnowwallet/winnow)'s l
 | `ChainWatch` | Reads Bitcoin headers and BIP157/158 compact filters directly from peers on regtest or signet. Watches a prospective channel funding script and, when given its outpoint, detects a later spend. Persists observations and rolls them back on a reorganization. |
 | `pq-invoice-verify` | Checks a BOLT 11 invoice's classical signature and PQLN ML-DSA signature against an independently trusted payee key. Missing, unanchored, invalid, or expired invoices fail closed. |
 
-`pq-light-client` is a **research regtest client**, not a production wallet. It connects directly to a Bitcoin P2P peer and runs no local Bitcoin full node or Esplora service. It matches BIP157/158 compact filters against the wallet's revealed addresses and LDK's registered channel scripts. Unrelated blocks advance as headers; matching blocks are downloaded and fed to the wallet and channel listeners. A local regtest check skipped 101 unrelated blocks without downloading any full block, then downloaded one wallet funding block. The current single-peer setup can be lied to about filter contents, and the client cannot recover a wallet or channel from seed words alone, so it is not yet safe for real funds. See [Integration path](docs/integration.md).
+`pq-light-client` is a **research regtest client**, not a production wallet. It connects directly to two Bitcoin P2P peers and runs no local Bitcoin full node or Esplora service. It requires both peers to agree on BIP157/158 filter commitments, then matches filters against the wallet's revealed addresses and LDK's registered channel scripts. Unrelated blocks advance as headers; matching blocks are downloaded. A local regtest check skipped 101 unrelated blocks, downloaded a wallet funding block, caught a tampered peer, and found a transaction after its script was registered late. Two peers can still collude or share faulty infrastructure. The client cannot recover a wallet or channel from seed words alone, so it is not yet safe for real funds. See [Integration path](docs/integration.md).
 
 ## Why this shape
 
@@ -28,7 +28,7 @@ Requires Swift 6, Rust 1.85+, Git, and a C compiler. The regtest smoke also need
 
 `bootstrap.sh` checks out the exact upstream revisions listed in [Dependencies](#dependencies) under ignored `.deps/` and applies the reviewed LDK Node compatibility patch. `check.sh` builds and tests the Rust and Swift components, then funds and spends a test output on a disposable regtest node. It removes that node when finished. The funding/spend smoke verifies `ChainWatch`, not a Lightning payment.
 
-To check the payment node's compact-filter scanning against a disposable Bitcoin peer:
+To check the payment node's compact-filter scanning against two disposable Bitcoin peers:
 
 ```sh
 cargo build --manifest-path crates/pq-light-client/Cargo.toml
@@ -38,11 +38,11 @@ python3 scripts/pqln-compact-regtest.py
 
 ## Try the regtest Lightning light client
 
-Provide a regtest Bitcoin P2P peer that serves compact filters and blocks, plus a compatible PQLN peer. Bitcoin Core can serve the P2P connection with `peerblockfilters=1` and `blockfilterindex=1`; its RPC port is used only by the disposable test fixture to mine blocks. The client saves its mnemonic and node state under `state/`; keep that directory private and use only disposable regtest funds. The [two-node regtest walkthrough](docs/regtest-journey.md) gives a complete local setup.
+Provide two different regtest Bitcoin P2P peers that serve compact filters and blocks, plus a compatible PQLN peer. They should be operated independently. Bitcoin Core can serve the P2P connection with `peerblockfilters=1` and `blockfilterindex=1`; its RPC port is used only by the disposable test fixture to mine blocks. The client saves its mnemonic and node state under `state/`; keep that directory private and use only disposable regtest funds. The [two-node regtest walkthrough](docs/regtest-journey.md) gives a complete local setup.
 
 ```sh
 cargo run --manifest-path crates/pq-light-client/Cargo.toml -- \
-  state/alice 127.0.0.1:18444 127.0.0.1:9736
+  state/alice 127.0.0.1:18444,127.0.0.1:18445 127.0.0.1:9736
 ```
 
 At the prompt:
@@ -73,7 +73,7 @@ xcodebuild -project iOS/WinnowLightning.xcodeproj \
   ARCHS=arm64 CODE_SIGNING_ALLOWED=NO build
 ```
 
-For a phone build, use Xcode's automatic signing with the separate `com.btcswift.lightning` app identifier. On the Setup tab, enter a **regtest Bitcoin P2P peer** address reachable by the phone, such as `192.168.1.8:18444`; `localhost` on a phone is the phone itself. In Peer, paste the counterparty's node ID, address, ML-KEM public key, and ML-DSA public key after comparing the keys through an independent trusted channel. A locally reachable listen address is set by default. To announce a channel for PQ routing, enter the phone's reachable LAN address as the announcement address before starting the node, then choose the announced channel option. The app saves the 64-byte node seed in this device's Keychain and channel state in its app storage. It pins saved peer keys before reconnecting after a restart. The phone must remain foregrounded while testing. A seed alone cannot restore channel state, and this build has no watchtower or background service. Use disposable regtest coins only.
+For a phone build, use Xcode's automatic signing with the separate `com.btcswift.lightning` app identifier. On the Setup tab, enter **two regtest Bitcoin P2P peer** addresses reachable by the phone, such as `192.168.1.8:18444` and `192.168.1.9:18444`; `localhost` on a phone is the phone itself. In Peer, paste the counterparty's node ID, address, ML-KEM public key, and ML-DSA public key after comparing the keys through an independent trusted channel. A locally reachable listen address is set by default. To announce a channel for PQ routing, enter the phone's reachable LAN address as the announcement address before starting the node, then choose the announced channel option. The app saves the 64-byte node seed in this device's Keychain and channel state in its app storage. It pins saved peer keys before reconnecting after a restart. The phone must remain foregrounded while testing. A seed alone cannot restore channel state, and this build has no watchtower or background service. Use disposable regtest coins only.
 
 The iOS bundle identifier and signing team live only in this repository's `iOS/project.yml`; the original Winnow iPhone app is unaffected. Apple's export-compliance review must be answered accurately for the bundled PQLN cryptography before any TestFlight group receives a build.
 See the [iOS research app privacy note](docs/ios-privacy.md) for what stays on the device and what a tester's selected peers can observe.

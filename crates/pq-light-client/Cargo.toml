@@ -6,7 +6,7 @@ license = "MIT"
 publish = false
 
 [dependencies]
-ldk-node = { path = "../../.deps/ldk-node", default-features = false, features = ["chain-p2p", "storage-sqlite"] }
+ldk-node = { path = "../../.deps/ldk-node", default-features = false, features = ["chain-p2p", "chain-p2p-test-hooks", "storage-sqlite"] }
 lightning = { path = "../../.deps/pq-rust-lightning/lightning", features = ["post-quantum"] }
 lightning-invoice = { path = "../../.deps/pq-rust-lightning/lightning-invoice", features = ["std", "post-quantum"] }
 lightning-net-tokio = { path = "../../.deps/pq-rust-lightning/lightning-net-tokio", features = ["post-quantum"] }

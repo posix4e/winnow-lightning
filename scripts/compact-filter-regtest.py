@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Exercise LDK's direct-peer wallet with unrelated and relevant regtest blocks."""
 import re
+import hashlib
 import socket
+import socketserver
 import subprocess
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -18,13 +21,85 @@ def free_port():
         return sock.getsockname()[1]
 
 
+class FilterMutatingProxy:
+    def __init__(self, upstream_port):
+        self.changed = threading.Event()
+        self.commands = []
+
+        class Handler(socketserver.BaseRequestHandler):
+            def handle(handler):
+                try:
+                    with socket.create_connection(("127.0.0.1", upstream_port), timeout=10) as upstream:
+                        upstream.settimeout(None)
+                        downstream = handler.request
+
+                        def to_peer():
+                            try:
+                                while data := downstream.recv(65536):
+                                    upstream.sendall(data)
+                            except OSError:
+                                pass
+                            try:
+                                upstream.shutdown(socket.SHUT_WR)
+                            except OSError:
+                                pass
+
+                        sender = threading.Thread(target=to_peer, daemon=True)
+                        sender.start()
+
+                        def read_exact(count):
+                            result = bytearray()
+                            while len(result) < count:
+                                chunk = upstream.recv(count - len(result))
+                                if not chunk:
+                                    return None
+                                result.extend(chunk)
+                            return bytes(result)
+
+                        while header := read_exact(24):
+                            self.commands.append(header[4:16].rstrip(b"\x00"))
+                            length = int.from_bytes(header[16:20], "little")
+                            if length > 4_000_000:
+                                raise RuntimeError("unexpected Bitcoin message length")
+                            payload = read_exact(length)
+                            if payload is None:
+                                break
+                            if header[4:16].rstrip(b"\x00") == b"cfheaders" and len(payload) >= 98:
+                                payload = payload[:-1] + bytes([payload[-1] ^ 1])
+                                checksum = hashlib.sha256(hashlib.sha256(payload).digest()).digest()[:4]
+                                header = header[:20] + checksum
+                                self.changed.set()
+                            downstream.sendall(header + payload)
+                        sender.join(timeout=1)
+                except OSError:
+                    pass
+
+        class Server(socketserver.ThreadingTCPServer):
+            allow_reuse_address = True
+            daemon_threads = True
+
+        self.server = Server(("127.0.0.1", 0), Handler)
+        self.port = self.server.server_address[1]
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def __exit__(self, *_):
+        self.server.shutdown()
+        self.server.server_close()
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="winnow-compact-filter-") as directory:
         fixture = Path(directory)
         bitcoin_dir = fixture / "bitcoin"
         bitcoin_dir.mkdir()
+        second_dir = fixture / "bitcoin-second"
+        second_dir.mkdir()
         client_dir = fixture / "client"
-        rpc_port, p2p_port, listen_port = (free_port() for _ in range(3))
+        rpc_port, p2p_port, second_rpc, second_p2p, listen_port = (free_port() for _ in range(5))
 
         def btc(*args):
             return subprocess.check_output(
@@ -33,11 +108,17 @@ def main():
                 stderr=subprocess.DEVNULL,
             ).strip()
 
+        def second(*args):
+            return subprocess.check_output(
+                ["bitcoin-cli", f"-datadir={second_dir}", "-regtest", f"-rpcport={second_rpc}", *args],
+                text=True, stderr=subprocess.DEVNULL,
+            ).strip()
+
         def run_client(commands):
             log = client_dir / "node/ldk_node.log"
             old_syncs = log.read_text(errors="ignore").count("Direct Bitcoin peer initial sync complete") if log.exists() else 0
             process = subprocess.Popen(
-                [str(CLIENT), str(client_dir), f"127.0.0.1:{p2p_port}", f"127.0.0.1:{listen_port}"],
+                [str(CLIENT), str(client_dir), f"127.0.0.1:{p2p_port},127.0.0.1:{second_p2p}", f"127.0.0.1:{listen_port}"],
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
             )
             try:
@@ -65,6 +146,12 @@ def main():
             f"-rpcport={rpc_port}", f"-port={p2p_port}", "-blockfilterindex=1",
             "-peerblockfilters=1", "-fallbackfee=0.0001", "-daemon",
         ], check=True, stdout=subprocess.DEVNULL)
+        subprocess.run([
+            "bitcoind", f"-datadir={second_dir}", "-regtest", "-server=1", "-listen=1",
+            "-bind=127.0.0.1", "-rpcbind=127.0.0.1", "-rpcallowip=127.0.0.1",
+            f"-rpcport={second_rpc}", f"-port={second_p2p}", "-blockfilterindex=1",
+            "-peerblockfilters=1", "-fallbackfee=0.0001", "-daemon",
+        ], check=True, stdout=subprocess.DEVNULL)
         try:
             for _ in range(60):
                 try:
@@ -74,9 +161,40 @@ def main():
                     time.sleep(0.25)
             else:
                 raise RuntimeError("bitcoind did not start")
+            for _ in range(60):
+                try:
+                    second("getblockchaininfo")
+                    break
+                except subprocess.CalledProcessError:
+                    time.sleep(0.25)
+            else:
+                raise RuntimeError("second bitcoind did not start")
+            btc("addnode", f"127.0.0.1:{second_p2p}", "onetry")
             btc("createwallet", "mine")
             mine_address = btc("getnewaddress")
             btc("generatetoaddress", "101", mine_address)
+            for _ in range(120):
+                if second("getblockcount") == "101":
+                    break
+                time.sleep(0.25)
+            else:
+                raise RuntimeError("second peer did not sync mined blocks")
+
+            with FilterMutatingProxy(second_p2p) as proxy:
+                bad_state = fixture / "tampered-client"
+                bad_log = bad_state / "node/ldk_node.log"
+                process = subprocess.Popen(
+                    [str(CLIENT), str(bad_state), f"127.0.0.1:{p2p_port},127.0.0.1:{proxy.port}", f"127.0.0.1:{free_port()}"],
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                )
+                try:
+                    assert proxy.changed.wait(30), f"the proxy did not receive a filter header: {proxy.commands}, {bad_log.read_text(errors='ignore')[-1000:] if bad_log.exists() else ''}"
+                    time.sleep(4)
+                    assert not bad_log.exists() or "Direct Bitcoin peer initial sync complete" not in bad_log.read_text(errors="ignore"), "tampered filter header was accepted"
+                finally:
+                    if process.poll() is None:
+                        process.kill()
+                    process.communicate(timeout=10)
 
             output, log = run_client("address\nsync\nbalance\nquit\n")
             address = re.search(r"bcrt1[0-9a-z]{20,}", output)
@@ -85,17 +203,37 @@ def main():
             assert counts and int(counts[-1][0]) >= 100 and int(counts[-1][1]) == 0, counts
 
             btc("generatetoaddress", "3", mine_address)
+            late_address = btc("getnewaddress")
+            btc("sendtoaddress", late_address, "0.00100000")
+            btc("generatetoaddress", "1", mine_address)
             btc("sendtoaddress", address.group(), "0.00200000")
             btc("generatetoaddress", "1", mine_address)
+            for _ in range(120):
+                if second("getblockcount") == btc("getblockcount"):
+                    break
+                time.sleep(0.25)
+            else:
+                raise RuntimeError("second peer did not sync funding block")
             output, log = run_client("sync\nbalance\nquit\n")
             counts = re.findall(r"Bitcoin compact filters: (\d+) header-only blocks, (\d+) full blocks downloaded", log)
-            assert counts and int(counts[-1][0]) >= 3 and int(counts[-1][1]) == 1, counts
+            assert counts and int(counts[-1][0]) >= 4 and int(counts[-1][1]) == 1, counts
             assert "200000" in output, output
+            output, log = run_client(f"test-watch {late_address}\nsync\nquit\n")
+            assert "test watch registered" in output, output
+            assert "Bitcoin watch replayed from height 105 through 106" in log, log[-3000:]
+            replay_counts = re.findall(r"Bitcoin compact filters: (\d+) header-only blocks, (\d+) full blocks downloaded", log)
+            assert replay_counts and int(replay_counts[-1][1]) >= 2, replay_counts
             print("compact filters skipped unrelated blocks and downloaded the wallet match")
+            print("a late script watch replayed its earlier funding block")
+            print("a tampered second peer prevented initial sync")
             print(f"first sync: {counts[0]}; funded sync: {counts[-1]}")
         finally:
             try:
                 btc("stop")
+            except (FileNotFoundError, subprocess.CalledProcessError):
+                pass
+            try:
+                second("stop")
             except (FileNotFoundError, subprocess.CalledProcessError):
                 pass
 
