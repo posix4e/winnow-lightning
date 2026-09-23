@@ -1,9 +1,10 @@
 # Winnow Lightning research
 
-A separate research fork of [Winnow](https://github.com/winnowwallet/winnow)'s light-client approach for **post-quantum Lightning**. It reuses Winnow's `WalletCore` at a pinned revision, has its own Git history, and does not change the Winnow app. The current prototype has three parts:
+A separate research fork of [Winnow](https://github.com/winnowwallet/winnow)'s light-client approach for **post-quantum Lightning**. It reuses Winnow's `WalletCore` at a pinned revision, has its own Git history, and does not change the Winnow app. The current prototype has four parts:
 
 | Part | What works now |
 | --- | --- |
+| `iOS` | A regtest-only iPhone app using the same patched LDK Node and PQLN payment engine. It starts a local Lightning node, shows a funding address and balances, pins a PQ peer, opens private or announced channels, creates invoices, and verifies a pinned ML-DSA signature before paying. |
 | `pq-light-client` | A regtest-only LDK Node wallet and channel manager backed by Esplora. It uses the PQLN fork for PQ peer transport, channels, invoice creation, and fail-closed payment routing. An interactive CLI can fund its wallet, connect to a PQ peer, open a channel, create an invoice, and send a payment after checking a separately trusted ML-DSA key. |
 | `ChainWatch` | Reads Bitcoin headers and BIP157/158 compact filters directly from peers on regtest or signet. Watches a prospective channel funding script and, when given its outpoint, detects a later spend. Persists observations and rolls them back on a reorganization. |
 | `pq-invoice-verify` | Checks a BOLT 11 invoice's classical signature and PQLN ML-DSA signature against an independently trusted payee key. Missing, unanchored, invalid, or expired invoices fail closed. |
@@ -51,6 +52,23 @@ pay INVOICE_FILE TRUSTED_PAYEE_ML_DSA_KEY_HEX_FILE
 ```
 
 Fund the printed on-chain address and run `sync` before opening a channel. Each node writes `node-id.txt`, `pq-kem-key.hex`, and `pq-node-key.hex` into its state directory so another local regtest node can pin its public keys. For any remote peer, verify those keys through an authenticated channel outside this client. `connect` saves the peer for restart; `open` creates a private channel, while `open-public` creates an announced channel when a listening address is configured. PQ payments require every hop's ML-KEM key to be available in authenticated PQLN gossip, so a newly opened private channel alone may not provide a payable PQ route. Payment failure is expected in that case; the client never falls back to a classical onion. Keep the client online while a channel holds funds.
+
+## Build the iPhone research app
+
+Requires Xcode 27, XcodeGen, Rust's `aarch64-apple-ios` and `aarch64-apple-ios-sim` targets, and an Apple signing team for device builds. The generated Swift bindings and native libraries are kept under ignored `.deps/` so this public repository does not commit large binary artifacts.
+
+```sh
+./scripts/build-ios-bindings.sh
+xcodegen generate --spec iOS/project.yml --project iOS
+xcodebuild -project iOS/WinnowLightning.xcodeproj \
+  -scheme WinnowLightning -destination 'generic/platform=iOS Simulator' \
+  CODE_SIGNING_ALLOWED=NO build
+```
+
+For a phone build, use Xcode's automatic signing with the separate `com.btcswift.lightning` app identifier. On the Setup tab, enter a **regtest** Esplora URL reachable by the phone; `localhost` on a phone is the phone itself. In Peer, paste the counterparty's node ID, address, ML-KEM public key, and ML-DSA public key after comparing the keys through an independent trusted channel. A locally reachable listen address is set by default. To announce a channel for PQ routing, enter the phone's reachable LAN address as the announcement address before starting the node, then choose the announced channel option. The app saves the 64-byte node seed in this device's Keychain and channel state in its app storage. It pins saved peer keys before reconnecting after a restart. The phone must remain foregrounded while testing. A seed alone cannot restore channel state, and this build has no watchtower or background service. Use disposable regtest coins only.
+
+The iOS bundle identifier and signing team live only in this repository's `iOS/project.yml`; the original Winnow iPhone app is unaffected. Apple's export-compliance review must be answered accurately for the bundled PQLN cryptography before any TestFlight group receives a build.
+See the [iOS research app privacy note](docs/ios-privacy.md) for what stays on the device and what a tester's selected server can observe.
 
 ## Use the chain watcher
 

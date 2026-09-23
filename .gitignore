@@ -6,3 +6,6 @@ ChainWatch/.swiftpm/
 state/
 *.log
 .DS_Store
+iOS/*.xcodeproj/
+iOS/.build/
+iOS/build/

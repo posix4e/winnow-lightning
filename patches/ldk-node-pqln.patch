@@ -223,6 +223,19 @@ index 0a35697..ff5e404 100644
  		(5, ChannelClosed) => {
  			(0, channel_id, required),
  			(1, counterparty_node_id, option),
+diff --git a/src/ffi/types.rs b/src/ffi/types.rs
+index d213f9d..ec2b0ec 100644
+--- a/src/ffi/types.rs
++++ b/src/ffi/types.rs
+@@ -1510,7 +1510,7 @@ impl Bolt11Invoice {
+ 	}
+ 
+ 	/// Recover the payee's public key (only to be used if none was included in the invoice)
+-	pub fn recover_payee_pub_key(&self) -> PublicKey {
++	pub fn recover_payee_pub_key(&self) -> Option<PublicKey> {
+ 		self.inner.recover_payee_pub_key()
+ 	}
+ }
 diff --git a/src/io/utils.rs b/src/io/utils.rs
 index 30fc0c6..8598a03 100644
 --- a/src/io/utils.rs
@@ -268,7 +281,7 @@ index 6a44be0..78466bd 100644
  	(1, V1) => {},
  );
 diff --git a/src/lib.rs b/src/lib.rs
-index 821304a..796c6e6 100644
+index 821304a..8b406ab 100644
 --- a/src/lib.rs
 +++ b/src/lib.rs
 @@ -152,7 +152,7 @@ use graph::NetworkGraph;
@@ -289,7 +302,52 @@ index 821304a..796c6e6 100644
  										Arc::clone(&peer_mgr),
  										tcp_stream,
  									)
-@@ -1258,6 +1258,24 @@ impl Node {
+@@ -1175,6 +1175,44 @@ impl Node {
+ 	}
+ }
+ 
++#[cfg(feature = "uniffi")]
++#[uniffi::export]
++impl Node {
++	/// Pin a peer's out-of-band verified ML-KEM key before connecting.
++	pub fn register_pq_peer_bytes(&self, node_id: PublicKey, kem_key: Vec<u8>) -> Result<(), Error> {
++		let kem_key: [u8; lightning::ln::peer_handler::PQ_KEM_EK_LEN] =
++			kem_key.try_into().map_err(|_| Error::InvalidPublicKey)?;
++		self.register_pq_peer(node_id, kem_key);
++		Ok(())
++	}
++
++	/// The local ML-DSA public key to pin out of band.
++	pub fn pq_node_id_bytes(&self) -> Option<Vec<u8>> {
++		self.pq_node_id().map(|key| key.to_vec())
++	}
++
++	/// The local ML-KEM public key to pin out of band.
++	pub fn pq_kem_node_id_bytes(&self) -> Option<Vec<u8>> {
++		self.pq_kem_node_id().map(|key| key.to_vec())
++	}
++
++	/// Require a fresh regtest invoice with a valid PQLN signature bound to the pinned key.
++	pub fn verify_pq_invoice(&self, invoice_text: String, trusted_key: Vec<u8>) -> Result<(), Error> {
++		use lightning::ln::invoice_utils::{verify_bolt11_pq_signature, Bolt11PqVerification};
++		let trusted_key: [u8; lightning::sign::pq::PQ_PUBLIC_KEY_LEN] =
++			trusted_key.try_into().map_err(|_| Error::InvalidPublicKey)?;
++		let invoice: lightning_invoice::Bolt11Invoice =
++			invoice_text.trim().parse().map_err(|_| Error::InvalidInvoice)?;
++		if invoice.currency() != lightning_invoice::Currency::Regtest || invoice.is_expired() {
++			return Err(Error::InvalidInvoice);
++		}
++		match verify_bolt11_pq_signature(&invoice, Some(&trusted_key), self.logger.as_ref()) {
++			Bolt11PqVerification::Verified => Ok(()),
++			_ => Err(Error::InvalidInvoice),
++		}
++	}
++}
++
+ #[cfg(all(feature = "unified-payments", feature = "uniffi"))]
+ #[uniffi::export]
+ impl Node {
+@@ -1258,6 +1296,24 @@ impl Node {
  			.collect()
  	}
  
@@ -314,7 +372,7 @@ index 821304a..796c6e6 100644
  	/// Connect to a node on the peer-to-peer network.
  	///
  	/// If `persist` is set to `true`, we'll remember the peer and reconnect to it on restart.
-@@ -2506,7 +2524,7 @@ impl PersistedNodeMetrics {
+@@ -2506,7 +2562,7 @@ impl PersistedNodeMetrics {
  	}
  }
  
@@ -323,7 +381,7 @@ index 821304a..796c6e6 100644
  	(0, latest_lightning_wallet_sync_timestamp, option),
  	(1, latest_pathfinding_scores_sync_timestamp, option),
  	(2, latest_onchain_wallet_sync_timestamp, option),
-@@ -2590,7 +2608,7 @@ mod tests {
+@@ -2590,7 +2646,7 @@ mod tests {
  			latest_pathfinding_scores_sync_timestamp: Option<u64>,
  			latest_node_announcement_broadcast_timestamp: Option<u64>,
  		}
