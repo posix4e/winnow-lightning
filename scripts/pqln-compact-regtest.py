@@ -2,6 +2,7 @@
 """Two-node direct-peer PQLN channel, payment, restart, and reorg check."""
 import json
 import re
+import sqlite3
 import socket
 import subprocess
 import tempfile
@@ -180,6 +181,7 @@ def main():
             alice.event("PaymentSuccessful", 90, alice_before)
             bob.event("PaymentReceived", 90, bob_before)
             invalidated = btc("generatetoaddress", "1", mine)
+            fork_height = int(btc("getblockcount"))
             wait_for(lambda: second("getblockcount") == btc("getblockcount"), "second peer reorg target")
             block_hash = json.loads(invalidated)[0]
             wait_for(
@@ -191,6 +193,16 @@ def main():
             btc("generatetoaddress", "2", btc("getnewaddress"))
             wait_for(lambda: second("getbestblockhash") == btc("getbestblockhash"), "second peer reorganization")
             wait_for(lambda: "blocks_disconnected" in alice.log_path.read_text(errors="ignore"), "chain reorganization", 60)
+            for node in (alice, bob):
+                archive = node.state / "node/compact-filter-history.sqlite"
+                def archived_forks():
+                    if not archive.exists():
+                        return False
+                    with sqlite3.connect(archive) as db:
+                        return db.execute(
+                            "SELECT COUNT(*) FROM filters WHERE height = ?", (fork_height,),
+                        ).fetchone()[0] >= 2
+                wait_for(archived_forks, f"{node.state.name} filter archive to retain both branches", 60)
             bob.send(f"invoice-file 3000 {invoice} reorg", "invoice saved")
             alice_before, bob_before = len(alice.text()), len(bob.text())
             alice.send(f"pay {invoice} {bob.state / 'pq-node-key.hex'}", "payment started")

@@ -1,6 +1,6 @@
 # Winnow Lightning research app privacy
 
-Winnow Lightning is a regtest research app. It does not use a developer-operated account, analytics service, or advertising SDK. The app's 64-byte node seed is stored in the device Keychain. Channel and wallet state are stored in the app's local storage. Peer IDs, public keys, and the two Bitcoin P2P peer addresses you choose are stored in local app preferences.
+Winnow Lightning is a regtest research app. It does not use a developer-operated account, analytics service, or advertising SDK. The app's 64-byte node seed is stored in the device Keychain. Channel, wallet, and compact-filter history are stored in the app's local storage. Peer IDs, public keys, and the two Bitcoin P2P peer addresses you choose are stored in local app preferences.
 
 When you start the node, it contacts the two regtest Bitcoin peers you entered and any Lightning peer you configured. Those peers can observe your IP address. The Bitcoin peers see block requests and transaction broadcasts; Lightning peers see channel and payment messages. The app does not relay those requests through Winnow. Use peers you trust for testing.
 

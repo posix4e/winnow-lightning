@@ -1,12 +1,12 @@
 diff --git a/Cargo.toml b/Cargo.toml
-index 0110c02..7fe56d3 100755
+index 0110c02..787d47e 100755
 --- a/Cargo.toml
 +++ b/Cargo.toml
 @@ -52,6 +52,8 @@ chain-electrum = [
  	"lightning-transaction-sync/electrum-rustls-ring",
  ]
  chain-bitcoind = ["dep:lightning-block-sync"]
-+chain-p2p = ["dep:lightning-block-sync", "dep:bip157"]
++chain-p2p = ["dep:lightning-block-sync", "dep:bip157", "dep:rusqlite"]
 +chain-p2p-test-hooks = ["chain-p2p"]
  storage-sqlite = ["dep:rusqlite"]
  storage-filesystem = ["dep:lightning-persister"]
@@ -258,25 +258,31 @@ index f01c1c8..88ea86e 100644
  			#[cfg(feature = "chain-electrum")]
 diff --git a/src/chain/p2p.rs b/src/chain/p2p.rs
 new file mode 100644
-index 0000000..d8489ad
+index 0000000..d7fcabe
 --- /dev/null
 +++ b/src/chain/p2p.rs
-@@ -0,0 +1,415 @@
+@@ -0,0 +1,505 @@
 +// Regtest-only direct Bitcoin peer backend using BIP 157/158 compact filters.
 +use std::collections::{HashMap, HashSet};
 +use std::io;
 +use std::net::SocketAddr;
++use std::path::Path;
 +use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 +use std::sync::{Arc, Mutex, RwLock};
 +use std::time::Duration;
 +
 +use bip157::{Builder as PeerBuilder, Client, Event, IndexedFilter, Package, Requester};
++use bitcoin::bip158::BlockFilter;
++use bitcoin::consensus::{deserialize, serialize};
++use bitcoin::hashes::sha256d;
++use bitcoin::hashes::Hash;
 +use bitcoin::pow::Work;
 +use bitcoin::{BlockHash, FeeRate, Network, ScriptBuf};
 +use lightning::chain::{BlockLocator, Confirm, Listen};
 +use lightning_block_sync::init::synchronize_listeners;
 +use lightning_block_sync::poll::{ChainPoller, ChainTip, ValidatedBlockHeader};
 +use lightning_block_sync::{BlockData, BlockHeaderData, BlockSource, BlockSourceError, SpvClient};
++use rusqlite::{params, Connection, OptionalExtension};
 +
 +use super::{WalletSyncGuard, WalletSyncStatus};
 +use crate::config::Config;
@@ -291,6 +297,78 @@ index 0000000..d8489ad
 +const RETRY_DELAY: Duration = Duration::from_secs(2);
 +
 +type PeerSpvClient = SpvClient<ChainPoller<Arc<PeerBlockSource>, PeerBlockSource>, Arc<ChainListener>>;
++
++// All records come from Kyoto's filter events, after its two-peer filter-header
++// agreement and filter-hash check. Keep both branches of a reorganization; reads
++// of historical matches are checked against the current canonical header.
++struct FilterHistory(Mutex<Connection>);
++
++impl FilterHistory {
++	fn open(storage_dir: &str) -> rusqlite::Result<Self> {
++		let path = Path::new(storage_dir).join("compact-filter-history.sqlite");
++		let connection = Connection::open(path)?;
++		connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
++			CREATE TABLE IF NOT EXISTS filters (
++				block_hash BLOB PRIMARY KEY NOT NULL,
++				height INTEGER NOT NULL,
++				header BLOB NOT NULL,
++				filter_hash BLOB NOT NULL,
++				contents BLOB NOT NULL
++			);
++			CREATE INDEX IF NOT EXISTS filters_height ON filters(height);")?;
++		Ok(Self(Mutex::new(connection)))
++	}
++
++	fn insert(&self, filter: IndexedFilter) -> rusqlite::Result<()> {
++		let height = filter.height();
++		let hash = filter.block_hash();
++		let (header, filter) = filter.into_parts();
++		let filter_hash = sha256d::Hash::hash(&filter.content);
++		self.0.lock().expect("lock").execute(
++			"INSERT OR REPLACE INTO filters(block_hash, height, header, filter_hash, contents) VALUES(?1, ?2, ?3, ?4, ?5)",
++			params![hash.to_byte_array().as_slice(), height, serialize(&header), filter_hash.to_byte_array().as_slice(), filter.content],
++		)?;
++		Ok(())
++	}
++
++	fn get(&self, hash: &BlockHash) -> rusqlite::Result<Option<(bitcoin::block::Header, BlockFilter)>> {
++		let raw: Option<(Vec<u8>, Vec<u8>, Vec<u8>)> = self.0.lock().expect("lock").query_row(
++			"SELECT header, filter_hash, contents FROM filters WHERE block_hash=?1",
++			params![hash.to_byte_array().as_slice()], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
++		).optional()?;
++		raw.map(|(header, stored_hash, contents)| {
++			let header = deserialize::<bitcoin::block::Header>(&header)
++				.map_err(|_| rusqlite::Error::InvalidQuery)?;
++			if header.block_hash() != *hash { return Err(rusqlite::Error::InvalidQuery); }
++			if sha256d::Hash::hash(&contents).to_byte_array().as_slice() != stored_hash {
++				return Err(rusqlite::Error::InvalidQuery);
++			}
++			Ok((header, BlockFilter::new(&contents)))
++		}).transpose()
++	}
++
++	fn matches(&self, scripts: &[ScriptBuf], tip: u32) -> rusqlite::Result<Vec<(u32, BlockHash)>> {
++		let connection = self.0.lock().expect("lock");
++		let mut statement = connection.prepare(
++			"SELECT height, block_hash, filter_hash, contents FROM filters WHERE height <= ?1 ORDER BY height")?;
++		let rows = statement.query_map(params![tip], |row| {
++			Ok((row.get::<_, u32>(0)?, row.get::<_, Vec<u8>>(1)?, row.get::<_, Vec<u8>>(2)?, row.get::<_, Vec<u8>>(3)?))
++		})?;
++		let mut result = Vec::new();
++		for row in rows {
++			let (height, bytes, stored_hash, contents) = row?;
++			let hash = BlockHash::from_slice(&bytes).map_err(|_| rusqlite::Error::InvalidQuery)?;
++			if sha256d::Hash::hash(&contents).to_byte_array().as_slice() != stored_hash {
++				return Err(rusqlite::Error::InvalidQuery);
++			}
++			let matched = BlockFilter::new(&contents)
++				.match_any(&hash, scripts.iter().map(|script| script.to_bytes()))
++				.map_err(|_| rusqlite::Error::InvalidQuery)?;
++			if matched { result.push((height, hash)); }
++		}
++		Ok(result)
++	}
++}
 +
 +struct ChainListener {
 +	onchain_wallet: std::sync::Weak<Wallet>,
@@ -340,7 +418,8 @@ index 0000000..d8489ad
 +	ready: AtomicBool,
 +	stopped: AtomicBool,
 +	known_headers: Mutex<HashMap<BlockHash, BlockHeaderData>>,
-+	filters: Mutex<HashMap<BlockHash, IndexedFilter>>,
++	filters: FilterHistory,
++	archive_error: AtomicBool,
 +	channel_scripts: Mutex<HashSet<ScriptBuf>>,
 +	pending_scripts: Mutex<Vec<(u64, ScriptBuf)>>,
 +	watch_version: AtomicU64,
@@ -351,9 +430,9 @@ index 0000000..d8489ad
 +}
 +
 +impl PeerBlockSource {
-+	fn new(network: Network) -> Self {
++	fn new(network: Network, filters: FilterHistory) -> Self {
 +		Self { network, requester: RwLock::new(None), ready: AtomicBool::new(false), stopped: AtomicBool::new(false),
-+			known_headers: Mutex::new(HashMap::new()), filters: Mutex::new(HashMap::new()),
++			known_headers: Mutex::new(HashMap::new()), filters, archive_error: AtomicBool::new(false),
 +			channel_scripts: Mutex::new(HashSet::new()), pending_scripts: Mutex::new(Vec::new()),
 +			watch_version: AtomicU64::new(0), synced_watch_version: AtomicU64::new(0),
 +			wallet: RwLock::new(std::sync::Weak::new()),
@@ -428,12 +507,14 @@ index 0000000..d8489ad
 +	}
 +
 +	async fn get_block(&self, hash: &BlockHash) -> Result<BlockData, BlockSourceError> {
-+		let filter = self.filters.lock().expect("lock").get(hash).cloned().ok_or_else(||
-+			BlockSourceError::transient(io::Error::other(format!("Bitcoin compact filter for {hash} is unavailable"))))?;
++		let (header, filter) = self.filters.get(hash).map_err(BlockSourceError::persistent)?
++			.ok_or_else(|| BlockSourceError::transient(io::Error::other(format!("Bitcoin compact filter for {hash} is unavailable"))))?;
 +		let scripts = self.scripts_to_watch()?;
-+		if !filter.contains_any(scripts.iter()) {
++		let matched = filter.match_any(hash, scripts.iter().map(|script| script.to_bytes()))
++			.map_err(BlockSourceError::persistent)?;
++		if !matched {
 +			self.skipped_blocks.fetch_add(1, Ordering::Relaxed);
-+			return Ok(BlockData::HeaderOnly(filter.header()));
++			return Ok(BlockData::HeaderOnly(header));
 +		}
 +		let requester = self.requester()?;
 +		let indexed = tokio::time::timeout(REQUEST_TIMEOUT, requester.get_block(*hash)).await
@@ -474,7 +555,8 @@ index 0000000..d8489ad
 +		let first: SocketAddr = addresses.next().ok_or(())?.parse().map_err(|_| ())?;
 +		let second: SocketAddr = addresses.next().ok_or(())?.parse().map_err(|_| ())?;
 +		if addresses.next().is_some() || first == second { return Err(()); }
-+		Ok(Self { peers: [first, second], block_source: Arc::new(PeerBlockSource::new(config.network)), spv_client: tokio::sync::Mutex::new(None),
++		let filters = FilterHistory::open(&config.storage_dir_path).map_err(|_| ())?;
++		Ok(Self { peers: [first, second], block_source: Arc::new(PeerBlockSource::new(config.network, filters)), spv_client: tokio::sync::Mutex::new(None),
 +			latest_tip: RwLock::new(None), wallet_polling_status: Mutex::new(WalletSyncStatus::Completed),
 +			fee_estimator, config, logger, last_logged_counts: Mutex::new((0, 0)) })
 +	}
@@ -498,6 +580,7 @@ index 0000000..d8489ad
 +		runtime.spawn_background_task(async move {
 +			loop {
 +				if source.stopped.load(Ordering::Acquire) { break; }
++				source.archive_error.store(false, Ordering::Release);
 +				let (node, client) = PeerBuilder::new(network).add_peer(peers[0]).add_peer(peers[1]).whitelist_only()
 +					.required_peers(2).fetch_witness_data().build();
 +				let Client { requester, mut info_rx, mut warn_rx, mut event_rx } = client;
@@ -507,9 +590,19 @@ index 0000000..d8489ad
 +					while let Some(event) = event_rx.recv().await {
 +						match event {
 +							Event::IndexedFilter(filter) => {
-+								event_source.filters.lock().expect("lock").insert(filter.block_hash(), filter);
++								if event_source.filters.insert(filter).is_err() {
++									event_source.archive_error.store(true, Ordering::Release);
++									event_source.ready.store(false, Ordering::Release);
++									if let Some(requester) = event_source.requester.read().expect("lock").clone() {
++										let _ = requester.shutdown();
++									}
++								}
 +							},
-+							Event::FiltersSynced(_) => event_source.ready.store(true, Ordering::Release),
++							Event::FiltersSynced(_) => {
++								if !event_source.archive_error.load(Ordering::Acquire) {
++									event_source.ready.store(true, Ordering::Release);
++								}
++							},
 +							Event::ChainUpdate(_) => event_source.ready.store(false, Ordering::Release),
 +						}
 +					}
@@ -616,11 +709,8 @@ index 0000000..d8489ad
 +			.filter(|(v, _)| *v > synced && *v <= version).map(|(_, script)| script.clone()).collect();
 +		let tip = self.latest_tip.read().expect("lock").ok_or(Error::TxSyncFailed)?;
 +		let requester = self.block_source.requester().map_err(|_| Error::ConnectionFailed)?;
-+		let candidates: Vec<_> = self.block_source.filters.lock().expect("lock").values()
-+			.filter(|filter| filter.height() <= tip.height && filter.contains_any(scripts.iter()))
-+			.map(|filter| (filter.height(), filter.block_hash())).collect();
-+		let mut candidates = candidates;
-+		candidates.sort_unstable_by_key(|(height, _)| *height);
++		let candidates = self.block_source.filters.matches(&scripts, tip.height)
++			.map_err(|_| Error::TxSyncFailed)?;
 +		let mut earliest = None;
 +		for (height, hash) in candidates {
 +			let header = self.block_source.header_at(&requester, height).await.map_err(|_| Error::TxSyncFailed)?;

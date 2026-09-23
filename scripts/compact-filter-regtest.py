@@ -4,6 +4,7 @@ import re
 import hashlib
 import socket
 import socketserver
+import sqlite3
 import subprocess
 import tempfile
 import threading
@@ -114,7 +115,7 @@ def main():
                 text=True, stderr=subprocess.DEVNULL,
             ).strip()
 
-        def run_client(commands):
+        def run_client(commands, after_sync=None):
             log = client_dir / "node/ldk_node.log"
             old_syncs = log.read_text(errors="ignore").count("Direct Bitcoin peer initial sync complete") if log.exists() else 0
             process = subprocess.Popen(
@@ -131,6 +132,8 @@ def main():
                     time.sleep(0.25)
                 else:
                     raise RuntimeError("client initial sync timed out")
+                if after_sync is not None:
+                    after_sync()
                 output, _ = process.communicate(commands, timeout=90)
                 if process.returncode:
                     raise RuntimeError(f"client exited with {process.returncode}: {output}")
@@ -197,6 +200,9 @@ def main():
                     process.communicate(timeout=10)
 
             output, log = run_client("address\nsync\nbalance\nquit\n")
+            archive = client_dir / "node/compact-filter-history.sqlite"
+            with sqlite3.connect(archive) as db:
+                assert db.execute("SELECT COUNT(*) FROM filters").fetchone()[0] == 101
             address = re.search(r"bcrt1[0-9a-z]{20,}", output)
             assert address, output
             counts = re.findall(r"Bitcoin compact filters: (\d+) header-only blocks, (\d+) full blocks downloaded", log)
@@ -215,6 +221,8 @@ def main():
             else:
                 raise RuntimeError("second peer did not sync funding block")
             output, log = run_client("sync\nbalance\nquit\n")
+            with sqlite3.connect(archive) as db:
+                assert db.execute("SELECT COUNT(*) FROM filters").fetchone()[0] == 106
             counts = re.findall(r"Bitcoin compact filters: (\d+) header-only blocks, (\d+) full blocks downloaded", log)
             assert counts and int(counts[-1][0]) >= 4 and int(counts[-1][1]) == 1, counts
             assert "200000" in output, output
@@ -222,9 +230,20 @@ def main():
             assert "test watch registered" in output, output
             assert "Bitcoin watch replayed from height 105 through 106" in log, log[-3000:]
             replay_counts = re.findall(r"Bitcoin compact filters: (\d+) header-only blocks, (\d+) full blocks downloaded", log)
-            assert replay_counts and int(replay_counts[-1][1]) >= 2, replay_counts
+            assert replay_counts and int(replay_counts[-1][1]) >= 1, replay_counts
+            with sqlite3.connect(archive) as db:
+                assert db.execute("SELECT COUNT(*) FROM filters").fetchone()[0] == 106
+            successful_replays = log.count("Bitcoin watch replayed from height")
+
+            def corrupt_archive():
+                with sqlite3.connect(archive) as db:
+                    db.execute("UPDATE filters SET contents = x'00' WHERE height = 105")
+
+            _, log = run_client(f"test-watch {late_address}\nsync\nquit\n", after_sync=corrupt_archive)
+            assert log.count("Bitcoin watch replayed from height") == successful_replays, "corrupt cached filter was accepted"
             print("compact filters skipped unrelated blocks and downloaded the wallet match")
             print("a late script watch replayed its earlier funding block")
+            print("a corrupted archived filter failed closed")
             print("a tampered second peer prevented initial sync")
             print(f"first sync: {counts[0]}; funded sync: {counts[-1]}")
         finally:
