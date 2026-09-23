@@ -9,7 +9,7 @@ A separate research fork of [Winnow](https://github.com/winnowwallet/winnow)'s l
 | `ChainWatch` | Reads Bitcoin headers and BIP157/158 compact filters directly from peers on regtest or signet. Watches a prospective channel funding script and, when given its outpoint, detects a later spend. Persists observations and rolls them back on a reorganization. |
 | `pq-invoice-verify` | Checks a BOLT 11 invoice's classical signature and PQLN ML-DSA signature against an independently trusted payee key. Missing, unanchored, invalid, or expired invoices fail closed. |
 
-`pq-light-client` is a **research regtest client**, not a production wallet. It connects directly to a Bitcoin P2P peer and runs no local Bitcoin full node or Esplora service. The peer backend reads full regtest blocks and feeds the wallet and channel monitors through LDK's block listener, including reorganizations. This deliberately uses more bandwidth than compact-filter matching until the filter watch set is integrated with LDK. A two-node regtest run completed PQ transport, channel funding, a hybrid ML-KEM payment, receipt, and a second payment after restart without Esplora. See [Integration path](docs/integration.md).
+`pq-light-client` is a **research regtest client**, not a production wallet. It connects directly to a Bitcoin P2P peer and runs no local Bitcoin full node or Esplora service. It matches BIP157/158 compact filters against the wallet's revealed addresses and LDK's registered channel scripts. Unrelated blocks advance as headers; matching blocks are downloaded and fed to the wallet and channel listeners. A local regtest check skipped 101 unrelated blocks without downloading any full block, then downloaded one wallet funding block. The current single-peer setup can be lied to about filter contents, so it is not yet safe for real funds. See [Integration path](docs/integration.md).
 
 ## Why this shape
 
@@ -27,6 +27,14 @@ Requires Swift 6, Rust 1.85+, Git, and a C compiler. The regtest smoke also need
 ```
 
 `bootstrap.sh` checks out the exact upstream revisions listed in [Dependencies](#dependencies) under ignored `.deps/` and applies the reviewed LDK Node compatibility patch. `check.sh` builds and tests the Rust and Swift components, then funds and spends a test output on a disposable regtest node. It removes that node when finished. The funding/spend smoke verifies `ChainWatch`, not a Lightning payment.
+
+To check the payment node's compact-filter scanning against a disposable Bitcoin peer:
+
+```sh
+cargo build --manifest-path crates/pq-light-client/Cargo.toml
+python3 scripts/compact-filter-regtest.py
+python3 scripts/pqln-compact-regtest.py
+```
 
 ## Try the regtest Lightning light client
 
