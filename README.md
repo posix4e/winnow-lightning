@@ -1,6 +1,6 @@
 # Winnow Lightning research
 
-A separate, local research repository for a **light-client path to post-quantum Lightning**. It does not change the Winnow app or hold channel funds. The current prototype has two independently runnable parts:
+A separate research fork of [Winnow](https://github.com/winnowwallet/winnow)'s direct-peer light-client approach for **post-quantum Lightning**. It reuses Winnow's `WalletCore` at a pinned revision, has its own Git history, and does not change the Winnow app. The current prototype has two independently runnable parts:
 
 | Part | What works now |
 | --- | --- |
