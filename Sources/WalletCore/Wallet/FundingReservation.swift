@@ -42,6 +42,16 @@ public struct FundingReservation: Codable, Equatable, Sendable {
               tx.outputs.filter({ $0.value == amount && $0.scriptPubKey == scriptPubKey }).count == 1,
               tx.outputs.count == (changeOutputIndex == nil ? 1 : 2)
         else { throw FundingReservationError.damagedRecord }
+        try validateAmounts(tx)
+        if let index = changeOutputIndex {
+            guard tx.outputs.indices.contains(Int(index)),
+                  tx.outputs[Int(index)].scriptPubKey != scriptPubKey else {
+                throw FundingReservationError.damagedRecord
+            }
+        }
+    }
+
+    private func validateAmounts(_ tx: Transaction) throws {
         var inputTotal: Int64 = 0
         for coin in selected {
             guard coin.txid.count == 32, !coin.isSpent, !coin.scriptPubKey.isEmpty,
@@ -61,11 +71,20 @@ public struct FundingReservation: Codable, Equatable, Sendable {
         guard inputTotal >= outputTotal, inputTotal - outputTotal == fee else {
             throw FundingReservationError.damagedRecord
         }
-        if let index = changeOutputIndex {
-            guard tx.outputs.indices.contains(Int(index)),
-                  tx.outputs[Int(index)].scriptPubKey != scriptPubKey else {
-                throw FundingReservationError.damagedRecord
-            }
+    }
+
+    func validateOwnership(descriptor: Descriptor, network: BitcoinNetwork, nextChangeIndex: UInt32) throws {
+        for coin in selected {
+            guard coin.index < HDKey.hardenedOffset,
+                  try descriptor.derived(index: coin.index, bitcoinNetwork: network)[coin.chain.rawValue].scriptPubKey == coin.scriptPubKey
+            else { throw FundingReservationError.damagedRecord }
+        }
+        if let vout = changeOutputIndex {
+            guard nextChangeIndex > changeIndex,
+                  try transaction().outputs[Int(vout)].scriptPubKey
+                    == descriptor.derived(index: changeIndex, bitcoinNetwork: network)[AddressChain.change.rawValue].scriptPubKey
+            else { throw FundingReservationError.damagedRecord }
         }
     }
+
 }

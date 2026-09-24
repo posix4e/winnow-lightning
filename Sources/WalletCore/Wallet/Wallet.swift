@@ -709,17 +709,7 @@ public actor Wallet {
         let descriptor = try Descriptor(state.descriptor)
         _ = try Self.origin(of: descriptor) // validates the wallet descriptor shape
         for reservation in state.fundingReservations {
-            for coin in reservation.selected {
-                guard coin.index < HDKey.hardenedOffset,
-                      try descriptor.derived(index: coin.index, bitcoinNetwork: network)[coin.chain.rawValue].scriptPubKey == coin.scriptPubKey
-                else { throw FundingReservationError.damagedRecord }
-            }
-            if let vout = reservation.changeOutputIndex {
-                guard state.nextChangeIndex > reservation.changeIndex,
-                      try reservation.transaction().outputs[Int(vout)].scriptPubKey
-                        == descriptor.derived(index: reservation.changeIndex, bitcoinNetwork: network)[AddressChain.change.rawValue].scriptPubKey
-                else { throw FundingReservationError.damagedRecord }
-            }
+            try reservation.validateOwnership(descriptor: descriptor, network: network, nextChangeIndex: state.nextChangeIndex)
         }
         // The account key is recoverable from the descriptor's xpub.
         guard case let .tr(.single(key), nil) = descriptor.expression,
@@ -1305,14 +1295,18 @@ public actor Wallet {
         try commit(prepared, fundingRequestID: nil)
     }
 
-    private func commit(_ prepared: PreparedSend, fundingRequestID: String?) throws {
+    private func checkFundingInputs(_ prepared: PreparedSend, fundingRequestID: String?) throws {
         guard !fundingStorageFault else { throw FundingReservationError.storageUnavailable }
-        let signed = prepared.built.transaction
         let reserved = Set(state.fundingReservations.filter { $0.requestID != fundingRequestID }
             .flatMap { $0.selected.map(\.outpoint) })
         guard !prepared.selected.contains(where: { reserved.contains($0.outpoint) }) else {
             throw FundingReservationError.inputsUnavailable
         }
+    }
+
+    private func commit(_ prepared: PreparedSend, fundingRequestID: String?) throws {
+        try checkFundingInputs(prepared, fundingRequestID: fundingRequestID)
+        let signed = prepared.built.transaction
         var updated = state
         if let fundingRequestID {
             guard let index = updated.fundingReservations.firstIndex(where: { $0.requestID == fundingRequestID }),

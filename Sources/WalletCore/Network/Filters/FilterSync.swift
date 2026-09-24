@@ -873,41 +873,49 @@ public actor FilterSync {
                 orderedFilters.append((height, message))
                 continue
             }
-            guard !watchScripts.isEmpty else { continue }
-            let parsed = try message.parsedFilter()
-            let filter = try GCSFilter(p: GCSFilter.defaultP, m: GCSFilter.defaultM,
-                                       key: Data(message.blockHash.prefix(16)),
-                                       n: parsed.n, encoded: parsed.encoded)
-            guard filter.containsAny(watchScripts) else { continue }
-            try await deliverMatchedBlock(from: peer, height: height,
-                                          blockHash: message.blockHash, onMatch: onMatch)
+            try await matchWalletFilter(message, height: height, peer: peer, watchScripts: watchScripts, onMatch: onMatch)
         }
         if let observer {
-            // Peers need not deliver cfilters in height order. A channel must
-            // see parents and their confirmations before subsequent blocks.
-            // Retain at most this already-bounded chunk, not a filter archive.
-            for (height, message) in orderedFilters.sorted(by: { $0.height < $1.height }) {
-                guard let header = await chain.header(at: height) else {
-                    throw FilterSyncError.badPeerResponse("missing header at \(height)")
-                }
-                let watches = try await observer.watches()
-                let parsed = try message.parsedFilter()
-                let filter = try GCSFilter(p: GCSFilter.defaultP, m: GCSFilter.defaultM,
-                                          key: Data(message.blockHash.prefix(16)),
-                                          n: parsed.n, encoded: parsed.encoded)
-                let block: Block?
-                if filter.containsAny(watchScripts + watches.scripts) {
-                    block = try await verifiedBlock(from: peer, height: height, blockHash: message.blockHash)
-                } else { block = nil }
-                if let block {
-                    try await onMatch(BlockMatch(height: height, blockHash: message.blockHash, block: block))
-                }
-                try await observer.scanned(FilterScannedBlock(height: height, header: header, block: block,
-                                                              watchRevision: watches.revision))
-            }
+            try await deliverScannedFilters(orderedFilters, peer: peer, watchScripts: watchScripts,
+                                             observer: observer, onMatch: onMatch)
         }
         peakChunkFilterBytesForTest = max(peakChunkFilterBytesForTest, chunkBytes)
         return seen
+    }
+
+    private func matchWalletFilter(_ message: CFilterMessage, height: UInt32, peer: PeerConnection,
+                                   watchScripts: [Data], onMatch: @Sendable (BlockMatch) async throws -> Void) async throws {
+        guard !watchScripts.isEmpty else { return }
+        let filter = try parsedFilter(message)
+        guard filter.containsAny(watchScripts) else { return }
+        try await deliverMatchedBlock(from: peer, height: height, blockHash: message.blockHash, onMatch: onMatch)
+    }
+
+    private func parsedFilter(_ message: CFilterMessage) throws -> GCSFilter {
+        let parsed = try message.parsedFilter()
+        return try GCSFilter(p: GCSFilter.defaultP, m: GCSFilter.defaultM,
+                             key: Data(message.blockHash.prefix(16)), n: parsed.n, encoded: parsed.encoded)
+    }
+
+    private func deliverScannedFilters(_ filters: [(height: UInt32, message: CFilterMessage)],
+                                       peer: PeerConnection, watchScripts: [Data], observer: FilterScanObserver,
+                                       onMatch: @Sendable (BlockMatch) async throws -> Void) async throws {
+        // A channel must see parents before subsequent blocks, even when a
+        // peer returns filters out of order. Retain only this bounded chunk.
+        for (height, message) in filters.sorted(by: { $0.height < $1.height }) {
+            guard let header = await chain.header(at: height) else {
+                throw FilterSyncError.badPeerResponse("missing header at \(height)")
+            }
+            let watches = try await observer.watches()
+            let filter = try parsedFilter(message)
+            let block: Block?
+            if filter.containsAny(watchScripts + watches.scripts) {
+                block = try await verifiedBlock(from: peer, height: height, blockHash: message.blockHash)
+            } else { block = nil }
+            if let block { try await onMatch(BlockMatch(height: height, blockHash: message.blockHash, block: block)) }
+            try await observer.scanned(FilterScannedBlock(height: height, header: header, block: block,
+                                                          watchRevision: watches.revision))
+        }
     }
 
     /// A chunk's deadline, taken from the whole-batch ceiling it replaces:
