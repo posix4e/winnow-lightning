@@ -11,6 +11,11 @@ final class ClipboardPolicyTests: XCTestCase {
         XCTAssertEqual(ClipboardPolicy.recoveryPhrase.lifetime, 120)
     }
 
+    func testFundedClaimsStayLocalAndExpireQuickly() {
+        XCTAssertTrue(ClipboardPolicy.fundedClaim.localOnly)
+        XCTAssertEqual(ClipboardPolicy.fundedClaim.lifetime, 120)
+    }
+
     func testInterchangeMayCrossDevicesButStillExpires() {
         XCTAssertFalse(ClipboardPolicy.interchange.localOnly)
         XCTAssertGreaterThan(ClipboardPolicy.interchange.lifetime, 0)
@@ -18,7 +23,7 @@ final class ClipboardPolicyTests: XCTestCase {
     }
 
     func testOptionsCarryLocalOnlyAndAnExpiryInTheFuture() throws {
-        for policy in [ClipboardPolicy.recoveryPhrase, .interchange] {
+        for policy in [ClipboardPolicy.recoveryPhrase, .interchange, .fundedClaim] {
             let options = policy.options
             XCTAssertEqual(try XCTUnwrap(options[.localOnly] as? Bool), policy.localOnly)
 
@@ -40,6 +45,7 @@ final class ClipboardPolicyTests: XCTestCase {
             (.interchange, String(repeating: "ab", count: 32)), // Full transaction ID.
             (.interchange, String(repeating: "0a", count: 250)), // Raw transaction hex.
             (.recoveryPhrase, "test recovery phrase"),
+            (.fundedClaim, "wlnclaim1:" + String(repeating: "ab", count: 7_080)),
         ]
         for (policy, text) in copies {
             policy.apply(text, to: pasteboard)

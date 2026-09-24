@@ -39,6 +39,7 @@ struct ClipboardPolicy: Equatable {
     /// Recovery words never leave the device, and expire quickly. There is no
     /// legitimate reason to move a seed between devices by clipboard.
     static let recoveryPhrase = ClipboardPolicy(localOnly: true, lifetime: 120)
+    static let fundedClaim = ClipboardPolicy(localOnly: true, lifetime: 120)
 
     /// Descriptors, PSBTs and addresses may cross to a desktop, because that
     /// is a real workflow — a k-of-n vault's watch-only descriptor is meant to

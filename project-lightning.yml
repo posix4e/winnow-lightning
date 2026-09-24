@@ -58,6 +58,9 @@ targets:
         CURRENT_PROJECT_VERSION: "1"
         CODE_SIGN_STYLE: Automatic
         DEVELOPMENT_TEAM: 2858MX5336
+      configs:
+        Release:
+          PRODUCT_BUNDLE_IDENTIFIER: com.btcswift.lightning
 
   WinnowLightningUITests:
     type: bundle.ui-testing
@@ -73,6 +76,8 @@ targets:
         product: WalletCore
       - package: WinnowLightning
         product: LightningCore
+      - package: WinnowLightning
+        product: LightningLab
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.btcswift.lightning.research.uitests

@@ -37,6 +37,14 @@ struct LightningView: View {
                 if let notice = controller.notice { Text(notice).foregroundStyle(.secondary) }
             }
             if controller.engine != nil {
+                if controller.snapshot?.capabilities.funded_claims == true {
+                    Section {
+                        NavigationLink("Send or receive by message") {
+                            LightningClaimView(defaultHost: host, defaultPort: port)
+                        }
+                        .accessibilityIdentifier("messagePaymentsButton")
+                    }
+                }
                 Section("Peer") {
                     ShareLink("Share my public peer card", item: controller.identityCard)
                     TextField("Host", text: $host).textInputAutocapitalization(.never).autocorrectionDisabled()
@@ -115,6 +123,12 @@ struct LightningView: View {
                     ForEach(controller.snapshot?.channels ?? [], id: \.channel_id) { channel in
                         Text("\(channel.amount_sat) sats · \(channel.usable ? "Ready" : "Pending")")
                             .accessibilityIdentifier("lightningChannelStatus")
+                        Text("\(channel.outbound_capacity_msat / 1000) sats available \(channel.usable ? "to send" : "when connected")")
+                            .font(.caption)
+                        if !channel.outbound_htlcs.isEmpty {
+                            Text("\(channel.outbound_htlcs.reduce(UInt64(0)) { $0 + $1.amount_msat } / 1000) sats in pending payments")
+                                .font(.caption)
+                        }
                         Button("Close into Winnow") { run { try await controller.close(channel, force: false, model: model) } }
                             .accessibilityIdentifier("closeLightningChannelButton")
                         Button("Force close…", role: .destructive) { forceClose = channel }

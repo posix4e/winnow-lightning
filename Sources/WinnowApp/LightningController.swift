@@ -53,7 +53,8 @@ final class LightningController {
         let directory = root.appending(path: "lightning-v1", directoryHint: .isDirectory)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700, .protectionKey: FileProtectionType.complete])
-        let created = try LightningEngine(seed: seed, storageURL: directory, network: .regtest, feeRateSatPerVByte: feeRate)
+        let created = try LightningEngine(seed: seed, storageURL: directory, network: .regtest,
+            feeRateSatPerVByte: feeRate, enableClaims: true)
         let tcp = LightningTCP(engine: created, onUpdate: { [weak self] snapshot in
             guard let self else { return }
             try await self.update(snapshot, ticket: ticket, wallet: wallet, broadcaster: stack.broadcaster)
@@ -63,6 +64,12 @@ final class LightningController {
         engine = created; transport = tcp
         driver = LightningChainDriver(engines: [created], headers: stack.chain)
         snapshot = try await created.status()
+        #if DEBUG
+        // A public identity handoff for the real regtest peer in the UI runner.
+        if let path = model.e2e?.controlFile?.appendingPathExtension("peer-card") {
+            try Data(identityCard.utf8).write(to: path, options: .atomic)
+        }
+        #endif
         notice = nil
         await tcp.start()
     }
@@ -152,6 +159,55 @@ final class LightningController {
         defer { model.keychainAuthentication.revoke() }
         guard ticket == epoch else { throw Failure.sessionChanged }
         try await transport.consume(engine.payInvoice(invoice, amountMsat: amountMsat, maxFeeMsat: maxFeeMsat))
+    }
+    func prepareClaim(provider: String, host: String, port: UInt16, amountMsat: UInt64) async throws {
+        guard let engine, let transport else { throw Failure.unavailable }
+        try await transport.consume(engine.prepareClaim(requestID: UUID().uuidString,
+            provider: provider, host: host, port: port, amountMsat: amountMsat))
+    }
+    func commitClaim(_ claim: LightningClaim, model: AppModel) async throws {
+        guard let engine, let transport, let terms = claim.terms else { throw Failure.unavailable }
+        let ticket = epoch
+        let (debit, overflow) = terms.amount_msat.addingReportingOverflow(terms.fee_msat)
+        guard !overflow else { throw LightningError.invalidResponse }
+        try await model.authenticateSensitiveAction(reason: "Commit \(debit) regtest millisats to this claim")
+        defer { model.keychainAuthentication.revoke() }
+        guard ticket == epoch else { throw Failure.sessionChanged }
+        try await transport.consume(engine.commitClaim(claim))
+    }
+    func exportClaim(_ claim: LightningClaim, model: AppModel) async throws -> String {
+        guard let engine else { throw Failure.unavailable }
+        let ticket = epoch
+        try await model.authenticateSensitiveAction(reason: "Share this regtest claim's redemption secret")
+        defer { model.keychainAuthentication.revoke() }
+        guard ticket == epoch else { throw Failure.sessionChanged }
+        let payload = try await engine.exportClaim(id: claim.claim_id)
+        #if DEBUG
+        // Only after the same authorized export used by the Share sheet. This
+        // disposable fixture handoff is never journaled or included in artifacts.
+        if let path = model.e2e?.controlFile?.appendingPathExtension("claim") {
+            try Data(payload.utf8).write(to: path, options: [.atomic, .completeFileProtection])
+        }
+        #endif
+        return payload
+    }
+    func importClaim(_ text: String) async throws {
+        guard let engine, let transport else { throw Failure.unavailable }
+        try await transport.consume(engine.importClaim(text))
+    }
+    func cancelClaim(_ claim: LightningClaim) async throws {
+        guard let engine, let transport else { throw Failure.unavailable }
+        try await transport.consume(engine.cancelClaim(id: claim.claim_id))
+    }
+    func redeemClaim(_ claim: LightningClaim) async throws {
+        guard let engine, let transport, let terms = claim.terms else { throw Failure.unavailable }
+        let ticket = epoch
+        // Import has already verified the provider against an existing pin.
+        // Connection may use only that pin, never keys from the bearer string.
+        try await transport.connectPinned(host: terms.provider_host, port: terms.provider_port,
+            nodeID: terms.provider_node_id)
+        guard ticket == epoch else { throw Failure.sessionChanged }
+        try await transport.consume(engine.redeemClaim(id: claim.claim_id))
     }
     func close(_ channel: LightningChannel, force: Bool, model: AppModel) async throws {
         guard let engine, let transport, let wallet = model.wallet else { throw Failure.unavailable }

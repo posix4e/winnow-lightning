@@ -26,8 +26,32 @@ a maximum of eight channels. Unsupported inbound channel types are rejected.
 Private peer payments use explicitly pinned ML-KEM and ML-DSA keys. Invoice
 verification rejects missing or mismatched trust anchors; PQ payment onions are
 required. Bitcoin on-chain transactions retain their normal Bitcoin signatures.
-Public gossip/routing, BOLT 12, splicing and anchor fee-bumping are outside this
-research implementation.
+Public gossip/routing, BOLT 12 refund payments, splicing and anchor fee-bumping
+are outside this research implementation. Private multi-hop routing through
+explicitly configured lab peers supports the message-payment experiment.
+
+## Funded message payments
+
+A sender can commit a regtest HTLC, export one durable bearer claim through the
+system Share sheet, Copy or a file, and stop its app before redemption. The
+recipient redeems through a different provider on the four-node S—A—B—R route.
+Winnow continues to own wallet funding, Bitcoin P2P, compact-filter validation,
+reorg handling and broadcasts. The native module owns protocol persistence,
+HTLC state, quote authentication and exact-once invoice binding.
+
+See [CLAIMS.md](CLAIMS.md) for encoding, timing, authentication and recovery, and
+[LAB.md](LAB.md) for the user-operated LAN fixture and beta installation steps.
+This is a private, versioned claim extension; it is not a standard BOLT12 refund.
+Pinned PQ signatures are required; the unsupported classical refund path returns
+an explicit capability error. Claims are copyable and the sender can retain a
+copy. Only actual channel settlement produces a payment receipt.
+
+The app rejects other Bitcoin networks, shows review before committing, and
+authenticates sharing. It keeps new regtest Keychain/defaults/files separate from
+older app data. Release updates `com.btcswift.lightning`; Debug uses the research
+bundle. `scripts/lightning-testflight` archives only a clean commit with a green
+CI run, verifies identity and release exclusions, and distributes only to the
+existing internal group. It performs no App Store submission.
 
 ## Execution and recovery
 

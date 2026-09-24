@@ -1,5 +1,7 @@
 import Foundation
 import LightningCore
+import LightningLab
+import Network
 import TestSupport
 import WalletCore
 import XCTest
@@ -99,6 +101,183 @@ final class WinnowLightningUITests: XCTestCase {
         XCTAssertTrue(show(app, receipt))
         Screenshots.capture(app, "09-lightning-funds-returned", testCase: self)
         print("LIGHTNING_JOURNEY funding=\(funding) payments=\(first.payment_hash),\(second.payment_hash) close=\(closing) balance=\(balance(app))")
+    }
+
+    func testSenderSharesFundedClaimAndReturns() async throws {
+        try await messageJourney(sender: true)
+    }
+
+    func testRecipientClaimsWhileSenderIsStopped() async throws {
+        try await messageJourney(sender: false)
+    }
+
+    private func messageJourney(sender: Bool) async throws {
+        continueAfterFailure = false
+        executionTimeAllowance = 900
+        let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let control = root.appending(path: "control.json")
+        let portA = try await unusedPort()
+        let indices = sender ? [1, 2, 3] : [0, 1, 2]
+        var nodes: [Int: LightningLabNode] = [:]
+        var ports: [Int: UInt16] = [:]
+        for i in indices {
+            let node = try LightningLabNode(directory: root.appending(path: "node-\(i)"),
+                seed: Data(repeating: UInt8(91 + i), count: 32),
+                bitcoinPeer: PeerEndpoint(host: BitcoinCLI.nodeHost, port: BitcoinCLI.p2pPort),
+                listenPort: i == 1 ? portA : 0,
+                provider: i == 1 ? LightningClaimProvider(host: "127.0.0.1", port: portA) : nil,
+                forwarding: true)
+            nodes[i] = node
+            ports[i] = try await node.start()
+        }
+        let fixtures = Array(nodes.values)
+        addTeardownBlock { for node in fixtures { await node.stop() }; try? FileManager.default.removeItem(at: root) }
+        var cards: [Int: String] = [:]
+        for i in indices { cards[i] = try await nodes[i]!.peerCard() }
+        for node in fixtures {
+            for card in cards.values { try await node.pin(card: card) }
+            let address = try await node.wallet.freshReceiveAddress()
+            _ = try BitcoinCLI.sendToAddress(wallet: "lightning-bank", address: address, sats: 600_000, feeRate: 2)
+        }
+        try await LightningPeerFixture.mine(1)
+        for node in fixtures { try await waitFor("fixture funded through Winnow") { await node.wallet.balance == 600_000 } }
+        for source in (sender ? [1, 2] : [0, 1]) {
+            let from = nodes[source]!, to = nodes[source + 1]!
+            try await from.connect(card: cards[source + 1]!, port: ports[source + 1]!)
+            let destination = try await to.status().node_id
+            try await waitFor("fixture peer connected") { try await from.status().peers.contains(destination) }
+            try await from.openChannel(to: destination)
+            _ = try await mempoolTransaction()
+            try await LightningPeerFixture.mine(6)
+            try await waitFor("fixture channel ready") {
+                try await from.status().channels.contains { $0.node_id == destination && $0.usable }
+            }
+        }
+        let app = XCUIApplication()
+        app.launchEnvironment = [
+            "WINNOW_E2E": "1", "WINNOW_E2E_RUN": sender ? "claim-sender" : "claim-recipient", "WINNOW_E2E_RESET": "1",
+            "WINNOW_E2E_ENTROPY": UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased(),
+            "WINNOW_E2E_NETWORK": "regtest", "WINNOW_E2E_CONTROL_FILE": control.path,
+            "WINNOW_E2E_PEER": "\(BitcoinCLI.nodeHost):\(BitcoinCLI.p2pPort)",
+            "WINNOW_E2E_PEER_COUNT": "1", "WINNOW_E2E_SYNC_INTERVAL": "3",
+        ]
+        app.launch()
+        defer { app.terminate() }
+        tap(app, "createWalletButton")
+        XCTAssertTrue(app.buttons["receiveButton"].appears(within: 60))
+        if sender {
+            tap(app, "receiveButton")
+            tap(app, "skipReceiveAddressLabelButton")
+            let address = app.staticTexts["receiveAddress"]
+            XCTAssertTrue(address.appears(within: 30))
+            _ = try BitcoinCLI.sendToAddress(wallet: "lightning-bank",
+                address: XCTUnwrap(address.value as? String), sats: 500_000, feeRate: 2)
+            app.buttons["Done"].tap()
+            try await LightningPeerFixture.mine(1)
+            XCTAssertTrue(poll(timeout: 90, interval: 1) { self.balance(app) == 500_000 })
+        }
+        try openLightning(app)
+        let publicCard = try String(contentsOf: control.appendingPathExtension("peer-card"), encoding: .utf8)
+        for node in fixtures { try await node.pin(card: publicCard) }
+        let appID = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(publicCard.utf8)) as? [String: String])["node_id"]!
+        if sender {
+            try connect(app, card: cards[1]!, port: portA, control: control)
+            tap(app, "openLightningChannelButton")
+            tap(app, "fundLightningChannelButton")
+            tap(app, "Sign and reserve funding")
+        } else {
+            try connect(app, card: cards[2]!, port: ports[2]!, control: control)
+            try await nodes[2]!.openChannel(to: appID)
+        }
+        _ = try await mempoolTransaction()
+        try await LightningPeerFixture.mine(6)
+        let channel = app.staticTexts["lightningChannelStatus"]
+        XCTAssertTrue(show(app, channel))
+        XCTAssertTrue(poll(timeout: 90, interval: 1) { channel.label.contains("Ready") })
+        if !sender { try connect(app, card: cards[1]!, port: portA, control: control) }
+        tap(app, "messagePaymentsButton", up: true)
+        let provider = nodes[1]!
+        let providerID = try await provider.status().node_id
+        var token: String
+        var claimID: String
+        if sender {
+            tap(app, "prepareClaimButton")
+            XCTAssertTrue(app.staticTexts["Review before committing"].appears(within: 30))
+            Screenshots.capture(app, "01-claim-quote-review", testCase: self)
+            tap(app, "commitClaimButton")
+            XCTAssertTrue(app.staticTexts["Funded · awaiting claim"].appears(within: 60))
+            Screenshots.capture(app, "02-claim-funded", testCase: self)
+            tap(app, "shareClaimButton")
+            let handoff = control.appendingPathExtension("claim")
+            XCTAssertTrue(poll(timeout: 30, interval: 0.2) { FileManager.default.fileExists(atPath: handoff.path) })
+            token = try String(contentsOf: handoff, encoding: .utf8)
+            Screenshots.capture(app, "03-claim-share-sheet", testCase: self)
+            if app.buttons["Close"].exists { app.buttons["Close"].tap() }
+            else { app.swipeDown() }
+            tap(app, "copyClaimButton")
+            XCTAssertEqual(try String(contentsOf: handoff, encoding: .utf8), token)
+            let recipient = nodes[3]!
+            let inspection = try await recipient.engine.inspectClaim(token)
+            claimID = inspection.claim_id
+            app.terminate()
+            try await recipient.connect(card: cards[1]!, port: portA)
+            try await recipient.consume(recipient.engine.importClaim(token))
+            try await recipient.consume(recipient.engine.redeemClaim(id: claimID))
+            try await waitFor("recipient paid while sender app is terminated") {
+                try await recipient.status().claims[claimID]?.state == "received"
+            }
+            app.launchEnvironment["WINNOW_E2E_RESET"] = "0"
+            app.launch()
+            XCTAssertTrue(app.tabBars.buttons["Settings"].appears(within: 60))
+            try openLightning(app)
+            try connect(app, card: cards[1]!, port: portA, control: control)
+            tap(app, "messagePaymentsButton", up: true)
+            XCTAssertTrue(app.staticTexts["Payment settled"].appears(within: 60))
+            Screenshots.capture(app, "04-claim-sender-returned-paid", testCase: self)
+            let recipientState = try await recipient.status()
+            let intermediateID = try await nodes[2]!.status().node_id
+            XCTAssertEqual(recipientState.channels.count, 1)
+            XCTAssertEqual(recipientState.channels.first?.node_id, intermediateID)
+        } else {
+            let source = nodes[0]!
+            try await source.consume(source.engine.prepareClaim(requestID: "recipient-ui", provider: providerID,
+                host: "127.0.0.1", port: portA, amountMsat: 5_000_000))
+            try await waitFor("sender quote") { try await source.status().claims.values.contains { $0.state == "quoted" } }
+            let sourceState = try await source.status()
+            let quoted = try XCTUnwrap(sourceState.claims.values.first { $0.state == "quoted" })
+            claimID = quoted.claim_id
+            try await source.consume(source.engine.commitClaim(quoted))
+            try await waitFor("sender claim funded") { try await source.status().claims[claimID]?.state == "awaiting_claim" }
+            token = try await source.engine.exportClaim(id: claimID)
+            await source.stop()
+            try paste(token, control: control)
+            tap(app, "pasteClaimButton")
+            tap(app, "importClaimButton")
+            XCTAssertTrue(app.staticTexts["Verified · ready to claim"].appears(within: 30))
+            Screenshots.capture(app, "01-recipient-verifies-claim", testCase: self)
+            tap(app, "redeemClaimButton")
+            XCTAssertTrue(app.staticTexts["Payment received"].appears(within: 90))
+            Screenshots.capture(app, "02-recipient-payment-received", testCase: self)
+        }
+        XCTAssertEqual(try BitcoinCLI.mempoolTxids(), [])
+        print("CLAIM_JOURNEY role=\(sender ? "sender" : "recipient") claim=\(claimID) amount_msat=5000000 fee_msat=100000 sender_stopped=true route=S-A-B-R token_bytes=\(token.utf8.count)")
+    }
+
+    private func unusedPort() async throws -> UInt16 {
+        let listener = try NWListener(using: .tcp, on: .any)
+        listener.newConnectionHandler = { $0.cancel() }
+        defer { listener.cancel() }
+        return try await withCheckedThrowingContinuation { continuation in
+            listener.stateUpdateHandler = { state in
+                switch state {
+                case .ready: listener.stateUpdateHandler = nil; continuation.resume(returning: listener.port!.rawValue)
+                case .failed(let error): listener.stateUpdateHandler = nil; continuation.resume(throwing: error)
+                default: break
+                }
+            }
+            listener.start(queue: DispatchQueue(label: "fixture.port"))
+        }
     }
 
     private func balance(_ app: XCUIApplication) -> Int64 {

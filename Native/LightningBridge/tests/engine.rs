@@ -392,3 +392,62 @@ fn invalid_external_preimage_cannot_register_or_replace_an_invoice() {
     assert_eq!(held["hash_invoices"][&hash]["state"], "registered");
     assert!(held["hash_invoices"][&hash].get("preimage").is_none());
 }
+
+#[test]
+fn classical_fallback_and_pinned_key_substitution_have_no_payment_side_effects() {
+    use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
+    use lightning::types::payment::PaymentHash;
+    use lightning_invoice::PaymentSecret;
+    use lightning_invoice::{Currency, InvoiceBuilder};
+    let dir = TempDir::new().unwrap();
+    let mut node = Engine::new(config(&dir), &[64; 32]).unwrap();
+    let identity = node.status();
+    let secret = SecretKey::from_slice(&[65; 32]).unwrap();
+    let secp = Secp256k1::new();
+    let peer = PublicKey::from_secret_key(&secp, &secret).to_string();
+    node.call(Command::PinPeer {
+        node_id: peer.clone(),
+        kem_key: identity["kem_key"].as_str().unwrap().into(),
+        signature_key: identity["signature_key"].as_str().unwrap().into(),
+    })
+    .unwrap();
+    let before = node.status();
+    assert!(node
+        .call(Command::PinPeer {
+            node_id: peer,
+            kem_key: identity["kem_key"].as_str().unwrap().into(),
+            signature_key: hex::encode([0; 1312]),
+        })
+        .is_err());
+    let invoice = InvoiceBuilder::new(Currency::Regtest)
+        .description("classical-only control".into())
+        .payment_hash(PaymentHash(sha256::Hash::hash(&[66; 32]).to_byte_array()))
+        .payment_secret(PaymentSecret([67; 32]))
+        .duration_since_epoch(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap(),
+        )
+        .min_final_cltv_expiry_delta(80)
+        .amount_milli_satoshis(5_000_000)
+        .build_signed(|message| secp.sign_ecdsa_recoverable(message, &secret))
+        .unwrap();
+    assert!(node
+        .call(Command::PayInvoice {
+            invoice: invoice.to_string(),
+            amount_msat: 5_000_000,
+            max_fee_msat: 1000,
+        })
+        .is_err());
+    assert!(node
+        .call(Command::CreateRefund {
+            amount_msat: 5_000_000
+        })
+        .is_err());
+    assert_eq!(node.status()["payments"], before["payments"]);
+    assert_eq!(node.status()["claims"], before["claims"]);
+    assert_eq!(
+        node.status()["capabilities"]["bolt12_refund_payments"],
+        false
+    );
+}
