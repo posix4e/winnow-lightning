@@ -2,7 +2,9 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main]
+    # The research repository's default branch still holds the old prototype.
+    # Validate this branch directly while the Winnow-based replacement is reviewed.
+    branches: [main, codex/winnow-lightning]
   schedule:
     - cron: '23 3 * * *'
   workflow_dispatch:
@@ -16,8 +18,8 @@ permissions:
   contents: read
   actions: read
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ci-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || (github.ref == 'refs/heads/codex/winnow-lightning' && github.ref_name) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.ref == 'refs/heads/codex/winnow-lightning' }}
 jobs:
   hosted:
     if: vars.TDX_CI_ENABLED != 'true' || inputs.hosted == true || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)
