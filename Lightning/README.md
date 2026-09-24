@@ -62,8 +62,8 @@ does not claim Bitcoin consensus acceptance or perform Bitcoin network relay.
 
 The native bridge is restricted to regtest and initially negotiates private
 non-anchor channels. The ordinary app does not yet instantiate it. Payment,
-close/sweep commands, app key authorization and lifecycle integration, and the
-complete live regtest journey remain implementation work. Unhandled native
+close/sweep commands, and app key authorization and lifecycle integration remain
+implementation work. Unhandled native
 events remain in LDK for replay rather than being falsely acknowledged.
 
 `FilterScanObserver` adds ordered per-height results and revisioned dynamic
@@ -71,8 +71,21 @@ watches to Winnow's existing scanner. It reuses the same peers, validated header
 filter commitments, block retrieval, and rollback. Its consumer must track its
 own durable scan position, detect a watch revision race, and request historical
 catch-up when needed. Header sync alone does not establish Lightning scan
-completion. The native chain adapter and its recovery tests must implement that
-contract before the app can open channels.
+completion. `LightningChainDriver` implements this contract, including catch-up of independently
+persisted channel monitors before peer reconnect. It checks saved chain locators
+against Winnow's canonical headers and fails closed when a crash spans a fork
+outside the retained locator's ancestry window. The initial regtest catch-up
+rescans from genesis using the same scanner; it retains no second filter archive.
+
+The opt-in `RegtestJourneyTests` uses a disposable Bitcoin Core node. Winnow
+receives coins, signs channel funding, relays it over Bitcoin P2P, and confirms
+both channel peers through compact filters. The test then restarts both engines,
+reconciles independently persisted positions, reconnects, and handles a two-block
+reorg. Core RPC is confined to test setup, mining and independent assertions:
+
+```sh
+WINNOW_BITCOIN_DIR=/path/to/bitcoin/bin swift test --package-path Lightning
+```
 
 An ordinary Winnow seed/iCloud backup does not recover live channel state.
 Exports currently refuse wallets with funding reservations. Releasing submitted

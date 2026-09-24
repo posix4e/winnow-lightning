@@ -17,11 +17,21 @@ public struct LightningSnapshot: Decodable, Sendable {
     public let signature_key: String
     public let height: UInt32
     public let block_hash: String
+    public let watch_revision: UInt64
+    public let scan_next: UInt32
+    public let chain_ready: Bool
+    public let chain_positions: [LightningChainPosition]
     public let events: [String: LightningEvent]
     public let watches: [String: LightningWatch]
     public let peers: [String]
     public let channels: [LightningChannel]
     public let packets: [LightningPacket]?
+}
+
+public struct LightningChainPosition: Decodable, Sendable {
+    public let height: UInt32
+    public let block_hash: String
+    public let previous_blocks: [String?]
 }
 
 public struct LightningEvent: Decodable, Sendable {
@@ -133,6 +143,11 @@ public actor LightningEngine {
     public func blockConnected(_ block: Block, height: UInt32) throws -> LightningSnapshot {
         try call(Request(command: "block_connected", block: block.serialized.hex, height: height))
     }
+    public func scannedBlock(header: BlockHeader, block: Block?, height: UInt32,
+                             watchRevision: UInt64) throws -> LightningSnapshot {
+        try call(Request(command: "scanned_block", block: block?.serialized.hex, height: height,
+                         header: header.serialized.hex, watch_revision: watchRevision))
+    }
     public func blocksDisconnected(blockHash: Data, height: UInt32) throws -> LightningSnapshot {
         guard blockHash.count == 32 else { throw LightningError.invalidResponse }
         return try call(Request(command: "blocks_disconnected", height: height, block_hash: blockHash.displayHex))
@@ -178,5 +193,7 @@ public actor LightningEngine {
         var block: String? = nil
         var height: UInt32? = nil
         var block_hash: String? = nil
+        var header: String? = nil
+        var watch_revision: UInt64? = nil
     }
 }

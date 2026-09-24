@@ -8,7 +8,8 @@ use lightning::{
     chain::{
         chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator, TransactionType},
         chainmonitor::ChainMonitor,
-        BlockLocator, Filter, Listen, Watch, WatchedOutput,
+        channelmonitor::ChannelMonitor,
+        BlockLocator, Confirm, Filter, Listen, Watch, WatchedOutput,
     },
     events::{Event, EventsProvider, ReplayEvent},
     ln::{
@@ -85,11 +86,26 @@ pub struct Config {
     pub fee_sat_per_kw: u32,
 }
 
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(default)]
 struct Journal {
     events: BTreeMap<String, Value>,
     watches: BTreeMap<String, Value>,
     submitted: BTreeMap<String, String>,
+    watch_revision: u64,
+    next_scan: u32,
+}
+
+impl Default for Journal {
+    fn default() -> Self {
+        Self {
+            events: BTreeMap::new(),
+            watches: BTreeMap::new(),
+            submitted: BTreeMap::new(),
+            watch_revision: 0,
+            next_scan: 1,
+        }
+    }
 }
 
 struct Services {
@@ -100,6 +116,21 @@ struct Services {
 }
 
 impl Services {
+    fn register_watch(&self, key: String, value: Value) {
+        self.update(|j| {
+            if j.watches.get(&key) != Some(&value) {
+                j.watches.insert(key, value);
+                j.watch_revision = j
+                    .watch_revision
+                    .checked_add(1)
+                    .expect("watch revision exhausted");
+                // The initial regtest implementation replays from genesis,
+                // using Winnow's scanner and no retained filter-body archive.
+                j.next_scan = 1;
+            }
+        })
+        .expect("Lightning watch persistence failed");
+    }
     fn update(&self, f: impl FnOnce(&mut Journal)) -> Result<()> {
         let mut journal = self.journal.lock().map_err(|_| "journal unavailable")?;
         if self.failed.load(Ordering::Relaxed) {
@@ -153,24 +184,18 @@ impl BroadcasterInterface for Services {
 }
 impl Filter for Services {
     fn register_tx(&self, txid: &Txid, script_pubkey: &Script) {
-        self.update(|j| {
-            j.watches.insert(
-                format!("tx:{txid}"),
-                json!({"txid":txid.to_string(), "script":hex::encode(script_pubkey.as_bytes())}),
-            );
-        })
-        .expect("Lightning watch persistence failed");
+        self.register_watch(
+            format!("tx:{txid}"),
+            json!({"txid":txid.to_string(), "script":hex::encode(script_pubkey.as_bytes())}),
+        );
     }
     fn register_output(&self, output: WatchedOutput) {
-        self.update(|j| {
-            j.watches.insert(
-                format!("output:{}", output.outpoint),
-                json!({"txid":output.outpoint.txid.to_string(), "vout":output.outpoint.index,
+        self.register_watch(
+            format!("output:{}", output.outpoint),
+            json!({"txid":output.outpoint.txid.to_string(), "vout":output.outpoint.index,
                 "script":hex::encode(output.script_pubkey.as_bytes()),
                 "block_hash":output.block_hash.map(|h| h.to_string())}),
-            );
-        })
-        .expect("Lightning watch persistence failed");
+        );
     }
 }
 
@@ -254,6 +279,12 @@ pub enum Command {
         block: String,
         height: u32,
     },
+    ScannedBlock {
+        header: String,
+        block: Option<String>,
+        height: u32,
+        watch_revision: u64,
+    },
     BlocksDisconnected {
         block_hash: String,
         height: u32,
@@ -269,6 +300,8 @@ pub struct Engine {
     keys: Arc<KeysManager>,
     sockets: BTreeMap<u64, Socket>,
     tip: BlockLocator,
+    recovering: Vec<ChannelMonitor<InMemorySigner>>,
+    recovery_height: u32,
     _lock: File,
     pub poisoned: bool,
 }
@@ -414,15 +447,22 @@ impl Engine {
             }
             Err(_) => return Err("missing or unreadable channel manager".into()),
         };
-        for (monitor_tip, channel) in monitors {
-            // Catch-up of independently persisted positions must be implemented
-            // before permitting peers to reconnect in this recovery case.
-            if monitor_tip != tip {
-                return Err("monitor and manager need chain reconciliation".into());
+        // As in LDK's block-sync initialization, catch up independently
+        // persisted monitors before giving them to the live ChainMonitor.
+        let recovery_height = monitors
+            .iter()
+            .map(|(position, _)| position.height)
+            .fold(tip.height, u32::max);
+        let mut recovering = Vec::new();
+        for (_, channel) in monitors {
+            channel.load_outputs_to_watch(services.as_ref(), logger.as_ref());
+            if recovery_height == 0 {
+                monitor
+                    .watch_channel(channel.channel_id(), channel)
+                    .map_err(|_| "restore channel monitor")?;
+            } else {
+                recovering.push(channel);
             }
-            monitor
-                .watch_channel(channel.channel_id(), channel)
-                .map_err(|_| "restore channel monitor")?;
         }
         let manager = Arc::new(manager);
         let peers = Peers::new_channel_only(
@@ -442,9 +482,14 @@ impl Engine {
             keys,
             sockets: BTreeMap::new(),
             tip,
+            recovering,
+            recovery_height,
             _lock: lock,
             poisoned: false,
         };
+        // Rebuild the consumer's coverage after every restart. WalletCore
+        // validates the saved tip against its own header chain before replay.
+        engine.services.update(|j| j.next_scan = 1)?;
         engine.checkpoint()?;
         Ok(engine)
     }
@@ -457,6 +502,11 @@ impl Engine {
     }
 
     fn process(&self) -> Result<()> {
+        // ChannelManager may have queued monitor updates during deserialization.
+        // Never process them against an incompletely restored monitor set.
+        if !self.recovering.is_empty() {
+            return self.checkpoint();
+        }
         let handler = |event: Event| -> std::result::Result<(), ReplayEvent> {
             let value = match event {
                 Event::OpenChannelRequest {
@@ -518,6 +568,88 @@ impl Engine {
         self.checkpoint()
     }
 
+    fn scanned_block(
+        &mut self,
+        header: bitcoin::block::Header,
+        block: Option<Block>,
+        height: u32,
+        watch_revision: u64,
+    ) -> Result<()> {
+        {
+            let journal = self.services.journal.lock().unwrap();
+            if journal.watch_revision != watch_revision {
+                return Err("watch revision changed".into());
+            }
+            if journal.next_scan != height {
+                return Err("scan restart required".into());
+            }
+        }
+        if height > self.tip.height
+            && (height != self.tip.height.checked_add(1).ok_or("height overflow")?
+                || header.prev_blockhash != self.tip.block_hash)
+        {
+            return Err("noncontiguous chain update".into());
+        }
+        if height == self.tip.height && header.block_hash() != self.tip.block_hash {
+            return Err("rollback required before replacement confirmations".into());
+        }
+        if let Some(ref block) = block {
+            if block.header != header
+                || !block.check_merkle_root()
+                || !block.check_witness_commitment()
+            {
+                return Err("invalid block commitments".into());
+            }
+            // Supply the complete matched block, including descendants of
+            // outputs registered while a monitor processes its parent.
+            // Confirm explicitly supports historical confirmations after a
+            // tip update; repeated same-chain confirmations are idempotent.
+            let txdata: Vec<_> = block.txdata.iter().enumerate().collect();
+            self.monitor
+                .transactions_confirmed(&header, &txdata, height);
+            self.manager
+                .transactions_confirmed(&header, &txdata, height);
+        }
+        for channel in &self.recovering {
+            if height > channel.current_best_block().height {
+                let txdata: Vec<_> = block
+                    .as_ref()
+                    .map(|b| b.txdata.iter().enumerate().collect())
+                    .unwrap_or_default();
+                channel.block_connected(
+                    &header,
+                    &txdata,
+                    height,
+                    &self.services,
+                    &self.services,
+                    &QuietLogger,
+                );
+                channel.load_outputs_to_watch(self.services.as_ref(), &QuietLogger);
+            }
+        }
+        if height > self.tip.height {
+            self.monitor.best_block_updated(&header, height);
+            self.manager.best_block_updated(&header, height);
+            self.tip.advance(header.block_hash());
+        }
+        if !self.recovering.is_empty() && height >= self.recovery_height {
+            for channel in std::mem::take(&mut self.recovering) {
+                // Persist the reconciled monitor before any pending channel
+                // update or peer packet can be processed.
+                self.monitor
+                    .watch_channel(channel.channel_id(), channel)
+                    .map_err(|_| "restore reconciled monitor")?;
+            }
+        }
+        self.services.update(|j| {
+            // A watch added by this block needs historical coverage too. Do
+            // not overwrite its rewind with this older watch-set's progress.
+            if j.watch_revision == watch_revision {
+                j.next_scan = height.checked_add(1).expect("scan height exhausted");
+            }
+        })
+    }
+
     pub fn status(&self) -> Value {
         let journal = self.services.journal.lock().unwrap();
         json!({"abi":1, "core_revision":crate::CORE_REVISION, "network":"regtest",
@@ -525,6 +657,11 @@ impl Engine {
             "kem_key":self.keys.get_pq_kem_node_id().map(hex::encode),
             "signature_key":self.keys.get_pq_node_id().map(hex::encode),
             "height":self.tip.height, "block_hash":self.tip.block_hash.to_string(),
+            "watch_revision":journal.watch_revision, "scan_next":journal.next_scan,
+            "chain_ready":journal.next_scan > self.tip.height && self.recovering.is_empty(),
+            "chain_positions":std::iter::once(self.tip).chain(self.recovering.iter().map(|m| m.current_best_block()))
+                .map(|p| json!({"height":p.height,"block_hash":p.block_hash.to_string(),
+                    "previous_blocks":p.previous_blocks.map(|h| h.map(|v| v.to_string()))})).collect::<Vec<_>>(),
             "events":journal.events, "watches":journal.watches,
             "peers":self.peers.list_peers().iter().map(|p| p.counterparty_node_id.to_string()).collect::<Vec<_>>(),
             "channels":self.manager.list_channels().iter().map(|c| json!({
@@ -551,6 +688,19 @@ impl Engine {
     pub fn call(&mut self, command: Command) -> Result<Value> {
         if self.poisoned || self.services.failed.load(Ordering::Relaxed) {
             return Err("engine stopped after storage or native failure; reopen required".into());
+        }
+        if matches!(
+            &command,
+            Command::Connect { .. }
+                | Command::Accept { .. }
+                | Command::Read { .. }
+                | Command::OpenChannel { .. }
+                | Command::SubmitFunding { .. }
+                | Command::Tick
+        ) && (!self.recovering.is_empty()
+            || self.services.journal.lock().unwrap().next_scan <= self.tip.height)
+        {
+            return Err("chain catch-up required".into());
         }
         match command {
             Command::Status => return Ok(self.status()),
@@ -690,20 +840,38 @@ impl Engine {
                     return Err("block exceeds limit".into());
                 }
                 let block: Block = deserialize(&raw).map_err(|_| "invalid block")?;
-                if height != self.tip.height.checked_add(1).ok_or("height overflow")?
-                    || block.header.prev_blockhash != self.tip.block_hash
-                {
-                    return Err("noncontiguous chain update".into());
+                let revision = self.services.journal.lock().unwrap().watch_revision;
+                self.scanned_block(block.header, Some(block), height, revision)?;
+            }
+            Command::ScannedBlock {
+                header,
+                block,
+                height,
+                watch_revision,
+            } => {
+                let raw_header = hex::decode(header).map_err(|_| "invalid header bytes")?;
+                if raw_header.len() != 80 {
+                    return Err("invalid header length".into());
                 }
-                if !block.check_merkle_root() || !block.check_witness_commitment() {
-                    return Err("invalid block commitments".into());
-                }
-                self.monitor.block_connected(&block, height);
-                self.manager.block_connected(&block, height);
-                self.tip.advance(block.block_hash());
+                let header = deserialize(&raw_header).map_err(|_| "invalid header")?;
+                let block: Option<Block> = block
+                    .map(|hex| -> Result<Block> {
+                        let raw = hex::decode(hex).map_err(|_| "invalid block bytes")?;
+                        if raw.len() > 4_000_000 {
+                            return Err("block exceeds limit".into());
+                        }
+                        deserialize(&raw).map_err(|_| "invalid block".into())
+                    })
+                    .transpose()?;
+                self.scanned_block(header, block, height, watch_revision)?;
             }
             Command::BlocksDisconnected { block_hash, height } => {
-                if height >= self.tip.height {
+                if height >= self.tip.height
+                    && !self
+                        .recovering
+                        .iter()
+                        .any(|m| m.current_best_block().height > height)
+                {
                     return Err("invalid rollback height".into());
                 }
                 let fork = BlockLocator::new(
@@ -711,8 +879,26 @@ impl Engine {
                     height,
                 );
                 self.monitor.blocks_disconnected(fork);
-                self.manager.blocks_disconnected(fork);
-                self.tip = fork;
+                for channel in &self.recovering {
+                    if channel.current_best_block().height > height {
+                        channel.blocks_disconnected(
+                            fork,
+                            &self.services,
+                            &self.services,
+                            &QuietLogger,
+                        );
+                    }
+                }
+                if self.tip.height > height {
+                    self.manager.blocks_disconnected(fork);
+                    self.tip = fork;
+                }
+                self.recovery_height = self
+                    .recovering
+                    .iter()
+                    .map(|m| m.current_best_block().height)
+                    .fold(self.tip.height, u32::max);
+                self.services.update(|j| j.next_scan = 1)?;
             }
             Command::Tick => {
                 self.manager.timer_tick_occurred();
@@ -725,6 +911,12 @@ impl Engine {
             return Err(error);
         }
         let mut result = self.status();
+        if !self.recovering.is_empty()
+            || self.services.journal.lock().unwrap().next_scan <= self.tip.height
+        {
+            result["packets"] = json!([]);
+            return Ok(result);
+        }
         let mut packets = Vec::new();
         for socket in self.sockets.values_mut() {
             // Drain only after manager and monitor persistence. The caller owns
