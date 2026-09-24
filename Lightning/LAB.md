@@ -32,7 +32,7 @@ lab chain, funding addresses and mining blocks.
    with at least 600,000 regtest sats, mine a block, and enter
    `{"command":"status"}` until its wallet balance appears. The seed and channel
    files are deliberately local to this disposable lab; never use real coins.
-5. In the app select the regtest network, configure its Bitcoin peer to the Mac's
+5. The app is locked to regtest. Configure its Bitcoin peer to the Mac's
    LAN address and Bitcoin P2P port, and allow Local Network access. Create/fund a
    fresh wallet. Open Settings → Lightning, unlock, and wait for scan catch-up.
 6. Obtain `lab/A/public-peer-card.json` directly from the operator, paste it into
@@ -91,6 +91,8 @@ and separate sender and recipient recordings with the same app build. Run the
 same wrapper locally with `UI_TEST_SELECTION` set to either
 `WinnowLightningUITests/WinnowLightningUITests/testSenderSharesFundedClaimAndReturns`
 or `WinnowLightningUITests/WinnowLightningUITests/testRecipientClaimsWhileSenderIsStopped`.
+Set `UI_E2E_RUN=claim-sender` or `UI_E2E_RUN=claim-recipient` respectively so
+the wrapper also collects that app session's event journal.
 The default is the original channel journey. Use a fresh results directory each
 time. Each journey retains a continuous video, screenshots, `.xcresult`, logs and
 a digest manifest. It never uploads fixture wallets or bearer handoff files.

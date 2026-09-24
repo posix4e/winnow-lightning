@@ -203,18 +203,20 @@ final class WinnowLightningUITests: XCTestCase {
         var claimID: String
         if sender {
             tap(app, "prepareClaimButton")
-            XCTAssertTrue(app.staticTexts["Review before committing"].appears(within: 30))
+            XCTAssertTrue(show(app, app.staticTexts["Review before committing"]))
             Screenshots.capture(app, "01-claim-quote-review", testCase: self)
             tap(app, "commitClaimButton")
-            XCTAssertTrue(app.staticTexts["Funded · awaiting claim"].appears(within: 60))
+            XCTAssertTrue(show(app, app.staticTexts["Funded · awaiting claim"]))
             Screenshots.capture(app, "02-claim-funded", testCase: self)
             tap(app, "shareClaimButton")
             let handoff = control.appendingPathExtension("claim")
             XCTAssertTrue(poll(timeout: 30, interval: 0.2) { FileManager.default.fileExists(atPath: handoff.path) })
             token = try String(contentsOf: handoff, encoding: .utf8)
             Screenshots.capture(app, "03-claim-share-sheet", testCase: self)
-            if app.buttons["Close"].exists { app.buttons["Close"].tap() }
-            else { app.swipeDown() }
+            let closeShare = app.buttons.matching(NSPredicate(format:
+                "identifier == %@ OR label == %@", "header.closeButton", "Close")).firstMatch
+            XCTAssertTrue(closeShare.appears(within: 15))
+            closeShare.tap()
             tap(app, "copyClaimButton")
             XCTAssertEqual(try String(contentsOf: handoff, encoding: .utf8), token)
             let recipient = nodes[3]!
@@ -233,7 +235,7 @@ final class WinnowLightningUITests: XCTestCase {
             try openLightning(app)
             try connect(app, card: cards[1]!, port: portA, control: control)
             tap(app, "messagePaymentsButton", up: true)
-            XCTAssertTrue(app.staticTexts["Payment settled"].appears(within: 60))
+            XCTAssertTrue(show(app, app.staticTexts["Payment settled"]))
             Screenshots.capture(app, "04-claim-sender-returned-paid", testCase: self)
             let recipientState = try await recipient.status()
             let intermediateID = try await nodes[2]!.status().node_id
@@ -254,10 +256,10 @@ final class WinnowLightningUITests: XCTestCase {
             try paste(token, control: control)
             tap(app, "pasteClaimButton")
             tap(app, "importClaimButton")
-            XCTAssertTrue(app.staticTexts["Verified · ready to claim"].appears(within: 30))
+            XCTAssertTrue(show(app, app.staticTexts["Verified · ready to claim"]))
             Screenshots.capture(app, "01-recipient-verifies-claim", testCase: self)
             tap(app, "redeemClaimButton")
-            XCTAssertTrue(app.staticTexts["Payment received"].appears(within: 90))
+            XCTAssertTrue(show(app, app.staticTexts["Payment received"]))
             Screenshots.capture(app, "02-recipient-payment-received", testCase: self)
         }
         XCTAssertEqual(try BitcoinCLI.mempoolTxids(), [])

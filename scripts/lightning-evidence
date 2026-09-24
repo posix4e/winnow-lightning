@@ -2,6 +2,7 @@
 """Digest public journey evidence without copying fixture wallets or claim files."""
 import hashlib
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -23,6 +24,11 @@ manifest = {
     'network': 'regtest', 'scenario': sys.argv[2],
     'bitcoin_services': 'Winnow Wallet, FilterSync, HeaderChain, PeerPool, TxBroadcaster',
     'claim_authentication': 'pinned ML-DSA-44 BOLT11 description hash',
+    'native_lock_sha256': hashlib.sha256((repo / 'Native/LightningBridge/Cargo.lock').read_bytes()).hexdigest(),
+    'swift_lock_sha256': hashlib.sha256((repo / 'Package.resolved').read_bytes()).hexdigest(),
+    'xcode': subprocess.check_output(['xcodebuild', '-version'], text=True).strip(),
+    'rust': subprocess.check_output(['rustc', '--version'], text=True).strip(),
+    'bitcoin_core': subprocess.check_output([str(pathlib.Path(os.environ['WINNOW_BITCOIN_DIR']) / 'bitcoind'), '--version'], text=True).splitlines()[0],
     'files': files,
 }
 (root / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
