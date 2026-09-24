@@ -51,7 +51,13 @@ struct SettingsView: View {
                     }
                 }
 
+                #if WINNOW_LIGHTNING_RESEARCH
+                Section {
+                    NavigationLink("Lightning · Regtest") { LightningView() }
+                }
+                #else
                 BackupSection()
+                #endif
 
                 if model.advancedMode {
                     Section {

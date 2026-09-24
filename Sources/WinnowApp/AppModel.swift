@@ -1,4 +1,7 @@
 import WalletCore
+#if WINNOW_LIGHTNING_RESEARCH
+import LightningCore
+#endif
 import CryptoKit
 import Foundation
 import LocalAuthentication
@@ -282,6 +285,9 @@ final class AppModel {
     /// The wallet's own watched scripts, cached so a shared-savings review can
     /// label an output "pays you" without an actor hop.
     private(set) var ownWatchScripts: Set<Data> = []
+    #if WINNOW_LIGHTNING_RESEARCH
+    var lightning = LightningController()
+    #endif
     private(set) var wallet: Wallet?
     private(set) var stack: SyncStack?
     /// Copies of the wallet's id/descriptor for synchronous access (the Wallet
@@ -409,12 +415,20 @@ final class AppModel {
          storeKeys: (any StoreKeyVault)? = nil, keyStore: (any KeyStore)? = nil,
          cloudBackups: CloudBackupController? = nil) {
         self.cloudBackups = cloudBackups ?? CloudBackupController()
+        #if WINNOW_LIGHTNING_RESEARCH
+        allowsCloudBackup = false
+        #else
         allowsCloudBackup = e2e == nil || cloudBackups != nil
+        #endif
         self.deviceAuthenticator = deviceAuthenticator
             ?? LocalDeviceAuthenticator(keychain: keychainAuthentication)
         self.e2e = e2e
         e2e?.wipeIfRequested()
+        #if WINNOW_LIGHTNING_RESEARCH
+        let keychainService = "com.btcswift.lightning.research"
+        #else
         let keychainService = e2e?.keychainService ?? KeychainStore.defaultService
+        #endif
         self.keyStore = keyStore ?? KeychainStore(
             service: keychainService,
             protection: e2e == nil ? .userPresence : .deviceOnly,
@@ -435,9 +449,13 @@ final class AppModel {
         }
         // Mainnet is the default (#9). The E2E harness is a custom-signet
         // fixture, so a test launch that names no network still gets signet.
+        #if WINNOW_LIGHTNING_RESEARCH
+        let selectedNetwork = BitcoinNetwork.regtest
+        #else
         let selectedNetwork = e2e?.forcedNetwork
             ?? BitcoinNetwork(rawValue: defaults.string(forKey: DefaultsKey.network) ?? "")
             ?? (e2e != nil ? .signet : Self.defaultNetwork)
+        #endif
         network = selectedNetwork
         if e2e?.forcedNetwork != nil {
             defaults.set(selectedNetwork.rawValue, forKey: DefaultsKey.network)
@@ -456,7 +474,11 @@ final class AppModel {
             explorerProvider = scoped.esploraURL.isEmpty ? .blockstream : .custom
         }
         verifyFromGenesis = defaults.bool(forKey: DefaultsKey.verifyFromGenesis)
+        #if WINNOW_LIGHTNING_RESEARCH
+        advancedMode = true
+        #else
         advancedMode = defaults.bool(forKey: DefaultsKey.advancedMode) || e2e?.advancedMode == true
+        #endif
         // Test mode preconfigures the local node as the (only) manual peer;
         // custom signets have no DNS seeds.
         if let peer = e2e?.peer, !manualPeers.contains(peer) {
@@ -976,11 +998,11 @@ final class AppModel {
             let broadcaster = stack.broadcaster
             let network = network
             let vaultStore = vaultStore
-            try await filters.sync(watchScripts: scripts,
-                                   onReorg: { [weak self] forkHeight in
+            let onReorg: @Sendable (UInt32) async throws -> Void = { [weak self] forkHeight in
                 guard let self else { return }
                 try await self.rollBackStores(to: forkHeight)
-            }) { match in
+            }
+            let onMatch: @Sendable (BlockMatch) async throws -> Void = { match in
                 let walletEffect = try await wallet.apply(match: match)
                 for discarded in walletEffect.discardedReplacements {
                     try await broadcaster.cancel(discarded)
@@ -994,6 +1016,14 @@ final class AppModel {
                     try await broadcaster.markConfirmed(tx.txid, atHeight: match.height)
                 }
             }
+            #if WINNOW_LIGHTNING_RESEARCH
+            if let driver = lightning.driver, let transport = lightning.transport {
+                try await driver.sync(using: filters, walletScripts: scripts,
+                    onUpdate: { _, state in try await transport.consume(state) }, onReorg: onReorg, onMatch: onMatch)
+            } else { try await filters.sync(watchScripts: scripts, onReorg: onReorg, onMatch: onMatch) }
+            #else
+            try await filters.sync(watchScripts: scripts, onReorg: onReorg, onMatch: onMatch)
+            #endif
             // apply() does not move the wallet frontier — FilterSync is
             // authoritative here. Persist it so exportBundle() and the next
             // launch's startHeight match what the UI already shows.
@@ -1007,6 +1037,9 @@ final class AppModel {
             // have left the rollback half-applied, and the marker is what gets
             // it redone at the next launch.
             finishRollback()
+            #if WINNOW_LIGHTNING_RESEARCH
+            try await lightning.refreshFee(self)
+            #endif
             status.lastSyncError = nil
         } catch {
             // A later batch may have thrown after earlier ones persisted
@@ -1131,6 +1164,9 @@ final class AppModel {
     /// Peer/header catch-up continues through the regular sync loop while the
     /// user backs up the phrase.
     func createWallet() async throws {
+        #if WINNOW_LIGHTNING_RESEARCH
+        try lightning.requireNoChannelState(self)
+        #endif
         try await authenticateSensitiveAction(reason: "Create and protect your wallet")
         defer { keychainAuthentication.revoke() }
         try Task.checkCancellation()
@@ -1160,6 +1196,9 @@ final class AppModel {
     /// were reachable yet — the regular sync loop covers the same ground.
     @discardableResult
     func importWallet(bundleJSON: String) async throws -> ImportReport? {
+        #if WINNOW_LIGHTNING_RESEARCH
+        try lightning.requireNoChannelState(self)
+        #endif
         let bundle = try ImportBundle.decode(json: bundleJSON)
         return try await importWallet(bundle: bundle, authenticate: true)
     }
@@ -1234,6 +1273,9 @@ final class AppModel {
     /// Watch-only unless `includeMnemonic` is set; an xprv-only wallet
     /// throws ``WalletError/mnemonicUnavailable`` rather than a fake seed.
     func exportWalletBundle(includeMnemonic: Bool) async throws -> String {
+        #if WINNOW_LIGHTNING_RESEARCH
+        try lightning.requireNoChannelState(self)
+        #endif
         guard let wallet else { throw AppError.noWallet }
         if includeMnemonic {
             try await authenticateSensitiveAction(
@@ -1365,6 +1407,9 @@ final class AppModel {
     /// bypasses the prompt (simulators have no passcode); an xprv-only wallet
     /// throws `WalletError.mnemonicUnavailable`.
     func revealMnemonic() async throws -> String {
+        #if WINNOW_LIGHTNING_RESEARCH
+        try lightning.requireNoChannelState(self)
+        #endif
         guard let walletID else { throw AppError.noWallet }
         try await authenticateSensitiveAction(reason: "Reveal this wallet's recovery phrase")
         defer { keychainAuthentication.revoke() }
@@ -1392,6 +1437,9 @@ final class AppModel {
     /// Kept: headers and known peers. Those describe the chain, not the
     /// wallet, so a re-import does not pay for a fresh header sync.
     func destroyWallet() async throws {
+        #if WINNOW_LIGHTNING_RESEARCH
+        try lightning.requireNoChannelState(self)
+        #endif
         cloudBackups.suspend()
         guard let walletID else { throw AppError.noWallet }
         try await authenticateSensitiveAction(reason: "Delete this wallet from this device")
@@ -1902,10 +1950,14 @@ final class AppModel {
     /// to get back: hiding the picker behind a flag the user just turned off
     /// would strand it there.
     var showsNetworkPicker: Bool {
+        #if WINNOW_LIGHTNING_RESEARCH
+        return false
+        #else
         // A forced E2E network needs no clause of its own: a forced signet
         // differs from the default and shows the row through that, and a
         // forced mainnet should look exactly like production.
         advancedMode || network != Self.defaultNetwork
+        #endif
     }
 
     /// The same rule for every control that owns persisted state: shown in
@@ -2508,6 +2560,9 @@ final class AppModel {
     }
 
     func switchNetwork(to newNetwork: BitcoinNetwork) async {
+        #if WINNOW_LIGHTNING_RESEARCH
+        guard newNetwork == .regtest else { return }
+        #endif
         cloudBackups.suspend()
         guard e2e?.forcedNetwork == nil || e2e?.forcedNetwork == newNetwork else { return }
         guard newNetwork != network else { return }
@@ -2576,6 +2631,9 @@ final class AppModel {
     }
 
     private func stopNetworking() async {
+        #if WINNOW_LIGHTNING_RESEARCH
+        await lightning.stop()
+        #endif
         syncTask?.cancel(); syncTask = nil
         phaseTask?.cancel(); phaseTask = nil
         broadcasterEventTask?.cancel(); broadcasterEventTask = nil
@@ -2807,7 +2865,12 @@ final class AppModel {
                                                       in: .userDomainMask,
                                                       appropriateFor: nil, create: true)
         else { return nil }
-        var root = base.appending(path: e2e?.storageDirectoryName ?? "BTCSwift",
+        #if WINNOW_LIGHTNING_RESEARCH
+        let storageName = "WinnowLightningResearch"
+        #else
+        let storageName = e2e?.storageDirectoryName ?? "BTCSwift"
+        #endif
+        var root = base.appending(path: storageName,
                                   directoryHint: .isDirectory)
         let dir = root.appending(path: network.rawValue, directoryHint: .isDirectory)
         do {
