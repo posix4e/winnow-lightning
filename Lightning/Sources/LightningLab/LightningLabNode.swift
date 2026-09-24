@@ -18,6 +18,7 @@ public actor LightningLabNode {
     private var loop: Task<Void, Never>?
     private var relaying = false
     private var failure: String?
+    private var feeRate = FeePolicy.Priority.medium.satPerVByte
 
     public init(directory: URL, seed: Data, bitcoinPeer: PeerEndpoint,
                 listenPort: UInt16 = 0, provider: LightningClaimProvider? = nil,
@@ -26,7 +27,8 @@ public actor LightningLabNode {
             attributes: [.posixPermissions: 0o700])
         self.listenPort = listenPort
         engine = try LightningEngine(seed: seed, storageURL: directory.appending(path: "peer"),
-            network: .regtest, feeRateSatPerVByte: 2, allowPrivateForwarding: forwarding,
+            network: .regtest, feeRateSatPerVByte: FeePolicy.Priority.medium.satPerVByte,
+            allowPrivateForwarding: forwarding,
             enableClaims: true, claimProvider: provider)
         let keys = InMemoryKeyStore()
         let fresh = try Wallet.create(network: .regtest, keyStore: keys,
@@ -99,6 +101,9 @@ public actor LightningLabNode {
 
     private func scan() async throws {
         guard let transport else { return }
+        feeRate = await FeePolicy.resolve(observed: wallet.observedFeeRates,
+            floorSatPerVByte: pool.feeFilterFloorSatPerVByte())
+        try await transport.consume(engine.setFeeRate(feeRate))
         try await driver.sync(using: filters, walletScripts: wallet.watchScripts(),
             onUpdate: { _, state in try await transport.consume(state) },
             onReorg: { [broadcaster, wallet] height in
@@ -118,8 +123,10 @@ public actor LightningLabNode {
         for (id, request) in state.events where request.kind == "funding" {
             guard let requestID = request.fundingRequestID, let amount = request.amount_sat,
                   let script = request.script.flatMap({ Data(hex: $0) }) else { throw LightningError.invalidResponse }
+            let saved = await wallet.fundingReservations.first { $0.requestID == requestID }
             _ = try await wallet.reserveChannelFunding(requestID: requestID, amount: amount,
-                scriptPubKey: script, feeRateSatPerVByte: 2, chainTip: headers.height)
+                scriptPubKey: script, feeRateSatPerVByte: saved?.feeRateSatPerVByte ?? feeRate,
+                chainTip: headers.height)
             let submitted = try await wallet.markFundingSubmitted(requestID: requestID)
             try await transport.consume(engine.submitFunding(request: request, reservation: submitted))
             try await transport.consume(engine.acknowledge(eventID: id))
@@ -127,8 +134,9 @@ public actor LightningLabNode {
         for (id, event) in state.events where event.kind == "broadcast" {
             guard let package = event.transactions, package.count == 1,
                   let raw = package.first.flatMap({ Data(hex: $0) }) else { throw LightningError.invalidResponse }
-            _ = try await broadcaster.broadcast(raw, feeRateSatPerVByte: 2)
-            if let saved = await wallet.fundingReservations.first(where: { $0.rawTransaction == raw }) {
+            let saved = await wallet.fundingReservations.first { $0.rawTransaction == raw }
+            _ = try await broadcaster.broadcast(raw, feeRateSatPerVByte: saved?.feeRateSatPerVByte)
+            if let saved {
                 try await wallet.commitFundingBroadcast(requestID: saved.requestID, rawTransaction: raw)
             }
             try await transport.consume(engine.acknowledge(eventID: id))

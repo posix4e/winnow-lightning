@@ -64,7 +64,10 @@ jobs:
           command -v bitcoind >/dev/null || brew install bitcoin
           echo "WINNOW_BITCOIN_DIR=$(dirname "$(command -v bitcoind)")" >> "$GITHUB_ENV"
           scripts/install-xcodegen
-          echo "SIMULATOR_ID=$(scripts/ios-simulator iPhone)" >> "$GITHUB_ENV"
+          simulator=$(scripts/ios-simulator iPhone)
+          echo "SIMULATOR_ID=$simulator" >> "$GITHUB_ENV"
+          # Let first-boot migration run while the native bridge compiles.
+          xcrun simctl boot "$simulator" >/dev/null 2>&1 || true
       - name: Build pinned native bridge and test persistence
         run: |
           scripts/build-lightning.sh --all 2>&1 | tee "$LIGHTNING_RESULTS/native-build.log"

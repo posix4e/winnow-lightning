@@ -120,7 +120,8 @@ recipient receipt or refund.
 
 ## Verification and limits
 
-Local four-node protocol tests cover sender reconnection, two competing
+Local four-node protocol tests cover non-overlapping sender/recipient sessions,
+sender reconnection, two competing
 claimants, provider restart after binding, recipient restart, cooperative expiry,
 provider-offline on-chain timeout recovery, force-close preimage recovery and a
 reorg during on-chain settlement. Parser and signature tests reject altered

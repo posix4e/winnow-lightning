@@ -64,7 +64,8 @@ struct LightningClaimView: View {
                         .accessibilityIdentifier("prepareClaimButton")
                     }
                     Section("Receive a claim") {
-                        TextEditor(text: $incoming).frame(height: 80).privacySensitive()
+                        SecureField("Claim text", text: $incoming)
+                            .textInputAutocapitalization(.never).autocorrectionDisabled().privacySensitive()
                             .accessibilityLabel("Claim text")
                         Button("Paste claim") { incoming = model.pasteboardText() ?? "" }
                             .accessibilityIdentifier("pasteClaimButton")

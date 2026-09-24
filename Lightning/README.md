@@ -92,8 +92,9 @@ to split an unsupported multi-transaction package into independent broadcasts.
 ## Research app
 
 `project-lightning.yml` builds the existing Swift app with an additive Lightning
-screen under Settings. It uses bundle `com.btcswift.lightning.research`, a separate
-Keychain service and storage directory, and is locked to regtest. It does not
+screen under Settings. Debug uses `com.btcswift.lightning.research`; Release uses
+the existing `com.btcswift.lightning` app identity. A separate research Keychain
+service and storage directory preserve older wallet data. It is locked to regtest and does not
 request iCloud entitlements or enable ordinary automatic cloud recovery.
 
 Unlock uses Winnow's existing device-owner authentication. Seed version 1 is
@@ -114,7 +115,8 @@ wallet replacement and deletion. Funding reservations and channel records are
 retained conservatively even after settlement. Automated reservation retirement,
 safe cleanup after an interrupted funding negotiation, complete channel backup
 and offline recovery remain work before this can be a normal wallet. There is
-no mainnet or TestFlight release in this change.
+no mainnet support. Internal TestFlight distribution is gated by the complete CI
+run and Apple's actual processing and tester-availability state.
 
 ## Build and validation
 

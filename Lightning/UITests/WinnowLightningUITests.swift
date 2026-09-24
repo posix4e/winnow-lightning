@@ -188,10 +188,17 @@ final class WinnowLightningUITests: XCTestCase {
             tap(app, "Sign and reserve funding")
         } else {
             try connect(app, card: cards[2]!, port: ports[2]!, control: control)
+            print("CLAIM_JOURNEY_PHASE recipient-channel-request")
+            try await waitFor("B sees the recipient peer") { try await nodes[2]!.status().peers.contains(appID) }
             try await nodes[2]!.openChannel(to: appID)
+            print("CLAIM_JOURNEY_PHASE recipient-channel-requested")
         }
-        _ = try await mempoolTransaction()
+        _ = try await mempoolTransaction(health: {
+            if !sender { _ = try await nodes[2]!.status() }
+        })
+        print("CLAIM_JOURNEY_PHASE app-channel-in-mempool")
         try await LightningPeerFixture.mine(6)
+        print("CLAIM_JOURNEY_PHASE app-channel-confirmed")
         let channel = app.staticTexts["lightningChannelStatus"]
         XCTAssertTrue(show(app, channel))
         XCTAssertTrue(poll(timeout: 90, interval: 1) { channel.label.contains("Ready") })
@@ -296,13 +303,21 @@ final class WinnowLightningUITests: XCTestCase {
     }
     private func show(_ app: XCUIApplication, _ element: XCUIElement, up: Bool = false) -> Bool {
         for _ in 0..<16 {
-            if element.appears(within: 0.5), element.isHittable { return true }
-            let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: up ? 0.3 : 0.7))
-            let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: up ? 0.7 : 0.3))
+            let exists = element.appears(within: 0.5)
+            let frame = exists ? element.frame : .zero
+            let safeTop = max(120, app.navigationBars.firstMatch.frame.maxY + 12)
+            let safeBottom = app.frame.maxY - 100
+            if exists, element.isHittable, frame.midY > safeTop, frame.midY < safeBottom { return true }
+            // SwiftUI may report a clipped control under the navigation bar as
+            // hittable. Bring its center into the form before synthesizing a tap.
+            let moveUp = exists && frame.height > 0 ? frame.midY <= safeTop : up
+            // Use the form's margin, outside editors that scroll their own text.
+            let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: moveUp ? 0.3 : 0.7))
+            let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: moveUp ? 0.7 : 0.3))
             start.press(forDuration: 0.05, thenDragTo: end, withVelocity: .default, thenHoldForDuration: 0.25)
         }
         print(app.debugDescription)
-        return element.exists && element.isHittable
+        return false
     }
     private func openLightning(_ app: XCUIApplication) throws {
         app.tabBars.buttons["Settings"].tap()
@@ -313,16 +328,18 @@ final class WinnowLightningUITests: XCTestCase {
         })
     }
     private func connect(_ app: XCUIApplication, card: String, port: UInt16, control: URL) throws {
-        try paste(card, control: control)
-        tap(app, "pasteLightningPeerButton")
         let field = app.textFields["lightningPort"]
         XCTAssertTrue(show(app, field, up: true))
         field.tap()
         let old = field.value as? String ?? ""
         field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: old.count) + String(port))
         app.dismissKeyboard()
+        try paste(card, control: control)
+        tap(app, "pasteLightningPeerButton")
         tap(app, "connectLightningButton")
-        XCTAssertTrue(app.buttons["openLightningChannelButton"].appears(within: 30))
+        let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(card.utf8)) as? [String: String])
+        let nodeID = try XCTUnwrap(fields["node_id"])
+        XCTAssertTrue(app.buttons["Open channel to \(nodeID.prefix(12))…"].appears(within: 30))
     }
     private func pay(_ app: XCUIApplication, invoice: LightningInvoice, peer: LightningPeerFixture, control: URL) async throws {
         try paste(invoice.invoice, control: control)
@@ -337,8 +354,9 @@ final class WinnowLightningUITests: XCTestCase {
             }
         }
     }
-    private func mempoolTransaction() async throws -> String {
+    private func mempoolTransaction(health: () async throws -> Void = {}) async throws -> String {
         for _ in 0..<300 {
+            try await health()
             let txids = try BitcoinCLI.mempoolTxids()
             if txids.count == 1 { return txids[0] }
             try await Task.sleep(for: .milliseconds(200))

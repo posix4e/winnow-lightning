@@ -92,6 +92,10 @@ def archive(directory, number):
     auth = ['-allowProvisioningUpdates', '-authenticationKeyPath', private,
         '-authenticationKeyID', key, '-authenticationKeyIssuerID', issuer]
     env = {**os.environ, 'TESTFLIGHT_MARKETING_VERSION': VERSION, 'TESTFLIGHT_BUILD_NUMBER': number}
+    # Artifacts are generated and gitignored. Rebuild them at this exact clean
+    # revision instead of trusting whichever XCFramework was left on disk.
+    subprocess.run(['scripts/build-lightning.sh', '--all'], cwd=ROOT,
+        env={**env, 'RUSTUP_TOOLCHAIN': '1.89.0'}, check=True)
     # Generated project only; the committed project specification is unchanged.
     subprocess.run(['xcodegen', 'generate', '--spec', 'project-lightning.yml'], cwd=ROOT, check=True)
     archive_path = directory / 'WinnowLightning.xcarchive'
@@ -102,6 +106,7 @@ def archive(directory, number):
     app = archive_path / 'Products/Applications/WinnowLightningResearch.app'
     subprocess.run(['scripts/verify-release-e2e-exclusion', str(app)], cwd=ROOT, check=True)
     subprocess.run(['scripts/verify-signed-archive', str(app), '--profile', 'lightning'], cwd=ROOT, env=env, check=True)
+    subprocess.run(['scripts/check-dependencies', '--xcode', str(directory / 'DerivedData')], cwd=ROOT, check=True)
     info = plistlib.loads((app / 'Info.plist').read_bytes())
     assert info['ITSAppUsesNonExemptEncryption'] is True, 'Do not silently change the encryption declaration'
     options = directory / 'ExportOptions.plist'
@@ -113,7 +118,10 @@ def archive(directory, number):
     subprocess.run(['scripts/verify-exported-ipa', str(ipa), '--profile', 'lightning'], cwd=ROOT, env=env, check=True)
     manifest = {'app_id': APP, 'bundle_id': BUNDLE, 'team': TEAM, 'version': VERSION, 'build': number,
         'source_revision': sha, 'ci_run': next(r['html_url'] for r in runs if r['conclusion'] == 'success'),
-        'ipa': str(ipa), 'sha256': hashlib.sha256(ipa.read_bytes()).hexdigest()}
+        'ipa': str(ipa), 'sha256': hashlib.sha256(ipa.read_bytes()).hexdigest(),
+        'native_lock_sha256': hashlib.sha256((ROOT / 'Native/LightningBridge/Cargo.lock').read_bytes()).hexdigest(),
+        'swift_lock_sha256': hashlib.sha256((ROOT / 'Package.resolved').read_bytes()).hexdigest(),
+        'rust': run('rustc', '+1.89.0', '--version'), 'xcode': run('xcodebuild', '-version')}
     (directory / 'release.json').write_text(json.dumps(manifest, indent=2) + '\n')
     print(json.dumps(manifest, indent=2))
 
