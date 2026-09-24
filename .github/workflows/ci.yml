@@ -31,7 +31,7 @@ jobs:
     # Independent of the ordinary Winnow build/journey; both gate validation.
     # The pinned native bridge currently has Apple-silicon simulator slices.
     runs-on: macos-26
-    timeout-minutes: 60
+    timeout-minutes: 90
     defaults:
       run:
         shell: bash --noprofile --norc -e -o pipefail {0}
@@ -84,6 +84,18 @@ jobs:
       - name: Record channel funding, payments, restart and close
         timeout-minutes: 15
         run: scripts/ci-lightning-journey "$LIGHTNING_RESULTS" --skip-build
+      - name: Record sender sharing and returning after offline redemption
+        timeout-minutes: 15
+        env:
+          UI_E2E_RUN: claim-sender
+          UI_TEST_SELECTION: WinnowLightningUITests/WinnowLightningUITests/testSenderSharesFundedClaimAndReturns
+        run: scripts/ci-lightning-journey "$LIGHTNING_RESULTS/sender" --skip-build
+      - name: Record recipient claiming with the sender stopped
+        timeout-minutes: 15
+        env:
+          UI_E2E_RUN: claim-recipient
+          UI_TEST_SELECTION: WinnowLightningUITests/WinnowLightningUITests/testRecipientClaimsWhileSenderIsStopped
+        run: scripts/ci-lightning-journey "$LIGHTNING_RESULTS/recipient" --skip-build
       - name: Stop this job's fixture and simulator
         if: always()
         run: |
@@ -97,6 +109,8 @@ jobs:
           path: |
             ${{ env.LIGHTNING_RESULTS }}/*.log
             ${{ env.LIGHTNING_RESULTS }}/journey/
+            ${{ env.LIGHTNING_RESULTS }}/sender/journey/
+            ${{ env.LIGHTNING_RESULTS }}/recipient/journey/
           if-no-files-found: error
           retention-days: 14
   website:

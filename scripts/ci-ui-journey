@@ -16,6 +16,7 @@ esac
 UI_PROJECT="${UI_PROJECT:-WinnowApp.xcodeproj}"
 UI_SCHEME="${UI_SCHEME:-WinnowApp}"
 UI_TEST_TARGET="${UI_TEST_TARGET:-WinnowAppUITests}"
+UI_TEST_SELECTION="${UI_TEST_SELECTION:-$UI_TEST_TARGET}"
 UI_BUNDLE_ID="${UI_BUNDLE_ID:-com.btcswift.app}"
 UI_E2E_RUN="${UI_E2E_RUN:-smoke}"
 UI_NODE_NETWORK="${UI_NODE_NETWORK:-signet}"
@@ -33,7 +34,7 @@ UI_XCODE_ARGS=(
   -project "$UI_PROJECT" -scheme "$UI_SCHEME" -configuration Debug
   -destination "platform=iOS Simulator,id=$UI_SIMULATOR_ID"
   -derivedDataPath "$UI_DERIVED_DATA"
-  -only-testing:"$UI_TEST_TARGET"
+  -only-testing:"$UI_TEST_SELECTION"
   -skipPackagePluginValidation -skipMacroValidation
 )
 if [[ "$UI_SKIP_BUILD" != true ]]; then
@@ -168,7 +169,7 @@ phase recording-ready
 
 xcodebuild test-without-building -xctestrun "$UI_RUN_SPEC" \
   -destination "platform=iOS Simulator,id=$UI_SIMULATOR_ID" \
-  -only-testing:"$UI_TEST_TARGET" \
+  -only-testing:"$UI_TEST_SELECTION" \
   -test-timeouts-enabled YES -maximum-test-execution-time-allowance 600 \
   -resultBundlePath "$UI_RESULTS/NodeUI.xcresult" \
   2>&1 | tee "$UI_RESULTS/node-ui.log"

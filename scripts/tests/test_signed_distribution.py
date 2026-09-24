@@ -29,16 +29,38 @@ class SignedAppTests(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
 
-    def verify(self, distribution=False, architectures='arm64\n', signature_error=None):
+    def verify(self, distribution=False, architectures='arm64\n', signature_error=None, profile='winnow'):
         (self.app / 'Info.plist').write_bytes(plistlib.dumps(self.info))
         with patch('subprocess.run', side_effect=signature_error) as signature, patch(
                 'subprocess.check_output', side_effect=[plistlib.dumps(self.entitlements), architectures]), \
                 contextlib.redirect_stdout(io.StringIO()):
-            VERIFY(self.app, distribution)
+            VERIFY(self.app, distribution, profile)
         signature.assert_called_once_with(['codesign', '--verify', '--deep', '--strict', str(self.app)], check=True)
 
     def test_observed_development_archive_without_environment_is_valid_before_export(self):
         self.verify()
+
+    def test_lightning_distribution_preserves_identity_and_excludes_icloud(self):
+        self.info['CFBundleIdentifier'] = 'com.btcswift.lightning'
+        self.entitlements = {'application-identifier': '2858MX5336.com.btcswift.lightning',
+                             'com.apple.developer.team-identifier': '2858MX5336',
+                             'get-task-allow': False}
+        self.verify(True, profile='lightning')
+        with self.assertRaises(AssertionError):
+            self.verify(True)
+        for key in ('com.apple.developer.icloud-container-identifiers',
+                    'com.apple.developer.icloud-services',
+                    'com.apple.developer.ubiquity-kvstore-identifier'):
+            self.entitlements[key] = ['unexpected']
+            with self.assertRaises(AssertionError):
+                self.verify(True, profile='lightning')
+            del self.entitlements[key]
+        self.entitlements['get-task-allow'] = True
+        with self.assertRaises(AssertionError):
+            self.verify(True, profile='lightning')
+        self.info['CFBundleIdentifier'] = 'com.btcswift.lightning.research'
+        with self.assertRaises(AssertionError):
+            self.verify(profile='lightning')
 
     def test_distribution_requires_production_and_debugging_disabled(self):
         for environment in (None, 'Development', 'Production'):
