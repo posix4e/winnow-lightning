@@ -1,0 +1,23 @@
+name: CI
+
+# Register the research workflow without merging the replacement application.
+# GitHub loads the complete workflow from the branch selected at dispatch.
+on:
+  workflow_dispatch:
+    inputs:
+      hosted:
+        description: Use the hosted fallback
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  select-research-branch:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require the Winnow-based research branch
+        run: |
+          echo '::error::Select codex/winnow-lightning under Use workflow from, or run: gh workflow run ci.yml --ref codex/winnow-lightning -f hosted=true'
+          exit 1
