@@ -5,6 +5,7 @@ import LightningCore
 struct LightningView: View {
     @Environment(AppModel.self) private var model
     @State private var busy = false
+    @FocusState private var inputFocused: Bool
     @State private var error: String?
     @State private var peerCard = ""
     @State private var host = "127.0.0.1"
@@ -26,19 +27,24 @@ struct LightningView: View {
                     .font(.footnote)
                 if controller.engine == nil {
                     Button("Unlock Lightning") { run { try await controller.start(model) } }
+                        .accessibilityIdentifier("unlockLightningButton")
                 } else {
                     Text(controller.snapshot?.chain_ready == true ? "Channel scan caught up" : "Catching up through Winnow…")
+                        .accessibilityIdentifier("lightningScanStatus")
                     Button("Lock Lightning") { run { await controller.stop() } }
                 }
-                if let error { Text(error).foregroundStyle(.red) }
+                if let error { Text(error).foregroundStyle(.red).accessibilityIdentifier("lightningError") }
                 if let notice = controller.notice { Text(notice).foregroundStyle(.secondary) }
             }
             if controller.engine != nil {
                 Section("Peer") {
                     ShareLink("Share my public peer card", item: controller.identityCard)
                     TextField("Host", text: $host).textInputAutocapitalization(.never).autocorrectionDisabled()
-                    TextField("Port", text: $port).keyboardType(.numberPad)
-                    TextEditor(text: $peerCard).frame(minHeight: 80).font(.caption.monospaced())
+                    TextField("Port", text: $port).focused($inputFocused).keyboardType(.numberPad).accessibilityIdentifier("lightningPort")
+                    TextEditor(text: $peerCard).frame(height: 80).font(.caption.monospaced())
+                        .accessibilityLabel("Peer card")
+                    Button("Paste peer card") { peerCard = model.pasteboardText() ?? "" }
+                        .accessibilityIdentifier("pasteLightningPeerButton")
                     Text("Paste the peer card obtained directly from the person operating this peer. Its PQ keys will be pinned.").font(.footnote)
                     Button("Pin keys and connect") {
                         run {
@@ -46,6 +52,7 @@ struct LightningView: View {
                             try await controller.connect(card: peerCard, host: host, port: number)
                         }
                     }
+                    .accessibilityIdentifier("connectLightningButton")
                     TextField("Channel capacity (sats)", text: $capacity).keyboardType(.numberPad)
                     ForEach(controller.snapshot?.peers ?? [], id: \.self) { peer in
                         Button("Open channel to \(peer.prefix(12))…") {
@@ -54,6 +61,7 @@ struct LightningView: View {
                                 try await controller.openChannel(nodeID: peer, amount: sats)
                             }
                         }
+                        .accessibilityIdentifier("openLightningChannelButton")
                     }
                 }
                 Section("Funding requests") {
@@ -67,6 +75,7 @@ struct LightningView: View {
                                         fee: controller.fundingFee(request: request, model: model))
                                 }
                             }
+                            .accessibilityIdentifier("fundLightningChannelButton")
                         }
                     }
                 }
@@ -79,7 +88,10 @@ struct LightningView: View {
                         }
                     }
                     if !receivedInvoice.isEmpty { ShareLink("Share invoice", item: receivedInvoice) }
-                    TextEditor(text: $invoice).frame(minHeight: 70).font(.caption.monospaced())
+                    TextEditor(text: $invoice).frame(height: 70).font(.caption.monospaced())
+                        .accessibilityLabel("Invoice")
+                    Button("Paste invoice") { invoice = model.pasteboardText() ?? "" }
+                        .accessibilityIdentifier("pasteLightningInvoiceButton")
                     TextField("Maximum routing fee (millisats)", text: $maxFee).keyboardType(.numberPad)
                     Button("Pay the entered amount") {
                         run {
@@ -88,16 +100,23 @@ struct LightningView: View {
                                 amountMsat: value, maxFeeMsat: fee, model: model)
                         }
                     }
+                    .accessibilityIdentifier("payLightningButton")
                     ForEach((controller.snapshot?.payments ?? [:]).keys.sorted(), id: \.self) { id in
                         if let payment = controller.snapshot?.payments[id] {
                             Text("\(payment.amount_msat) millisats · \(payment.state)")
+                                .accessibilityIdentifier("lightningPayment-\(id)")
                         }
                     }
                 }
                 Section("Channels") {
+                    if controller.snapshot?.channels.isEmpty == true {
+                        Text("No open channels").accessibilityIdentifier("lightningNoChannels")
+                    }
                     ForEach(controller.snapshot?.channels ?? [], id: \.channel_id) { channel in
                         Text("\(channel.amount_sat) sats · \(channel.usable ? "Ready" : "Pending")")
+                            .accessibilityIdentifier("lightningChannelStatus")
                         Button("Close into Winnow") { run { try await controller.close(channel, force: false, model: model) } }
+                            .accessibilityIdentifier("closeLightningChannelButton")
                         Button("Force close…", role: .destructive) { forceClose = channel }
                     }
                     ForEach((controller.snapshot?.events ?? [:]).keys.sorted(), id: \.self) { id in
@@ -111,6 +130,10 @@ struct LightningView: View {
             }
         }
         .navigationTitle("Lightning")
+        .toolbar { ToolbarItemGroup(placement: .keyboard) {
+            Spacer()
+            Button("Done") { inputFocused = false }
+        } }
         .disabled(busy || controller.starting)
         .confirmationDialog("Fund \(fundingReview?.request.amount_sat ?? 0) sats plus \(fundingReview?.fee ?? 0) sats fee?",
             isPresented: Binding(get: { fundingReview != nil }, set: { if !$0 { fundingReview = nil } })) {

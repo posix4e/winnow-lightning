@@ -1,0 +1,27 @@
+#!/usr/bin/env python3
+"""Set test-runner environment in either Xcode test specification format."""
+import json
+import plistlib
+import sys
+
+
+def configure(spec, values, target):
+    if not isinstance(values, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in values.items()):
+        raise ValueError('test environment must contain only string keys and values')
+    targets = [test for configuration in spec.get('TestConfigurations', [])
+               for test in configuration.get('TestTargets', [])]
+    targets += [test for test in spec.values() if isinstance(test, dict) and 'BlueprintName' in test]
+    found = [test for test in targets if test.get('BlueprintName') == target]
+    if not found:
+        raise ValueError('test target missing from xctestrun: ' + target)
+    for test in found:
+        test.setdefault('EnvironmentVariables', {}).update(values)
+    return spec
+
+
+if __name__ == '__main__':
+    source, destination, environment, target = sys.argv[1:]
+    with open(source, 'rb') as stream: spec = plistlib.load(stream)
+    with open(environment) as stream: values = json.load(stream)
+    configured = configure(spec, values, target)
+    with open(destination, 'wb') as stream: plistlib.dump(configured, stream)

@@ -25,11 +25,85 @@ jobs:
   tdx:
     if: vars.TDX_CI_ENABLED == 'true' && inputs.hosted != true && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     uses: ./.github/workflows/ci-tdx.yml
+  lightning:
+    # Independent of the ordinary Winnow build/journey; both gate validation.
+    # The pinned native bridge currently has Apple-silicon simulator slices.
+    runs-on: macos-26
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash --noprofile --norc -e -o pipefail {0}
+    env:
+      RUSTUP_TOOLCHAIN: 1.89.0
+      UI_PROJECT: WinnowLightningResearch.xcodeproj
+      UI_SCHEME: WinnowLightningResearch
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Prepare isolated Lightning evidence
+        run: |
+          test "$(uname -m)" = arm64
+          results=$(mktemp -d "$RUNNER_TEMP/winnow-lightning-XXXXXX")
+          {
+            echo "LIGHTNING_RESULTS=$results"
+            echo "DERIVED_DATA=$results/build"
+            echo "WINNOW_DATADIR=$results/fixture"
+          } >> "$GITHUB_ENV"
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - name: Install native and simulator tools
+        run: |
+          command -v rustup >/dev/null || brew install rustup
+          rustup toolchain install 1.89.0 --profile minimal
+          rustup target add --toolchain 1.89.0 aarch64-apple-darwin aarch64-apple-ios aarch64-apple-ios-sim
+          command -v bitcoind >/dev/null || brew install bitcoin
+          echo "WINNOW_BITCOIN_DIR=$(dirname "$(command -v bitcoind)")" >> "$GITHUB_ENV"
+          scripts/install-xcodegen
+          echo "SIMULATOR_ID=$(scripts/ios-simulator iPhone)" >> "$GITHUB_ENV"
+      - name: Build pinned native bridge and test persistence
+        run: |
+          scripts/build-lightning.sh --all 2>&1 | tee "$LIGHTNING_RESULTS/native-build.log"
+          cargo test --locked --manifest-path Native/LightningBridge/Cargo.toml 2>&1 | tee "$LIGHTNING_RESULTS/native-tests.log"
+      - name: Test Lightning funding, payments and recovery through Winnow
+        run: |
+          swift test --package-path Lightning 2>&1 | tee "$LIGHTNING_RESULTS/core-tests.log"
+          python3 -m unittest discover -s scripts/tests -p test_ui_test_run.py
+          python3 -m unittest discover -s scripts/tests -p test_ci_secret_boundary.py
+      - name: Build research app and its UI-test runner once
+        run: |
+          xcodegen generate --spec project-lightning.yml
+          xcodebuild build-for-testing -project "$UI_PROJECT" -scheme "$UI_SCHEME" \
+            -configuration Debug -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
+            -derivedDataPath "$DERIVED_DATA" -skipPackagePluginValidation -skipMacroValidation \
+            2>&1 | tee "$LIGHTNING_RESULTS/ui-build.log"
+      - name: Record channel funding, payments, restart and close
+        timeout-minutes: 15
+        run: scripts/ci-lightning-journey "$LIGHTNING_RESULTS" --skip-build
+      - name: Stop this job's fixture and simulator
+        if: always()
+        run: |
+          if [[ -n "${WINNOW_DATADIR:-}" ]]; then scripts/lightning-fixture down; fi
+          if [[ -n "${SIMULATOR_ID:-}" ]]; then xcrun simctl shutdown "$SIMULATOR_ID" || true; fi
+      - name: Preserve Lightning video and test evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: lightning-tests-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.LIGHTNING_RESULTS }}/*.log
+            ${{ env.LIGHTNING_RESULTS }}/journey/
+          if-no-files-found: error
+          retention-days: 14
   website:
-    needs: [hosted, tdx]
+    needs: [hosted, tdx, lightning]
     # Keep deployment secrets outside every validation workflow and guest.
+    # Research forks validate without the upstream site credentials; they
+    # can explicitly opt into their own deployment with WINNOW_DEPLOY_SITE.
     # Explicit status handling also permits intentionally skipped reuse lanes.
-    if: ${{ !cancelled() && (needs.hosted.result == 'success' || needs.tdx.result == 'success') && (github.workflow == 'CI' && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (github.ref == 'refs/heads/main' && github.event_name != 'schedule') || github.event_name == 'workflow_dispatch')) }}
+    if: ${{ !cancelled() && (github.repository == 'winnowwallet/winnow' || vars.WINNOW_DEPLOY_SITE == 'true') && needs.lightning.result == 'success' && (needs.hosted.result == 'success' || needs.tdx.result == 'success') && (github.workflow == 'CI' && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (github.ref == 'refs/heads/main' && github.event_name != 'schedule') || github.event_name == 'workflow_dispatch')) }}
     uses: ./.github/workflows/site.yml
     with:
       artifact-name: ${{ needs.tdx.outputs.website-artifact || needs.hosted.outputs.website-artifact }}
@@ -39,16 +113,18 @@ jobs:
       CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
   validation:
     if: always()
-    needs: [hosted, tdx, website]
+    needs: [hosted, tdx, lightning, website]
     runs-on: ubuntu-24.04
     steps:
       - env:
           HOSTED: ${{ needs.hosted.result }}
           TDX: ${{ needs.tdx.result }}
           WEBSITE: ${{ needs.website.result }}
-          DEPLOY: ${{ github.workflow == 'CI' && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (github.ref == 'refs/heads/main' && github.event_name != 'schedule') || github.event_name == 'workflow_dispatch') }}
+          LIGHTNING: ${{ needs.lightning.result }}
+          DEPLOY: ${{ (github.repository == 'winnowwallet/winnow' || vars.WINNOW_DEPLOY_SITE == 'true') && github.workflow == 'CI' && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (github.ref == 'refs/heads/main' && github.event_name != 'schedule') || github.event_name == 'workflow_dispatch') }}
         run: |
           [[ "$HOSTED:$TDX" == success:skipped || "$HOSTED:$TDX" == skipped:success ]] || exit 1
+          [[ "$LIGHTNING" == success ]] || exit 1
           if [[ "$DEPLOY" == true ]]; then
             [[ "$WEBSITE" == success ]] || exit 1
           else

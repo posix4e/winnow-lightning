@@ -425,7 +425,7 @@ final class AppModel {
         self.e2e = e2e
         e2e?.wipeIfRequested()
         #if WINNOW_LIGHTNING_RESEARCH
-        let keychainService = "com.btcswift.lightning.research"
+        let keychainService = e2e?.keychainService ?? "com.btcswift.lightning.research"
         #else
         let keychainService = e2e?.keychainService ?? KeychainStore.defaultService
         #endif
@@ -2866,7 +2866,7 @@ final class AppModel {
                                                       appropriateFor: nil, create: true)
         else { return nil }
         #if WINNOW_LIGHTNING_RESEARCH
-        let storageName = "WinnowLightningResearch"
+        let storageName = e2e?.storageDirectoryName ?? "WinnowLightningResearch"
         #else
         let storageName = e2e?.storageDirectoryName ?? "BTCSwift"
         #endif

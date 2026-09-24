@@ -137,3 +137,43 @@ journal persistence and fee units. Wallet and scanner tests cover reservations,
 conflicting spends/RBF, dynamic watches, ordered filters, failed consumer work
 and historical catch-up. This is research validation, not a security audit or
 evidence of safe unattended use with real funds.
+
+
+## Recorded simulator journey
+
+The existing `CI` workflow runs a separate `lightning` job on Apple silicon,
+concurrently with ordinary Winnow validation. Both jobs must pass the final
+validation gate. Lightning has its own simulator, disposable regtest chain,
+and `lightning-tests-<run>-<attempt>` artifact. It does not require deployment
+or signing secrets. Website deployment remains enabled upstream; research
+forks opt in with `WINNOW_DEPLOY_SITE=true` and their own credentials. The ordinary signet journey and its website media remain
+in their existing job.
+
+`Lightning/UITests` drives the actual research app: create and fund a Winnow
+wallet, review and sign channel funding, confirm the channel, pay an invoice,
+terminate and reopen the app, verify persisted payment history, pay again, and
+cooperatively close back into Winnow. A second PQLN peer runs in the test runner
+using Swift TCP and Winnow's P2P scanner/relay. Bitcoin Core checks the actual
+funding and closing transactions; both invoices must be claimed by the peer.
+No channel or payment state is injected into the app.
+
+The job reuses `scripts/ci-ui-journey`: one continuous H.264 `journey.mp4`, nine
+checkpoint PNGs, `NodeUI.xcresult`, UI log, wallet event journal and node log.
+The movie illustrates the flow; assertions and the result bundle establish
+success. Complete channel backup, unattended monitoring and force-close UX
+remain outside this UI journey; force-close/sweep and reorgs have library tests.
+
+To record locally after building the native bridge:
+
+```sh
+xcodegen generate --spec project-lightning.yml
+WINNOW_BITCOIN_DIR=/path/to/bitcoin/bin \
+  scripts/ci-lightning-journey /tmp/winnow-lightning-new-run
+```
+
+Use a fresh results directory. `SIMULATOR_ID` and `DERIVED_DATA` can select an
+existing simulator/build; add `--skip-build` after `build-for-testing` to reuse
+it. The wrapper stops only its own Bitcoin fixture. UI-test configuration is
+passed through a copied `.xctestrun`, so no host-home configuration file is
+required. E2E mode uses Winnow's existing disposable storage and Keychain
+namespace, including when the research app has another wallet saved.

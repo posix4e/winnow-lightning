@@ -58,3 +58,41 @@ targets:
         CURRENT_PROJECT_VERSION: "1"
         CODE_SIGN_STYLE: Automatic
         DEVELOPMENT_TEAM: 2858MX5336
+
+  WinnowLightningUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: Lightning/UITests
+      - path: UITests/TestHelpers.swift
+    dependencies:
+      - target: WinnowLightningResearch
+      - package: Winnow
+        product: TestSupport
+      - package: Winnow
+        product: WalletCore
+      - package: WinnowLightning
+        product: LightningCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.btcswift.lightning.research.uitests
+        TEST_TARGET_NAME: WinnowLightningResearch
+        SWIFT_VERSION: "6.0"
+        ARCHS: arm64
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: 2858MX5336
+schemes:
+  WinnowLightningResearch:
+    build:
+      targets:
+        WinnowLightningResearch: all
+        WinnowLightningUITests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      captureScreenshotsAutomatically: false
+      preferredScreenCaptureFormat: screenshots
+      targets:
+        - WinnowLightningUITests

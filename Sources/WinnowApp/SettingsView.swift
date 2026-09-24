@@ -54,6 +54,7 @@ struct SettingsView: View {
                 #if WINNOW_LIGHTNING_RESEARCH
                 Section {
                     NavigationLink("Lightning · Regtest") { LightningView() }
+                        .accessibilityIdentifier("openLightningButton")
                 }
                 #else
                 BackupSection()
