@@ -1,5 +1,7 @@
 //! Low-level PQLN bridge. Winnow owns the Bitcoin wallet and chain source.
 pub const CORE_REVISION: &str = "1d7dda453dd385f3ede84c39eed5d20afe34e02a";
+pub mod claim_protocol;
+mod claim_wire;
 pub mod engine;
 mod worker;
 

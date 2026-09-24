@@ -1,5 +1,6 @@
 #if os(macOS)
 import Foundation
+import CryptoKit
 import Testing
 import WalletCore
 import TestSupport
@@ -64,11 +65,26 @@ struct RegtestJourneyTests {
         throw LightningChainError.catchUpDidNotConverge
     }
 
-    private func pay(_ engines: [LightningEngine], pair: Pair, requestID: String) async throws {
-        let snapshot = try await engines[1].createInvoice(requestID: requestID, amountMsat: 2_000_000)
-        let invoice = try #require(snapshot.invoices[requestID])
-        #expect(try await engines[1].createInvoice(requestID: requestID, amountMsat: 2_000_000)
-            .invoices[requestID]?.invoice == invoice.invoice)
+    private func pay(_ engines: [LightningEngine], pair: Pair, requestID: String,
+                     suppliedHash: Bool = false) async throws {
+        let invoice: LightningInvoice
+        if suppliedHash {
+            let preimage = Data(repeating: 94, count: 32)
+            let hash = Data(SHA256.hash(data: preimage))
+            let snapshot = try await engines[1].createHashInvoice(requestID: requestID,
+                amountMsat: 2_000_000, paymentHash: hash, preimage: preimage)
+            let record = try #require(snapshot.hash_invoices[hash.hex])
+            invoice = LightningInvoice(invoice: try #require(record.invoice),
+                                       amount_msat: record.amount_msat, payment_hash: record.payment_hash)
+            #expect(try await engines[1].createHashInvoice(requestID: requestID,
+                amountMsat: 2_000_000, paymentHash: hash, preimage: preimage)
+                .hash_invoices[hash.hex]?.invoice == invoice.invoice)
+        } else {
+            let snapshot = try await engines[1].createInvoice(requestID: requestID, amountMsat: 2_000_000)
+            invoice = try #require(snapshot.invoices[requestID])
+            #expect(try await engines[1].createInvoice(requestID: requestID, amountMsat: 2_000_000)
+                .invoices[requestID]?.invoice == invoice.invoice)
+        }
         try await pair.accept(0, engines[0].payInvoice(invoice.invoice, amountMsat: invoice.amount_msat, maxFeeMsat: 1000))
         for _ in 0..<100 {
             _ = try await pair.pump()
@@ -265,7 +281,7 @@ struct RegtestJourneyTests {
         #expect(try await restored[1].status().channels.first?.usable == true)
 
         #expect(try await restored[0].status().payments.values.contains { $0.state == "sent" })
-        try await pay(restored, pair: resumedPair, requestID: "after-restart")
+        try await pay(restored, pair: resumedPair, requestID: "after-restart", suppliedHash: true)
 
         // Remove two confirmations, then deliver a longer replacement branch.
         // WalletCore detects the fork before Lightning sees replacement blocks.

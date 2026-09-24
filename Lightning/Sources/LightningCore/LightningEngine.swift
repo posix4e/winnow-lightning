@@ -33,12 +33,63 @@ public struct LightningSnapshot: Decodable, Sendable {
     public let events: [String: LightningEvent]
     public let watches: [String: LightningWatch]
     public let invoices: [String: LightningInvoice]
+    public let hash_invoices: [String: LightningHashInvoice]
     public let payments: [String: LightningPayment]
     public let sweeps: [String: LightningSweep]
     public let close_destinations: [String: String]
     public let peers: [String]
     public let channels: [LightningChannel]
     public let packets: [LightningPacket]?
+    public let inspected_claim: LightningClaimInspection?
+    public let exported_claim: String?
+    public let claims: [String: LightningClaim]
+    public let capabilities: LightningCapabilities
+    public let peer_pin: LightningPeerPin?
+}
+
+public struct LightningPeerPin: Decodable, Sendable {
+    public let kem_key: String
+    public let signature_key: String
+}
+
+public struct LightningCapabilities: Decodable, Sendable {
+    public let supplied_hash_invoices: Bool
+    public let onion_messages: Bool
+    public let bolt12_refund_payments: Bool
+    public let funded_claims: Bool
+}
+
+public struct LightningClaim: Decodable, Sendable {
+    public let claim_id: String
+    public let request_id: String?
+    public let direction: String
+    public let amount_msat: UInt64
+    public let provider: String
+    public let state: String
+    public let terms: LightningClaimInspection?
+    public let quote_commitment: String?
+    public let last_error: String?
+}
+
+public struct LightningClaimProvider: Encodable, Sendable {
+    public let host: String
+    public let port: UInt16
+    public init(host: String, port: UInt16) { self.host = host; self.port = port }
+}
+
+/// Authenticated public terms only; inspecting never imports, connects or pays.
+public struct LightningClaimInspection: Decodable, Sendable {
+    public let version: UInt8
+    public let network: String
+    public let claim_id: String
+    public let provider_node_id: String
+    public let provider_host: String
+    public let provider_port: UInt16
+    public let payment_hash: String
+    public let amount_msat: UInt64
+    public let fee_msat: UInt64
+    public let latest_claim_height: UInt32
+    public let expires_at_unix: UInt64
 }
 
 public struct LightningSweep: Decodable, Sendable {
@@ -49,6 +100,14 @@ public struct LightningInvoice: Decodable, Sendable {
     public let invoice: String
     public let amount_msat: UInt64
     public let payment_hash: String
+}
+public struct LightningHashInvoice: Decodable, Sendable {
+    public let request_id: String
+    public let amount_msat: UInt64
+    public let payment_hash: String
+    public let invoice: String?
+    public let state: String
+    public let claim_deadline: UInt32?
 }
 public struct LightningPayment: Decodable, Sendable {
     public let invoice: String
@@ -97,6 +156,16 @@ public struct LightningChannel: Decodable, Sendable {
     public let ready: Bool
     public let usable: Bool
     public let funding_txid: String?
+    public let outbound_htlcs: [LightningHTLC]
+    public let outbound_capacity_msat: UInt64
+    public let inbound_capacity_msat: UInt64
+}
+public struct LightningHTLC: Decodable, Sendable {
+    public let payment_hash: String
+    public let amount_msat: UInt64
+    public let cltv_expiry: UInt32
+    public let is_dust: Bool
+    public let committed: Bool
 }
 public struct LightningPacket: Decodable, Sendable {
     public let connection: UInt64
@@ -113,10 +182,13 @@ public actor LightningEngine {
     private var handle: UInt64
 
     public init(seed: Data, storageURL: URL, network: BitcoinNetwork,
-                feeRateSatPerVByte: Double) throws {
+                feeRateSatPerVByte: Double, allowPrivateForwarding: Bool = false,
+                enableClaims: Bool = false, claimProvider: LightningClaimProvider? = nil) throws {
         guard seed.count == 32 else { throw LightningError.invalidSeed }
         let fee = try Self.satPerKW(feeRateSatPerVByte)
-        let configuration = Configuration(network: network.rawValue, storage_path: storageURL.path, fee_sat_per_kw: fee)
+        let configuration = Configuration(network: network.rawValue, storage_path: storageURL.path,
+            fee_sat_per_kw: fee, allow_private_forwarding: allowPrivateForwarding,
+            enable_claims: enableClaims, claim_provider: claimProvider)
         let data = try JSONEncoder().encode(configuration)
         var output = WlnBuffer(bytes: nil, length: 0)
         let code = data.withUnsafeBytes { configBytes in
@@ -144,12 +216,75 @@ public actor LightningEngine {
     }
 
     public func status() throws -> LightningSnapshot { try call(Request(command: "status")) }
+    public func peerKeys(nodeID: String) throws -> LightningPeerPin {
+        guard let pin = try call(Request(command: "peer_keys", node_id: nodeID)).peer_pin else {
+            throw LightningError.invalidResponse
+        }
+        return pin
+    }
+    public func createRefund(amountMsat: UInt64) throws -> LightningSnapshot {
+        try call(Request(command: "create_refund", amount_msat: amountMsat))
+    }
+    public func requestRefundPayment(_ refund: String) throws -> LightningSnapshot {
+        guard refund.utf8.count <= 32_768 else { throw LightningError.invalidResponse }
+        return try call(Request(command: "request_refund_payment", refund: refund))
+    }
+    public func inspectClaim(_ text: String) throws -> LightningClaimInspection {
+        guard text.utf8.count <= 32_768,
+              let inspection = try call(Request(command: "inspect_claim", claim: text)).inspected_claim else {
+            throw LightningError.invalidResponse
+        }
+        return inspection
+    }
+    public func prepareClaim(requestID: String, provider: String, host: String, port: UInt16,
+                             amountMsat: UInt64) throws -> LightningSnapshot {
+        try call(Request(command: "prepare_claim", request_id: requestID, amount_msat: amountMsat,
+                         provider: provider, host: host, port: port))
+    }
+    public func commitClaim(_ claim: LightningClaim) throws -> LightningSnapshot {
+        guard let commitment = claim.quote_commitment else { throw LightningError.invalidResponse }
+        return try call(Request(command: "commit_claim", claim_id: claim.claim_id, quote_commitment: commitment))
+    }
+    public func exportClaim(id: String) throws -> String {
+        guard let text = try call(Request(command: "export_claim", claim_id: id)).exported_claim else {
+            throw LightningError.invalidResponse
+        }
+        return text
+    }
+    public func importClaim(_ text: String) throws -> LightningSnapshot {
+        guard text.utf8.count <= 32_768 else { throw LightningError.invalidResponse }
+        return try call(Request(command: "import_claim", claim: text))
+    }
+    public func redeemClaim(id: String) throws -> LightningSnapshot {
+        try call(Request(command: "redeem_claim", claim_id: id))
+    }
+    public func cancelClaim(id: String) throws -> LightningSnapshot {
+        try call(Request(command: "cancel_claim", claim_id: id))
+    }
     public func drain() throws -> LightningSnapshot { try call(Request(command: "drain")) }
     public func pinPeer(nodeID: String, kemKey: String, signatureKey: String) throws -> LightningSnapshot {
         try call(Request(command: "pin_peer", node_id: nodeID, kem_key: kemKey, signature_key: signatureKey))
     }
     public func createInvoice(requestID: String, amountMsat: UInt64) throws -> LightningSnapshot {
         try call(Request(command: "create_invoice", request_id: requestID, amount_msat: amountMsat))
+    }
+    public func createHashInvoice(requestID: String, amountMsat: UInt64, paymentHash: Data,
+                                  preimage: Data?, expirySeconds: UInt32 = 3600,
+                                  minFinalCLTVDelta: UInt16 = 0) throws -> LightningSnapshot {
+        guard paymentHash.count == 32, preimage == nil || preimage?.count == 32 else {
+            throw LightningError.invalidResponse
+        }
+        return try call(Request(command: "create_hash_invoice", request_id: requestID,
+                                amount_msat: amountMsat, payment_hash: paymentHash.hex,
+                                preimage: preimage?.hex, expiry_secs: expirySeconds,
+                                min_final_cltv_delta: minFinalCLTVDelta))
+    }
+    /// Protocol test primitive. A complete authenticated bearer-claim protocol
+    /// is required before the application can offer this operation to users.
+    public func forwardHeldPayment(paymentHash: String, invoice: String,
+                                   maxFeeMsat: UInt64) throws -> LightningSnapshot {
+        try call(Request(command: "forward_held_payment", invoice: invoice,
+                         max_fee_msat: maxFeeMsat, payment_hash: paymentHash))
     }
     public func payInvoice(_ invoice: String, amountMsat: UInt64, maxFeeMsat: UInt64) throws -> LightningSnapshot {
         try call(Request(command: "pay_invoice", amount_msat: amountMsat, invoice: invoice, max_fee_msat: maxFeeMsat))
@@ -234,7 +369,14 @@ public actor LightningEngine {
 
     private struct Response<T: Decodable>: Decodable { let ok: Bool; let result: T?; let error: String? }
     private struct Created: Decodable { let handle: UInt64; let snapshot: LightningSnapshot }
-    private struct Configuration: Encodable { let network: String; let storage_path: String; let fee_sat_per_kw: UInt32 }
+    private struct Configuration: Encodable {
+        let network: String
+        let storage_path: String
+        let fee_sat_per_kw: UInt32
+        let allow_private_forwarding: Bool
+        let enable_claims: Bool
+        let claim_provider: LightningClaimProvider?
+    }
     private struct Request: Encodable {
         let command: String
         var connection: UInt64? = nil
@@ -259,5 +401,16 @@ public actor LightningEngine {
         var channel_id: String? = nil
         var script: String? = nil
         var sat_per_kw: UInt32? = nil
+        var payment_hash: String? = nil
+        var preimage: String? = nil
+        var expiry_secs: UInt32? = nil
+        var min_final_cltv_delta: UInt16? = nil
+        var claim: String? = nil
+        var claim_id: String? = nil
+        var quote_commitment: String? = nil
+        var provider: String? = nil
+        var host: String? = nil
+        var port: UInt16? = nil
+        var refund: String? = nil
     }
 }

@@ -62,6 +62,13 @@ public actor LightningTCP {
         } catch { await disconnect(id); throw error }
     }
 
+    public func connectPinned(host: String, port: UInt16, nodeID: String) async throws {
+        if try await engine.status().peers.contains(nodeID) { return }
+        let pin = try await engine.peerKeys(nodeID: nodeID)
+        try await connect(host: host, port: port, nodeID: nodeID,
+                          kemKey: pin.kem_key, signatureKey: pin.signature_key)
+    }
+
     /// A listener is useful for a second research device or local integration tests.
     public func listen(port: UInt16 = 0) async throws -> UInt16 {
         guard !stopped, listener == nil, try await engine.status().chain_ready else { throw LightningError.closed }

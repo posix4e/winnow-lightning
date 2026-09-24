@@ -19,7 +19,9 @@ final class RegtestNode: @unchecked Sendable {
         binaryDirectory = path
         directory = FileManager.default.temporaryDirectory.appendingPathComponent("winnow-regtest-\(UUID().uuidString)")
         p2pPort = try Self.unusedPort()
-        rpcPort = try Self.unusedPort()
+        var rpc = try Self.unusedPort()
+        while rpc == p2pPort { rpc = try Self.unusedPort() }
+        rpcPort = rpc
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let result = try HostProcess.run(path + "/bitcoind", [
             "-regtest", "-datadir=\(directory.path)", "-server", "-daemonwait", "-listen=1",
@@ -28,8 +30,10 @@ final class RegtestNode: @unchecked Sendable {
             "-blockfilterindex=1", "-peerblockfilters=1", "-fallbackfee=0.00002",
         ])
         guard result.status == 0 else {
+            let diagnostic = (try? String(contentsOf: directory.appendingPathComponent("regtest/debug.log"), encoding: .utf8)) ?? ""
+            stopped = true
             try? FileManager.default.removeItem(at: directory)
-            throw Failure.command(result.stderr + result.stdout)
+            throw Failure.command("bitcoind exited \(result.status): " + result.stderr + result.stdout + String(diagnostic.suffix(4000)))
         }
     }
 
@@ -40,7 +44,7 @@ final class RegtestNode: @unchecked Sendable {
         var flags = ["-regtest", "-datadir=\(directory.path)", "-rpcconnect=127.0.0.1", "-rpcport=\(rpcPort)"]
         if let wallet { flags.append("-rpcwallet=\(wallet)") }
         let result = try HostProcess.run(binaryDirectory + "/bitcoin-cli", flags + args)
-        guard result.status == 0 else { throw Failure.command(result.stderr + result.stdout) }
+        guard result.status == 0 else { throw Failure.command("bitcoin-cli \(args.first ?? "") exited \(result.status): " + result.stderr + result.stdout) }
         return result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
@@ -59,9 +63,15 @@ final class RegtestNode: @unchecked Sendable {
         guard !stopped else { return }
         _ = try? rpc(["stop"])
         stopped = true
-        // Only disposable test state lives here. Core's open file handles
-        // remain valid while it completes shutdown after the RPC reply.
-        try? FileManager.default.removeItem(at: directory)
+        // A stop RPC acknowledges before database shutdown. Removing the
+        // directory then races Core's final writes and leaks daemon processes.
+        let pid = directory.appendingPathComponent("regtest/bitcoind.pid")
+        for _ in 0..<250 where FileManager.default.fileExists(atPath: pid.path) {
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        if !FileManager.default.fileExists(atPath: pid.path) {
+            try? FileManager.default.removeItem(at: directory)
+        }
     }
 
     private static func unusedPort() throws -> UInt16 {

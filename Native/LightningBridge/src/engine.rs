@@ -1,9 +1,16 @@
+#[path = "claims.rs"]
+mod claims;
+pub use claims::ProviderConfig;
+use claims::{ProviderClaim, ReceivedClaim, SentClaim};
+#[path = "held_payment.rs"]
+mod held_payment;
 use bitcoin::{
     consensus::{deserialize, serialize},
     hashes::{sha256, Hash},
     secp256k1::PublicKey,
     Block, BlockHash, Network, Script, ScriptBuf, Transaction, Txid,
 };
+use held_payment::HeldForward;
 use lightning::{
     chain::{
         chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator, TransactionType},
@@ -17,12 +24,13 @@ use lightning::{
         channelmanager::{
             Bolt11InvoiceParameters, ChainParameters, ChannelManager, ChannelManagerReadArgs,
             OptionalBolt11PaymentParams, PaymentId, RecentPaymentDetails,
+            MIN_FINAL_CLTV_EXPIRY_DELTA,
         },
         outbound_payment::Retry,
-        peer_handler::{IgnoringMessageHandler, PeerManager, SocketDescriptor},
+        peer_handler::{IgnoringMessageHandler, MessageHandler, PeerManager, SocketDescriptor},
         types::ChannelId,
     },
-    onion_message::messenger::DefaultMessageRouter,
+    onion_message::messenger::{DefaultMessageRouter, OnionMessenger},
     routing::{
         gossip::NetworkGraph,
         router::{DefaultRouter, InFlightHtlcs, Route, RouteParameters, Router},
@@ -35,6 +43,7 @@ use lightning::{
         EntropySource, InMemorySigner, KeysManager, NodeSigner, OutputSpender, Recipient,
         SpendableOutputDescriptor,
     },
+    types::payment::{PaymentHash, PaymentPreimage},
     util::{
         config::UserConfig,
         logger::{Logger, Record},
@@ -77,6 +86,19 @@ type BaseRouter = DefaultRouter<
     Arc<RwLock<Scorer>>,
     ProbabilisticScoringFeeParameters,
     Scorer,
+>;
+type MessageRouter =
+    DefaultMessageRouter<Arc<NetworkGraph<Arc<QuietLogger>>>, Arc<QuietLogger>, Arc<KeysManager>>;
+type Messages = OnionMessenger<
+    Arc<KeysManager>,
+    Arc<KeysManager>,
+    Arc<QuietLogger>,
+    Arc<Manager>,
+    Arc<MessageRouter>,
+    Arc<Manager>,
+    Arc<Manager>,
+    IgnoringMessageHandler,
+    IgnoringMessageHandler,
 >;
 type Manager = ChannelManager<
     Arc<Monitor>,
@@ -168,9 +190,9 @@ type Peers = PeerManager<
     Socket,
     Arc<Manager>,
     IgnoringMessageHandler,
-    IgnoringMessageHandler,
+    Arc<Messages>,
     Arc<QuietLogger>,
-    IgnoringMessageHandler,
+    Arc<crate::claim_wire::Handler>,
     Arc<KeysManager>,
     Arc<Monitor>,
 >;
@@ -187,6 +209,12 @@ pub struct Config {
     pub network: String,
     pub storage_path: PathBuf,
     pub fee_sat_per_kw: u32,
+    #[serde(default)]
+    pub allow_private_forwarding: bool,
+    #[serde(default)]
+    pub enable_claims: bool,
+    #[serde(default)]
+    pub claim_provider: Option<ProviderConfig>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -205,6 +233,29 @@ struct Journal {
     spendable: BTreeMap<String, Vec<String>>,
     sweeps: BTreeMap<String, Value>,
     closing: BTreeMap<String, Value>,
+    hash_invoices: BTreeMap<String, HashInvoice>,
+    sent_claims: BTreeMap<String, SentClaim>,
+    received_claims: BTreeMap<String, ReceivedClaim>,
+    provider_claims: BTreeMap<String, ProviderClaim>,
+}
+
+/// The preimage stays in protected native storage, never in status snapshots.
+#[derive(Clone, Serialize, Deserialize)]
+struct HashInvoice {
+    request_id: String,
+    amount_msat: u64,
+    payment_hash: String,
+    preimage: Option<String>,
+    expiry_secs: u32,
+    #[serde(default)]
+    description_hash: Option<String>,
+    min_final_cltv_delta: u16,
+    invoice: Option<String>,
+    state: String,
+    payment_id: Option<String>,
+    claim_deadline: Option<u32>,
+    #[serde(default)]
+    forward: Option<HeldForward>,
 }
 
 impl Default for Journal {
@@ -223,6 +274,10 @@ impl Default for Journal {
             spendable: BTreeMap::new(),
             sweeps: BTreeMap::new(),
             closing: BTreeMap::new(),
+            hash_invoices: BTreeMap::new(),
+            sent_claims: BTreeMap::new(),
+            received_claims: BTreeMap::new(),
+            provider_claims: BTreeMap::new(),
         }
     }
 }
@@ -364,6 +419,41 @@ impl SocketDescriptor for Socket {
 pub enum Command {
     Status,
     Drain,
+    InspectClaim {
+        claim: String,
+    },
+    PrepareClaim {
+        request_id: String,
+        provider: String,
+        host: String,
+        port: u16,
+        amount_msat: u64,
+    },
+    CommitClaim {
+        claim_id: String,
+        quote_commitment: String,
+    },
+    ExportClaim {
+        claim_id: String,
+    },
+    ImportClaim {
+        claim: String,
+    },
+    RedeemClaim {
+        claim_id: String,
+    },
+    CancelClaim {
+        claim_id: String,
+    },
+    PeerKeys {
+        node_id: String,
+    },
+    CreateRefund {
+        amount_msat: u64,
+    },
+    RequestRefundPayment {
+        refund: String,
+    },
     /// A connected byte stream supplied by Swift. The KEM key is an out-of-band pin.
     Connect {
         connection: u64,
@@ -418,6 +508,20 @@ pub enum Command {
         request_id: String,
         amount_msat: u64,
     },
+    CreateHashInvoice {
+        request_id: String,
+        amount_msat: u64,
+        payment_hash: String,
+        preimage: Option<String>,
+        expiry_secs: u32,
+        description_hash: Option<String>,
+        min_final_cltv_delta: u16,
+    },
+    ForwardHeldPayment {
+        payment_hash: String,
+        invoice: String,
+        max_fee_msat: u64,
+    },
     PayInvoice {
         invoice: String,
         amount_msat: u64,
@@ -446,6 +550,11 @@ pub struct Engine {
     manager: Arc<Manager>,
     monitor: Arc<Monitor>,
     peers: Peers,
+    messages: Arc<Messages>,
+    claim_wire: Arc<crate::claim_wire::Handler>,
+    claims_enabled: bool,
+    claim_provider: Option<ProviderConfig>,
+    last_claim_tick: Mutex<Instant>,
     services: Arc<Services>,
     keys: Arc<KeysManager>,
     sockets: BTreeMap<u64, Socket>,
@@ -513,7 +622,11 @@ impl Engine {
         };
         let has_journal_state = !journal.events.is_empty()
             || !journal.watches.is_empty()
-            || !journal.submitted.is_empty();
+            || !journal.submitted.is_empty()
+            || !journal.hash_invoices.is_empty()
+            || !journal.sent_claims.is_empty()
+            || !journal.received_claims.is_empty()
+            || !journal.provider_claims.is_empty();
         let services = Arc::new(Services {
             store: store.clone(),
             journal: Mutex::new(journal),
@@ -548,7 +661,11 @@ impl Engine {
             ),
         });
         let message_router = Arc::new(DefaultMessageRouter::new(graph, keys.clone()));
+        let claims_enabled = config.enable_claims;
+        let claim_provider = config.claim_provider.clone();
+        let allow_private_forwarding = config.allow_private_forwarding;
         let mut config = UserConfig::default();
+        config.accept_forwards_to_priv_channels = allow_private_forwarding;
         // Initial regtest channel type avoids anchor wallet/package fee-bumping
         // requirements. No ordinary Bitcoin wallet is constructed by this core.
         config
@@ -573,7 +690,7 @@ impl Engine {
                     monitor.clone(),
                     services.clone(),
                     router,
-                    message_router,
+                    message_router.clone(),
                     logger.clone(),
                     config,
                     monitors.iter().map(|(_, m)| m).collect(),
@@ -592,7 +709,7 @@ impl Engine {
                     monitor.clone(),
                     services.clone(),
                     router,
-                    message_router,
+                    message_router.clone(),
                     logger.clone(),
                     keys.clone(),
                     keys.clone(),
@@ -626,19 +743,40 @@ impl Engine {
             }
         }
         let manager = Arc::new(manager);
-        let peers = Peers::new_channel_only(
+        let messages = Arc::new(Messages::new(
+            keys.clone(),
+            keys.clone(),
+            logger.clone(),
+            manager.clone(),
+            message_router,
+            manager.clone(),
             manager.clone(),
             IgnoringMessageHandler {},
+            IgnoringMessageHandler {},
+        ));
+        let claim_wire = Arc::new(crate::claim_wire::Handler::default());
+        let peers = Peers::new(
+            MessageHandler {
+                chan_handler: manager.clone(),
+                route_handler: IgnoringMessageHandler {},
+                onion_message_handler: messages.clone(),
+                custom_message_handler: claim_wire.clone(),
+                send_only_message_handler: monitor.clone(),
+            },
             now.as_secs() as u32,
             &keys.get_secure_random_bytes(),
             logger,
             keys.clone(),
-            monitor.clone(),
         );
         let engine = Self {
             manager,
             monitor,
             peers,
+            messages,
+            claim_wire,
+            claims_enabled,
+            claim_provider,
+            last_claim_tick: Mutex::new(Instant::now()),
             services,
             keys,
             sockets: BTreeMap::new(),
@@ -781,16 +919,82 @@ impl Engine {
                         .map_err(|_| ReplayEvent())?;
                     json!({"kind":"sweep_required", "output_id":id, "channel_id":channel_id.map(|c| c.to_string())})
                 }
-                Event::PaymentClaimable { purpose, .. } => {
-                    let preimage = purpose.preimage().ok_or(ReplayEvent())?;
-                    self.manager.claim_funds(preimage);
-                    return Ok(());
+                Event::PaymentClaimable {
+                    payment_hash,
+                    purpose,
+                    amount_msat,
+                    payment_id,
+                    claim_deadline,
+                    receiving_channel_ids,
+                    ..
+                } => {
+                    let hash = payment_hash.to_string();
+                    let external = self
+                        .services
+                        .journal
+                        .lock()
+                        .unwrap()
+                        .hash_invoices
+                        .get(&hash)
+                        .cloned();
+                    if let Some(record) = external {
+                        let id = payment_id.map(|id| hex::encode(id.0));
+                        if amount_msat != record.amount_msat
+                            || id.is_none()
+                            || (record.payment_id.is_some() && record.payment_id != id)
+                            || matches!(record.state.as_str(), "received" | "cancelled")
+                            || receiving_channel_ids.len() != 1
+                            || (record.payment_id.is_none()
+                                && !self
+                                    .claim_funding_origin_allowed(&hash, &receiving_channel_ids))
+                        {
+                            self.manager.fail_htlc_backwards(&payment_hash);
+                            return Ok(());
+                        }
+                        self.services
+                            .update(|j| {
+                                let record = j.hash_invoices.get_mut(&hash).unwrap();
+                                record.payment_id = id;
+                                record.claim_deadline = claim_deadline;
+                                record.state = if record.preimage.is_some() {
+                                    "claiming"
+                                } else {
+                                    "held"
+                                }
+                                .into();
+                            })
+                            .map_err(|_| ReplayEvent())?;
+                        if let Some(preimage) = record.preimage {
+                            let bytes: [u8; 32] = hex::decode(preimage)
+                                .map_err(|_| ReplayEvent())?
+                                .try_into()
+                                .map_err(|_| ReplayEvent())?;
+                            self.manager.claim_funds(PaymentPreimage(bytes));
+                            return Ok(());
+                        }
+                        json!({"kind":"payment_held", "payment_hash":hash,
+                            "amount_msat":amount_msat, "claim_deadline":claim_deadline})
+                    } else if let Some(preimage) = purpose.preimage() {
+                        self.manager.claim_funds(preimage);
+                        return Ok(());
+                    } else {
+                        self.manager.fail_htlc_backwards(&payment_hash);
+                        json!({"kind":"inbound_payment_rejected", "payment_hash":hash})
+                    }
                 }
                 Event::PaymentClaimed {
                     payment_hash,
                     amount_msat,
                     ..
                 } => {
+                    self.services
+                        .update(|j| {
+                            if let Some(record) = j.hash_invoices.get_mut(&payment_hash.to_string())
+                            {
+                                record.state = "received".into();
+                            }
+                        })
+                        .map_err(|_| ReplayEvent())?;
                     json!({"kind":"payment_received", "payment_hash":payment_hash.to_string(), "amount_msat":amount_msat})
                 }
                 Event::PaymentSent {
@@ -813,14 +1017,24 @@ impl Engine {
                         .map_err(|_| ReplayEvent())?;
                     json!({"kind":"payment_sent", "payment_hash":hash, "amount_msat":amount_msat, "fee_paid_msat":fee_paid_msat})
                 }
-                Event::PaymentFailed { payment_hash, .. } => {
-                    let hash = payment_hash.ok_or(ReplayEvent())?.to_string();
+                Event::PaymentFailed {
+                    payment_id,
+                    payment_hash,
+                    ..
+                } => {
+                    // BOLT 12 failures may precede invoice/hash creation. The
+                    // stable payment id must still make the failure drainable.
+                    let hash = payment_hash.map(|hash| hash.to_string());
                     let mut sent = false;
                     self.services
                         .update(|j| {
-                            sent = j.receipts.contains_key(&hash);
+                            sent = hash
+                                .as_ref()
+                                .is_some_and(|hash| j.receipts.contains_key(hash));
                             if !sent {
-                                if let Some(record) = j.payments.get_mut(&hash) {
+                                if let Some(record) =
+                                    hash.as_ref().and_then(|hash| j.payments.get_mut(hash))
+                                {
                                     record["state"] = json!("failed");
                                 }
                             }
@@ -829,10 +1043,36 @@ impl Engine {
                     if sent {
                         return Ok(());
                     }
-                    json!({"kind":"payment_failed", "payment_hash":hash})
+                    json!({"kind":"payment_failed", "payment_id":hex::encode(payment_id.0), "payment_hash":hash})
+                }
+                Event::ConnectionNeeded { node_id, addresses } => {
+                    json!({"kind":"connection_required", "node_id":node_id.to_string(),
+                        "addresses":addresses.iter().map(|address| address.to_string()).collect::<Vec<_>>()})
                 }
                 Event::PaymentPathSuccessful { .. } | Event::PaymentPathFailed { .. } => {
                     return Ok(())
+                }
+                Event::PaymentForwarded {
+                    prev_htlcs,
+                    next_htlcs,
+                    total_fee_earned_msat,
+                    outbound_amount_forwarded_msat,
+                    claim_from_onchain_tx,
+                    ..
+                } => {
+                    // Completing this event also releases the core's monitor
+                    // ordering actions. Providers must not retain it forever.
+                    json!({"kind":"payment_forwarded",
+                        "incoming":prev_htlcs.iter().map(|h| hex::encode(h.encode())).collect::<Vec<_>>(),
+                        "outgoing":next_htlcs.iter().map(|h| hex::encode(h.encode())).collect::<Vec<_>>(),
+                        "amount_msat":outbound_amount_forwarded_msat,
+                        "fee_earned_msat":total_fee_earned_msat,"on_chain":claim_from_onchain_tx})
+                }
+                Event::HTLCHandlingFailed {
+                    prev_channel_ids, ..
+                } => {
+                    json!({"kind":"htlc_handling_failed",
+                        "channels":prev_channel_ids.iter().map(|c| c.to_string()).collect::<Vec<_>>()})
                 }
                 // Preserve unimplemented event types in LDK for replay. Never
                 // claim that spendable outputs or payment claims were handled.
@@ -845,6 +1085,20 @@ impl Engine {
         };
         self.monitor.process_pending_events(&handler);
         self.manager.process_pending_events(&handler);
+        self.messages.process_pending_events(&handler);
+        if self.services.journal.lock().unwrap().next_scan > self.tip.height {
+            self.reconcile_held_payments()?;
+            let retry = {
+                let mut tick = self.last_claim_tick.lock().unwrap();
+                if tick.elapsed() >= Duration::from_secs(2) {
+                    *tick = Instant::now();
+                    true
+                } else {
+                    false
+                }
+            };
+            self.process_claim_messages(retry)?;
+        }
         self.peers.process_events();
         self.checkpoint()
     }
@@ -946,12 +1200,249 @@ impl Engine {
                     "previous_blocks":p.previous_blocks.map(|h| h.map(|v| v.to_string()))})).collect::<Vec<_>>(),
             "events":journal.events, "watches":journal.watches,
             "invoices":journal.invoices, "payments":journal.payments, "sweeps":journal.sweeps,
+            "hash_invoices":journal.hash_invoices.iter().map(|(hash, record)| (hash.clone(), json!({
+                "request_id":record.request_id, "amount_msat":record.amount_msat,
+                "payment_hash":record.payment_hash, "state":record.state, "claim_deadline":record.claim_deadline,
+                "invoice":record.invoice}))).collect::<BTreeMap<_,_>>(),
+            "capabilities":{"supplied_hash_invoices":true, "onion_messages":true,
+                "bolt12_refund_payments":false, "funded_claims":self.claims_enabled,
+                "funded_claim_versions":if self.claims_enabled {vec![1]} else {vec![]},
+                "claim_authentication":"pinned_mldsa44_bolt11"},
+            "claims":self.claim_snapshots(&journal),
             "close_destinations":journal.closing.iter().map(|(id, intent)| (id.clone(), intent["script"].clone())).collect::<BTreeMap<_,_>>(),
             "peers":self.peers.list_peers().iter().map(|p| p.counterparty_node_id.to_string()).collect::<Vec<_>>(),
             "channels":self.manager.list_channels().iter().map(|c| json!({
                 "channel_id":c.channel_id.to_string(), "node_id":c.counterparty.node_id.to_string(),
                 "amount_sat":c.channel_value_satoshis, "ready":c.is_channel_ready, "usable":c.is_usable,
-                "funding_txid":c.funding_txo.map(|o| o.txid.to_string())})).collect::<Vec<_>>()})
+                "outbound_capacity_msat":c.outbound_capacity_msat,"inbound_capacity_msat":c.inbound_capacity_msat,
+                "funding_txid":c.funding_txo.map(|o| o.txid.to_string()),
+                "outbound_htlcs":c.pending_outbound_htlcs.iter().map(|h| json!({
+                    "payment_hash":h.payment_hash.to_string(),"amount_msat":h.amount_msat,
+                    "cltv_expiry":h.cltv_expiry,"is_dust":h.is_dust,
+                    "committed":matches!(h.state,Some(lightning::ln::channel_state::OutboundHTLCStateDetails::Committed))
+                })).collect::<Vec<_>>() })).collect::<Vec<_>>()})
+    }
+
+    fn create_hash_invoice(
+        &self,
+        request_id: String,
+        amount_msat: u64,
+        payment_hash: String,
+        preimage: Option<String>,
+        expiry_secs: u32,
+        min_final_cltv_delta: u16,
+        description_hash: Option<String>,
+    ) -> Result<()> {
+        let description = if let Some(ref hash) = description_hash {
+            let bytes = crate::claim_protocol::bytes32(hash)?;
+            lightning_invoice::Bolt11InvoiceDescription::Hash(lightning_invoice::Sha256(
+                sha256::Hash::from_byte_array(bytes),
+            ))
+        } else {
+            lightning_invoice::Bolt11InvoiceDescription::Direct(
+                lightning_invoice::Description::empty(),
+            )
+        };
+        let min_final_cltv_delta = if min_final_cltv_delta == 0 {
+            MIN_FINAL_CLTV_EXPIRY_DELTA
+        } else {
+            min_final_cltv_delta
+        };
+        if request_id.is_empty()
+            || request_id.len() > 128
+            || !(1..=1_000_000_000).contains(&amount_msat)
+            || !(60..=86_400).contains(&expiry_secs)
+            || !(MIN_FINAL_CLTV_EXPIRY_DELTA..=1008).contains(&min_final_cltv_delta)
+        {
+            return Err("invalid supplied-hash invoice parameters".into());
+        }
+        let bytes: [u8; 32] = hex::decode(&payment_hash)
+            .map_err(|_| "invalid payment hash")?
+            .try_into()
+            .map_err(|_| "invalid payment hash length")?;
+        let payment_hash = hex::encode(bytes);
+        let preimage = preimage
+            .map(|value| -> Result<String> {
+                let secret: [u8; 32] = hex::decode(value)
+                    .map_err(|_| "invalid preimage")?
+                    .try_into()
+                    .map_err(|_| "invalid preimage length")?;
+                if <sha256::Hash as Hash>::hash(&secret).to_byte_array() != bytes {
+                    return Err("preimage does not match payment hash".into());
+                }
+                Ok(hex::encode(secret))
+            })
+            .transpose()?;
+        let existing = {
+            let journal = self.services.journal.lock().unwrap();
+            if journal.hash_invoices.values().any(|record| {
+                record.request_id == request_id && record.payment_hash != payment_hash
+            }) {
+                return Err("invoice request changed".into());
+            }
+            journal.hash_invoices.get(&payment_hash).cloned()
+        };
+        if let Some(ref record) = existing {
+            if record.request_id != request_id
+                || record.amount_msat != amount_msat
+                || record.preimage != preimage
+                || record.expiry_secs != expiry_secs
+                || record.min_final_cltv_delta != min_final_cltv_delta
+                || record.description_hash != description_hash
+            {
+                return Err("invoice request changed".into());
+            }
+        } else {
+            self.services.update(|j| {
+                j.hash_invoices.insert(
+                    payment_hash.clone(),
+                    HashInvoice {
+                        request_id,
+                        amount_msat,
+                        payment_hash: payment_hash.clone(),
+                        preimage,
+                        expiry_secs,
+                        description_hash,
+                        min_final_cltv_delta,
+                        invoice: None,
+                        state: "registered".into(),
+                        payment_id: None,
+                        claim_deadline: None,
+                        forward: None,
+                    },
+                );
+            })?;
+        }
+        if existing.is_none_or(|record| record.invoice.is_none()) {
+            let invoice = self
+                .manager
+                .create_bolt11_invoice(Bolt11InvoiceParameters {
+                    amount_msats: Some(amount_msat),
+                    description,
+                    payment_hash: Some(PaymentHash(bytes)),
+                    invoice_expiry_delta_secs: Some(expiry_secs),
+                    min_final_cltv_expiry_delta: Some(min_final_cltv_delta),
+                    ..Default::default()
+                })
+                .map_err(|_| "could not create supplied-hash invoice")?;
+            self.services.update(|j| {
+                j.hash_invoices.get_mut(&payment_hash).unwrap().invoice = Some(invoice.to_string());
+            })?;
+        }
+        Ok(())
+    }
+
+    fn verify_invoice(&self, parsed: &Bolt11Invoice, amount_msat: u64) -> Result<[u8; 1312]> {
+        if parsed.currency() != Currency::Regtest
+            || parsed.amount_milli_satoshis() != Some(amount_msat)
+            || parsed.would_expire(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_err(|_| "clock before epoch")?,
+            )
+        {
+            return Err("invoice network, amount or expiry mismatch".into());
+        }
+        let pin = self
+            .services
+            .journal
+            .lock()
+            .unwrap()
+            .pins
+            .get(&parsed.get_payee_pub_key().to_string())
+            .cloned()
+            .ok_or("invoice payee needs pinned PQ keys")?;
+        let trusted_key: [u8; 1312] = hex::decode(&pin.signature_key)
+            .map_err(|_| "invalid pin")?
+            .try_into()
+            .map_err(|_| "invalid pin length")?;
+        if !matches!(
+            lightning::ln::invoice_utils::verify_bolt11_pq_signature(
+                &parsed,
+                Some(&trusted_key),
+                &QuietLogger
+            ),
+            lightning::ln::invoice_utils::Bolt11PqVerification::Verified
+        ) {
+            return Err("invoice PQ signature does not match pin".into());
+        }
+        Ok(trusted_key)
+    }
+
+    fn pay_invoice(
+        &self,
+        invoice: String,
+        amount_msat: u64,
+        max_fee_msat: u64,
+        max_cltv: Option<u32>,
+    ) -> Result<()> {
+        if invoice.len() > 32768
+            || !(1..=1_000_000_000).contains(&amount_msat)
+            || max_fee_msat > amount_msat
+        {
+            return Err("invalid payment limits".into());
+        }
+        let parsed = Bolt11Invoice::from_str(&invoice).map_err(|_| "invalid invoice")?;
+        if parsed.currency() != Currency::Regtest
+            || parsed.amount_milli_satoshis() != Some(amount_msat)
+        {
+            return Err("invoice network or amount mismatch".into());
+        }
+        let hash = parsed.payment_hash().to_string();
+        let id = PaymentId(parsed.payment_hash().0);
+        let existing = self
+            .services
+            .journal
+            .lock()
+            .unwrap()
+            .payments
+            .get(&hash)
+            .cloned();
+        if let Some(ref saved) = existing {
+            if saved["invoice"] != invoice || saved["max_fee_msat"].as_u64() != Some(max_fee_msat) {
+                return Err("payment request changed".into());
+            }
+        }
+        let tracked = self.manager.list_recent_payments().iter().any(|payment| {
+            let payment_id = match payment {
+                RecentPaymentDetails::AwaitingInvoice { payment_id }
+                | RecentPaymentDetails::Pending { payment_id, .. }
+                | RecentPaymentDetails::Fulfilled { payment_id, .. }
+                | RecentPaymentDetails::Abandoned { payment_id, .. } => payment_id,
+            };
+            *payment_id == id
+        });
+        let complete = existing
+            .as_ref()
+            .is_some_and(|v| v["state"] == "sent" || v["state"] == "failed");
+        if !tracked && !complete {
+            let trusted_key = self.verify_invoice(&parsed, amount_msat)?;
+            self.services.update(|j| {
+                j.payments.insert(
+                    hash.clone(),
+                    json!({"invoice":invoice,
+                        "amount_msat":amount_msat,"max_fee_msat":max_fee_msat,"state":"pending"}),
+                );
+            })?;
+            let mut params = OptionalBolt11PaymentParams::default();
+            params.trusted_pq_key = Some(trusted_key);
+            params.retry_strategy = Retry::Timeout(Duration::from_secs(10));
+            params.route_params_config.max_total_routing_fee_msat = Some(max_fee_msat);
+            if let Some(limit) = max_cltv {
+                params.route_params_config.max_total_cltv_expiry_delta = limit;
+                params.route_params_config.max_path_count = 1;
+            }
+            if let Err(error) = self
+                .manager
+                .pay_for_bolt11_invoice(&parsed, id, None, params)
+            {
+                self.services.update(|j| {
+                    j.payments.get_mut(&hash).unwrap()["state"] = json!("failed");
+                })?;
+                return Err(format!("payment rejected: {error:?}"));
+            }
+        }
+        Ok(())
     }
 
     fn socket(&mut self, id: u64) -> Result<Socket> {
@@ -982,7 +1473,13 @@ impl Engine {
                 | Command::SubmitFunding { .. }
                 | Command::Tick
                 | Command::CreateInvoice { .. }
+                | Command::CreateHashInvoice { .. }
                 | Command::PayInvoice { .. }
+                | Command::ForwardHeldPayment { .. }
+                | Command::PrepareClaim { .. }
+                | Command::CommitClaim { .. }
+                | Command::ExportClaim { .. }
+                | Command::RedeemClaim { .. }
                 | Command::CloseChannel { .. }
                 | Command::ForceClose { .. }
                 | Command::SweepOutputs { .. }
@@ -993,6 +1490,65 @@ impl Engine {
         }
         match command {
             Command::Status => return Ok(self.status()),
+            Command::PeerKeys { node_id } => {
+                let pin = self
+                    .services
+                    .journal
+                    .lock()
+                    .unwrap()
+                    .pins
+                    .get(&node_id)
+                    .cloned()
+                    .ok_or("peer requires independently pinned PQ keys")?;
+                let mut snapshot = self.status();
+                snapshot["peer_pin"] =
+                    serde_json::to_value(pin).map_err(|_| "pin encoding failed")?;
+                return Ok(snapshot);
+            }
+            Command::CreateRefund { .. } | Command::RequestRefundPayment { .. } => {
+                return Err(
+                    "BOLT12 refunds unavailable under required PQ invoice authentication".into(),
+                );
+            }
+            Command::PrepareClaim {
+                request_id,
+                provider,
+                host,
+                port,
+                amount_msat,
+            } => {
+                self.prepare_claim(request_id, provider, host, port, amount_msat)?;
+            }
+            Command::CommitClaim {
+                claim_id,
+                quote_commitment,
+            } => {
+                self.commit_claim(claim_id, quote_commitment)?;
+            }
+            Command::ExportClaim { claim_id } => {
+                let text = self.export_claim(&claim_id)?;
+                self.checkpoint()?;
+                let mut snapshot = self.status();
+                snapshot["exported_claim"] = json!(text);
+                return Ok(snapshot);
+            }
+            Command::ImportClaim { claim } => {
+                self.import_claim(&claim)?;
+            }
+            Command::RedeemClaim { claim_id } => {
+                self.redeem_claim(&claim_id)?;
+            }
+            Command::CancelClaim { claim_id } => {
+                self.cancel_claim(&claim_id)?;
+            }
+            Command::InspectClaim { claim } => {
+                let envelope = crate::claim_protocol::Envelope::parse(&claim)?;
+                self.verify_claim_quote(&envelope.quote)?;
+                let mut snapshot = self.status();
+                snapshot["inspected_claim"] = serde_json::to_value(&envelope.quote.terms)
+                    .map_err(|_| "claim inspection failed")?;
+                return Ok(snapshot);
+            }
             Command::Connect {
                 connection,
                 node_id,
@@ -1267,97 +1823,38 @@ impl Engine {
                         "amount_msat":amount_msat,"payment_hash":invoice.payment_hash().to_string()})); })?;
                 }
             }
+            Command::CreateHashInvoice {
+                request_id,
+                amount_msat,
+                payment_hash,
+                preimage,
+                expiry_secs,
+                description_hash,
+                min_final_cltv_delta,
+            } => {
+                self.create_hash_invoice(
+                    request_id,
+                    amount_msat,
+                    payment_hash,
+                    preimage,
+                    expiry_secs,
+                    min_final_cltv_delta,
+                    description_hash,
+                )?;
+            }
+            Command::ForwardHeldPayment {
+                payment_hash,
+                invoice,
+                max_fee_msat,
+            } => {
+                self.forward_held_payment(payment_hash, invoice, max_fee_msat)?;
+            }
             Command::PayInvoice {
                 invoice,
                 amount_msat,
                 max_fee_msat,
             } => {
-                if invoice.len() > 32768
-                    || !(1..=1_000_000_000).contains(&amount_msat)
-                    || max_fee_msat > amount_msat
-                {
-                    return Err("invalid payment limits".into());
-                }
-                let parsed = Bolt11Invoice::from_str(&invoice).map_err(|_| "invalid invoice")?;
-                if parsed.currency() != Currency::Regtest
-                    || parsed.amount_milli_satoshis() != Some(amount_msat)
-                {
-                    return Err("invoice network or amount mismatch".into());
-                }
-                let pin = self
-                    .services
-                    .journal
-                    .lock()
-                    .unwrap()
-                    .pins
-                    .get(&parsed.get_payee_pub_key().to_string())
-                    .cloned()
-                    .ok_or("invoice payee needs pinned PQ keys")?;
-                let trusted_key: [u8; 1312] = hex::decode(&pin.signature_key)
-                    .map_err(|_| "invalid pin")?
-                    .try_into()
-                    .map_err(|_| "invalid pin length")?;
-                if !matches!(
-                    lightning::ln::invoice_utils::verify_bolt11_pq_signature(
-                        &parsed,
-                        Some(&trusted_key),
-                        &QuietLogger
-                    ),
-                    lightning::ln::invoice_utils::Bolt11PqVerification::Verified
-                ) {
-                    return Err("invoice PQ signature does not match pin".into());
-                }
-                let hash = parsed.payment_hash().to_string();
-                let id = PaymentId(parsed.payment_hash().0);
-                let existing = self
-                    .services
-                    .journal
-                    .lock()
-                    .unwrap()
-                    .payments
-                    .get(&hash)
-                    .cloned();
-                if let Some(ref saved) = existing {
-                    if saved["invoice"] != invoice
-                        || saved["max_fee_msat"].as_u64() != Some(max_fee_msat)
-                    {
-                        return Err("payment request changed".into());
-                    }
-                }
-                let tracked = self.manager.list_recent_payments().iter().any(|payment| {
-                    let payment_id = match payment {
-                        RecentPaymentDetails::AwaitingInvoice { payment_id }
-                        | RecentPaymentDetails::Pending { payment_id, .. }
-                        | RecentPaymentDetails::Fulfilled { payment_id, .. }
-                        | RecentPaymentDetails::Abandoned { payment_id, .. } => payment_id,
-                    };
-                    *payment_id == id
-                });
-                let complete = existing
-                    .as_ref()
-                    .is_some_and(|v| v["state"] == "sent" || v["state"] == "failed");
-                if !tracked && !complete {
-                    self.services.update(|j| {
-                        j.payments.insert(
-                            hash.clone(),
-                            json!({"invoice":invoice,
-                        "amount_msat":amount_msat,"max_fee_msat":max_fee_msat,"state":"pending"}),
-                        );
-                    })?;
-                    let mut params = OptionalBolt11PaymentParams::default();
-                    params.trusted_pq_key = Some(trusted_key);
-                    params.retry_strategy = Retry::Timeout(Duration::from_secs(10));
-                    params.route_params_config.max_total_routing_fee_msat = Some(max_fee_msat);
-                    if let Err(error) = self
-                        .manager
-                        .pay_for_bolt11_invoice(&parsed, id, None, params)
-                    {
-                        self.services.update(|j| {
-                            j.payments.get_mut(&hash).unwrap()["state"] = json!("failed");
-                        })?;
-                        return Err(format!("payment rejected: {error:?}"));
-                    }
-                }
+                self.pay_invoice(invoice, amount_msat, max_fee_msat, None)?;
             }
             Command::CloseChannel {
                 channel_id,

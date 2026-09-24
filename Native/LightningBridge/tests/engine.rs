@@ -1,3 +1,4 @@
+use bitcoin::hashes::sha256;
 use bitcoin::{
     absolute, consensus::serialize, hashes::Hash, transaction, Amount, OutPoint, ScriptBuf,
     Sequence, Transaction, TxIn, TxOut, Txid, Witness,
@@ -12,7 +13,101 @@ fn config(dir: &TempDir) -> Config {
         network: "regtest".into(),
         storage_path: dir.path().into(),
         fee_sat_per_kw: 500,
+        allow_private_forwarding: false,
+        enable_claims: false,
+        claim_provider: None,
     }
+}
+
+#[test]
+fn claim_quote_binds_public_terms_to_a_pinned_pq_invoice_without_import_side_effects() {
+    use winnow_lightning_bridge::claim_protocol::{self as protocol, Envelope, Quote, Terms};
+    let provider_dir = TempDir::new().unwrap();
+    let recipient_dir = TempDir::new().unwrap();
+    let mut provider = Engine::new(config(&provider_dir), &[51; 32]).unwrap();
+    let mut recipient = Engine::new(config(&recipient_dir), &[52; 32]).unwrap();
+    let identity = provider.status();
+    let terms = Terms {
+        version: 1,
+        network: "regtest".into(),
+        claim_id: hex::encode([13; 32]),
+        provider_node_id: identity["node_id"].as_str().unwrap().into(),
+        provider_host: "127.0.0.1".into(),
+        provider_port: 9735,
+        payment_hash: protocol::digest(&[14; 32]),
+        capability_hash: protocol::digest(&[15; 32]),
+        amount_msat: 5_000_000,
+        fee_msat: protocol::PROVIDER_FEE_MSAT,
+        latest_claim_height: protocol::CLAIM_BLOCKS,
+        expires_at_unix: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + u64::from(protocol::LIFETIME_SECONDS),
+        hold_delta: protocol::HOLD_DELTA,
+    };
+    let result = provider
+        .call(Command::CreateHashInvoice {
+            request_id: terms.claim_id.clone(),
+            amount_msat: terms.debit().unwrap(),
+            payment_hash: terms.payment_hash.clone(),
+            preimage: None,
+            expiry_secs: protocol::LIFETIME_SECONDS,
+            min_final_cltv_delta: terms.hold_delta,
+            description_hash: Some(terms.commitment().unwrap().to_string()),
+        })
+        .unwrap();
+    let invoice = result["hash_invoices"][&terms.payment_hash]["invoice"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let envelope = Envelope {
+        quote: Quote { terms, invoice },
+        capability: hex::encode([15; 32]),
+        preimage: hex::encode([14; 32]),
+    };
+    let text = envelope.encode().unwrap();
+    assert!(recipient
+        .call(Command::InspectClaim {
+            claim: text.clone()
+        })
+        .is_err());
+    recipient
+        .call(Command::PinPeer {
+            node_id: identity["node_id"].as_str().unwrap().into(),
+            kem_key: identity["kem_key"].as_str().unwrap().into(),
+            signature_key: identity["signature_key"].as_str().unwrap().into(),
+        })
+        .unwrap();
+    let before = recipient.status();
+    let inspected = recipient
+        .call(Command::InspectClaim {
+            claim: text.clone(),
+        })
+        .unwrap();
+    assert_eq!(inspected["inspected_claim"]["amount_msat"], 5_000_000);
+    assert_eq!(recipient.status(), before);
+    assert!(!inspected.to_string().contains(&envelope.preimage));
+    assert!(!inspected.to_string().contains(&envelope.capability));
+    let mut tampered = envelope.clone();
+    tampered.quote.terms.provider_host = "evil.example".into();
+    assert!(recipient
+        .call(Command::InspectClaim {
+            claim: tampered.encode().unwrap()
+        })
+        .is_err());
+    tampered = envelope.clone();
+    tampered.quote.terms.amount_msat += 1;
+    assert!(recipient
+        .call(Command::InspectClaim {
+            claim: tampered.encode().unwrap()
+        })
+        .is_err());
+    println!(
+        "Measured hybrid-PQ claim envelope: {} UTF-8 bytes; invoice: {} bytes",
+        text.len(),
+        envelope.quote.invoice.len()
+    );
 }
 fn packets(queue: &mut VecDeque<(usize, String)>, source: usize, result: Value) {
     for packet in result["packets"].as_array().unwrap() {
@@ -212,4 +307,88 @@ fn fee_policy_updates_are_bounded_and_keep_explicit_sat_per_kw_units() {
         engine.call(Command::Status).unwrap()["fee_sat_per_kw"],
         1250
     );
+}
+
+#[test]
+fn supplied_hash_invoice_survives_restart_without_exporting_its_preimage() {
+    let dir = TempDir::new().unwrap();
+    let secret = [93; 32];
+    let hash = sha256::Hash::hash(&secret).to_string();
+    let request = || Command::CreateHashInvoice {
+        request_id: "imported-claim".into(),
+        amount_msat: 2_000_000,
+        payment_hash: hash.clone(),
+        preimage: Some(hex::encode(secret)),
+        expiry_secs: 3600,
+        description_hash: None,
+        min_final_cltv_delta: 0,
+    };
+    let mut node = Engine::new(config(&dir), &[61; 32]).unwrap();
+    let first = node.call(request()).unwrap();
+    let invoice = first["hash_invoices"][&hash]["invoice"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(!invoice.is_empty());
+    assert!(!first.to_string().contains(&hex::encode(secret)));
+    assert_eq!(
+        node.call(request()).unwrap()["hash_invoices"][&hash]["invoice"],
+        invoice
+    );
+    drop(node);
+    let mut restored = Engine::new(config(&dir), &[61; 32]).unwrap();
+    assert_eq!(
+        restored.call(request()).unwrap()["hash_invoices"][&hash]["invoice"],
+        invoice
+    );
+    assert!(restored
+        .call(Command::CreateHashInvoice {
+            request_id: "imported-claim".into(),
+            amount_msat: 2_000_001,
+            payment_hash: hash.clone(),
+            preimage: Some(hex::encode(secret)),
+            expiry_secs: 3600,
+            description_hash: None,
+            min_final_cltv_delta: 0,
+        })
+        .is_err());
+    assert_eq!(
+        restored.status()["hash_invoices"][&hash]["amount_msat"],
+        2_000_000
+    );
+}
+
+#[test]
+fn invalid_external_preimage_cannot_register_or_replace_an_invoice() {
+    let dir = TempDir::new().unwrap();
+    let mut node = Engine::new(config(&dir), &[62; 32]).unwrap();
+    let hash = sha256::Hash::hash(&[45; 32]).to_string();
+    assert!(node
+        .call(Command::CreateHashInvoice {
+            request_id: "mismatch".into(),
+            amount_msat: 2_000_000,
+            payment_hash: hash.clone(),
+            preimage: Some(hex::encode([46; 32])),
+            expiry_secs: 3600,
+            description_hash: None,
+            min_final_cltv_delta: 0,
+        })
+        .is_err());
+    assert!(node.status()["hash_invoices"]
+        .as_object()
+        .unwrap()
+        .is_empty());
+    let held = node
+        .call(Command::CreateHashInvoice {
+            request_id: "hold".into(),
+            amount_msat: 2_000_000,
+            payment_hash: hash.clone(),
+            preimage: None,
+            expiry_secs: 3600,
+            description_hash: None,
+            min_final_cltv_delta: 288,
+        })
+        .unwrap();
+    assert_eq!(held["hash_invoices"][&hash]["state"], "registered");
+    assert!(held["hash_invoices"][&hash].get("preimage").is_none());
 }
