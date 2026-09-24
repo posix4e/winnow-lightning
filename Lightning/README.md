@@ -146,8 +146,12 @@ concurrently with ordinary Winnow validation. Both jobs must pass the final
 validation gate. Lightning has its own simulator, disposable regtest chain,
 and `lightning-tests-<run>-<attempt>` artifact. It does not require deployment
 or signing secrets. Website deployment remains enabled upstream; research
-forks opt in with `WINNOW_DEPLOY_SITE=true` and their own credentials. The ordinary signet journey and its website media remain
-in their existing job.
+forks opt in with `WINNOW_DEPLOY_SITE=true` and their own credentials. The ordinary
+signet journey and its website media remain in their existing job.
+
+CI also runs on pushes to `codex/winnow-lightning` while the replacement is under
+review and the repository's default branch still contains the earlier prototype.
+Push and pull-request runs for that source branch share a concurrency group.
 
 `Lightning/UITests` drives the actual research app: create and fund a Winnow
 wallet, review and sign channel funding, confirm the channel, pay an invoice,
