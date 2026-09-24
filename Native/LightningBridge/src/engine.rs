@@ -2,7 +2,7 @@ use bitcoin::{
     consensus::{deserialize, serialize},
     hashes::{sha256, Hash},
     secp256k1::PublicKey,
-    Block, BlockHash, Network, Script, Transaction, Txid,
+    Block, BlockHash, Network, Script, ScriptBuf, Transaction, Txid,
 };
 use lightning::{
     chain::{
@@ -11,43 +11,52 @@ use lightning::{
         channelmonitor::ChannelMonitor,
         BlockLocator, Confirm, Filter, Listen, Watch, WatchedOutput,
     },
-    events::{Event, EventsProvider, ReplayEvent},
+    events::{Event, EventsProvider, InboundChannelFunds, ReplayEvent},
     ln::{
-        channelmanager::{ChainParameters, ChannelManagerReadArgs, SimpleArcChannelManager},
+        channel_state::ChannelDetails,
+        channelmanager::{
+            Bolt11InvoiceParameters, ChainParameters, ChannelManager, ChannelManagerReadArgs,
+            OptionalBolt11PaymentParams, PaymentId, RecentPaymentDetails,
+        },
+        outbound_payment::Retry,
         peer_handler::{IgnoringMessageHandler, PeerManager, SocketDescriptor},
         types::ChannelId,
     },
     onion_message::messenger::DefaultMessageRouter,
     routing::{
         gossip::NetworkGraph,
-        router::DefaultRouter,
+        router::{DefaultRouter, InFlightHtlcs, Route, RouteParameters, Router},
         scoring::{
             ProbabilisticScorer, ProbabilisticScoringDecayParameters,
             ProbabilisticScoringFeeParameters,
         },
     },
-    sign::{EntropySource, InMemorySigner, KeysManager, NodeSigner, Recipient},
+    sign::{
+        EntropySource, InMemorySigner, KeysManager, NodeSigner, OutputSpender, Recipient,
+        SpendableOutputDescriptor,
+    },
     util::{
         config::UserConfig,
         logger::{Logger, Record},
         persist::{read_channel_monitors, KVStoreSync},
-        ser::{ReadableArgs, Writeable},
+        ser::{Readable, ReadableArgs, Writeable},
     },
 };
+use lightning_invoice::{Bolt11Invoice, Currency};
 use lightning_persister::fs_store::v1::FilesystemStore;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs::{File, OpenOptions},
     hash::{Hash as StdHash, Hasher},
     path::PathBuf,
     str::FromStr,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
         Arc, Mutex, RwLock,
     },
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 type Result<T> = std::result::Result<T, String>;
@@ -60,7 +69,101 @@ type Monitor = ChainMonitor<
     Arc<FilesystemStore>,
     Arc<KeysManager>,
 >;
-type Manager = SimpleArcChannelManager<Monitor, Services, Services, QuietLogger>;
+type Scorer = ProbabilisticScorer<Arc<NetworkGraph<Arc<QuietLogger>>>, Arc<QuietLogger>>;
+type BaseRouter = DefaultRouter<
+    Arc<NetworkGraph<Arc<QuietLogger>>>,
+    Arc<QuietLogger>,
+    Arc<KeysManager>,
+    Arc<RwLock<Scorer>>,
+    ProbabilisticScoringFeeParameters,
+    Scorer,
+>;
+type Manager = ChannelManager<
+    Arc<Monitor>,
+    Arc<Services>,
+    Arc<KeysManager>,
+    Arc<KeysManager>,
+    Arc<KeysManager>,
+    Arc<Services>,
+    Arc<PinnedRouter>,
+    Arc<
+        DefaultMessageRouter<
+            Arc<NetworkGraph<Arc<QuietLogger>>>,
+            Arc<QuietLogger>,
+            Arc<KeysManager>,
+        >,
+    >,
+    Arc<QuietLogger>,
+>;
+
+// Regtest private channels do not use public gossip. The caller explicitly
+// pins both PQ keys out of band; no self-asserted invoice key becomes trusted.
+struct PinnedRouter {
+    base: BaseRouter,
+    services: Arc<Services>,
+}
+impl Router for PinnedRouter {
+    fn find_route(
+        &self,
+        payer: &PublicKey,
+        params: &RouteParameters,
+        first_hops: Option<&[&ChannelDetails]>,
+        inflight: InFlightHtlcs,
+    ) -> std::result::Result<Route, &'static str> {
+        self.base.find_route(payer, params, first_hops, inflight)
+    }
+    fn pq_kem_key_for_node(&self, node: &PublicKey) -> Option<[u8; 1184]> {
+        hex::decode(
+            &self
+                .services
+                .journal
+                .lock()
+                .ok()?
+                .pins
+                .get(&node.to_string())?
+                .kem_key,
+        )
+        .ok()?
+        .try_into()
+        .ok()
+    }
+    fn pq_node_id_for_node(&self, node: &PublicKey) -> Option<[u8; 1312]> {
+        hex::decode(
+            &self
+                .services
+                .journal
+                .lock()
+                .ok()?
+                .pins
+                .get(&node.to_string())?
+                .signature_key,
+        )
+        .ok()?
+        .try_into()
+        .ok()
+    }
+    fn create_blinded_payment_paths<
+        T: bitcoin::secp256k1::Signing + bitcoin::secp256k1::Verification,
+    >(
+        &self,
+        recipient: PublicKey,
+        key: lightning::sign::ReceiveAuthKey,
+        hops: Vec<ChannelDetails>,
+        tlvs: lightning::blinded_path::payment::ReceiveTlvs,
+        amount: Option<u64>,
+        ctx: &bitcoin::secp256k1::Secp256k1<T>,
+    ) -> std::result::Result<Vec<lightning::blinded_path::payment::BlindedPaymentPath>, ()> {
+        self.base
+            .create_blinded_payment_paths(recipient, key, hops, tlvs, amount, ctx)
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
+struct PeerPin {
+    kem_key: String,
+    signature_key: String,
+}
+
 type Peers = PeerManager<
     Socket,
     Arc<Manager>,
@@ -94,6 +197,14 @@ struct Journal {
     submitted: BTreeMap<String, String>,
     watch_revision: u64,
     next_scan: u32,
+    pins: BTreeMap<String, PeerPin>,
+    invoices: BTreeMap<String, Value>,
+    payments: BTreeMap<String, Value>,
+    receipts: BTreeMap<String, String>,
+    wallet_scripts: BTreeSet<String>,
+    spendable: BTreeMap<String, Vec<String>>,
+    sweeps: BTreeMap<String, Value>,
+    closing: BTreeMap<String, Value>,
 }
 
 impl Default for Journal {
@@ -104,6 +215,14 @@ impl Default for Journal {
             submitted: BTreeMap::new(),
             watch_revision: 0,
             next_scan: 1,
+            pins: BTreeMap::new(),
+            invoices: BTreeMap::new(),
+            payments: BTreeMap::new(),
+            receipts: BTreeMap::new(),
+            wallet_scripts: BTreeSet::new(),
+            spendable: BTreeMap::new(),
+            sweeps: BTreeMap::new(),
+            closing: BTreeMap::new(),
         }
     }
 }
@@ -111,7 +230,7 @@ impl Default for Journal {
 struct Services {
     store: Arc<FilesystemStore>,
     journal: Mutex<Journal>,
-    fee: u32,
+    fee: AtomicU32,
     failed: AtomicBool,
 }
 
@@ -166,7 +285,7 @@ impl Services {
 
 impl FeeEstimator for Services {
     fn get_est_sat_per_1000_weight(&self, _: ConfirmationTarget) -> u32 {
-        self.fee
+        self.fee.load(Ordering::Relaxed)
     }
 }
 impl BroadcasterInterface for Services {
@@ -201,6 +320,7 @@ impl Filter for Services {
 
 #[derive(Default)]
 struct SocketState {
+    sequence: u64,
     bytes: Vec<u8>,
     resume_read: bool,
     closed: bool,
@@ -289,6 +409,36 @@ pub enum Command {
         block_hash: String,
         height: u32,
     },
+    PinPeer {
+        node_id: String,
+        kem_key: String,
+        signature_key: String,
+    },
+    CreateInvoice {
+        request_id: String,
+        amount_msat: u64,
+    },
+    PayInvoice {
+        invoice: String,
+        amount_msat: u64,
+        max_fee_msat: u64,
+    },
+    CloseChannel {
+        channel_id: String,
+        node_id: String,
+        script: String,
+    },
+    ForceClose {
+        channel_id: String,
+        node_id: String,
+    },
+    SweepOutputs {
+        event_id: String,
+        script: String,
+    },
+    SetFee {
+        sat_per_kw: u32,
+    },
     Tick,
 }
 
@@ -302,6 +452,10 @@ pub struct Engine {
     tip: BlockLocator,
     recovering: Vec<ChannelMonitor<InMemorySigner>>,
     recovery_height: u32,
+    last_forward: Instant,
+    next_forward: Duration,
+    last_peer_tick: Instant,
+    last_manager_tick: Instant,
     _lock: File,
     pub poisoned: bool,
 }
@@ -363,7 +517,7 @@ impl Engine {
         let services = Arc::new(Services {
             store: store.clone(),
             journal: Mutex::new(journal),
-            fee: config.fee_sat_per_kw,
+            fee: AtomicU32::new(config.fee_sat_per_kw),
             failed: AtomicBool::new(false),
         });
         let logger = Arc::new(QuietLogger);
@@ -383,13 +537,16 @@ impl Engine {
             graph.clone(),
             logger.clone(),
         )));
-        let router = Arc::new(DefaultRouter::new(
-            graph.clone(),
-            logger.clone(),
-            keys.clone(),
-            scorer,
-            ProbabilisticScoringFeeParameters::default(),
-        ));
+        let router = Arc::new(PinnedRouter {
+            services: services.clone(),
+            base: DefaultRouter::new(
+                graph.clone(),
+                logger.clone(),
+                keys.clone(),
+                scorer,
+                ProbabilisticScoringFeeParameters::default(),
+            ),
+        });
         let message_router = Arc::new(DefaultMessageRouter::new(graph, keys.clone()));
         let mut config = UserConfig::default();
         // Initial regtest channel type avoids anchor wallet/package fee-bumping
@@ -398,6 +555,10 @@ impl Engine {
             .channel_handshake_config
             .negotiate_anchors_zero_fee_htlc_tx = false;
         config.channel_handshake_config.announce_for_forwarding = false;
+        // Swift supplies a fresh Winnow destination when the user closes.
+        config
+            .channel_handshake_config
+            .commit_upfront_shutdown_pubkey = false;
         config.require_post_quantum_payments = true;
         config.require_post_quantum_inbound = true;
         let monitors = read_channel_monitors(store.clone(), keys.clone(), keys.clone())
@@ -484,6 +645,10 @@ impl Engine {
             tip,
             recovering,
             recovery_height,
+            last_forward: Instant::now(),
+            next_forward: Duration::from_millis(150),
+            last_peer_tick: Instant::now(),
+            last_manager_tick: Instant::now(),
             _lock: lock,
             poisoned: false,
         };
@@ -512,10 +677,28 @@ impl Engine {
                 Event::OpenChannelRequest {
                     temporary_channel_id,
                     counterparty_node_id,
+                    channel_type,
+                    channel_negotiation_type,
+                    funding_satoshis,
+                    is_announced,
                     ..
                 } => {
-                    if self.manager.list_channels().len() >= 8 {
-                        return Err(ReplayEvent());
+                    if self.manager.list_channels().len() >= 8
+                        || is_announced
+                        || !(20_000..=16_777_215).contains(&funding_satoshis)
+                        || channel_type.supports_anchors_zero_fee_htlc_tx()
+                        || channel_type.supports_anchors_nonzero_fee_htlc_tx()
+                        || channel_type.supports_zero_conf()
+                        || matches!(channel_negotiation_type, InboundChannelFunds::DualFunded)
+                    {
+                        self.manager
+                            .force_close_broadcasting_latest_txn(
+                                &temporary_channel_id,
+                                &counterparty_node_id,
+                                "Unsupported research channel type or capacity".into(),
+                            )
+                            .map_err(|_| ReplayEvent())?;
+                        return Ok(());
                     }
                     let id = u128::from_be_bytes(
                         self.keys.get_secure_random_bytes()[..16]
@@ -552,6 +735,104 @@ impl Engine {
                 }
                 Event::ChannelClosed { channel_id, .. } => {
                     json!({"kind":"channel_closed", "channel_id":channel_id.to_string()})
+                }
+                Event::SpendableOutputs {
+                    outputs,
+                    channel_id,
+                    ..
+                } => {
+                    let native_outputs: Vec<_> = outputs
+                        .iter()
+                        .filter(|output| {
+                            if let SpendableOutputDescriptor::StaticOutput { output, .. } = output {
+                                !self
+                                    .services
+                                    .journal
+                                    .lock()
+                                    .unwrap()
+                                    .wallet_scripts
+                                    .contains(&hex::encode(output.script_pubkey.as_bytes()))
+                            } else {
+                                true
+                            }
+                        })
+                        .map(|output| hex::encode(output.encode()))
+                        .collect();
+                    if native_outputs.is_empty() {
+                        return Ok(());
+                    }
+                    let id =
+                        <sha256::Hash as Hash>::hash(&serde_json::to_vec(&native_outputs).unwrap())
+                            .to_string();
+                    if self
+                        .services
+                        .journal
+                        .lock()
+                        .unwrap()
+                        .sweeps
+                        .contains_key(&id)
+                    {
+                        return Ok(());
+                    }
+                    self.services
+                        .update(|j| {
+                            j.spendable.insert(id.clone(), native_outputs);
+                        })
+                        .map_err(|_| ReplayEvent())?;
+                    json!({"kind":"sweep_required", "output_id":id, "channel_id":channel_id.map(|c| c.to_string())})
+                }
+                Event::PaymentClaimable { purpose, .. } => {
+                    let preimage = purpose.preimage().ok_or(ReplayEvent())?;
+                    self.manager.claim_funds(preimage);
+                    return Ok(());
+                }
+                Event::PaymentClaimed {
+                    payment_hash,
+                    amount_msat,
+                    ..
+                } => {
+                    json!({"kind":"payment_received", "payment_hash":payment_hash.to_string(), "amount_msat":amount_msat})
+                }
+                Event::PaymentSent {
+                    payment_hash,
+                    payment_preimage,
+                    amount_msat,
+                    fee_paid_msat,
+                    ..
+                } => {
+                    let hash = payment_hash.to_string();
+                    self.services
+                        .update(|j| {
+                            j.receipts
+                                .insert(hash.clone(), hex::encode(payment_preimage.0));
+                            if let Some(record) = j.payments.get_mut(&hash) {
+                                record["state"] = json!("sent");
+                                record["fee_paid_msat"] = json!(fee_paid_msat);
+                            }
+                        })
+                        .map_err(|_| ReplayEvent())?;
+                    json!({"kind":"payment_sent", "payment_hash":hash, "amount_msat":amount_msat, "fee_paid_msat":fee_paid_msat})
+                }
+                Event::PaymentFailed { payment_hash, .. } => {
+                    let hash = payment_hash.ok_or(ReplayEvent())?.to_string();
+                    let mut sent = false;
+                    self.services
+                        .update(|j| {
+                            sent = j.receipts.contains_key(&hash);
+                            if !sent {
+                                if let Some(record) = j.payments.get_mut(&hash) {
+                                    record["state"] = json!("failed");
+                                }
+                            }
+                        })
+                        .map_err(|_| ReplayEvent())?;
+                    if sent {
+                        return Ok(());
+                    }
+                    json!({"kind":"payment_failed", "payment_hash":hash})
+                }
+                Event::PaymentPathSuccessful { .. } | Event::PaymentPathFailed { .. } => {
+                    return Ok(())
                 }
                 // Preserve unimplemented event types in LDK for replay. Never
                 // claim that spendable outputs or payment claims were handled.
@@ -653,6 +934,7 @@ impl Engine {
     pub fn status(&self) -> Value {
         let journal = self.services.journal.lock().unwrap();
         json!({"abi":1, "core_revision":crate::CORE_REVISION, "network":"regtest",
+            "fee_sat_per_kw":self.services.fee.load(Ordering::Relaxed),
             "node_id":self.keys.get_node_id(Recipient::Node).unwrap().to_string(),
             "kem_key":self.keys.get_pq_kem_node_id().map(hex::encode),
             "signature_key":self.keys.get_pq_node_id().map(hex::encode),
@@ -663,6 +945,8 @@ impl Engine {
                 .map(|p| json!({"height":p.height,"block_hash":p.block_hash.to_string(),
                     "previous_blocks":p.previous_blocks.map(|h| h.map(|v| v.to_string()))})).collect::<Vec<_>>(),
             "events":journal.events, "watches":journal.watches,
+            "invoices":journal.invoices, "payments":journal.payments, "sweeps":journal.sweeps,
+            "close_destinations":journal.closing.iter().map(|(id, intent)| (id.clone(), intent["script"].clone())).collect::<BTreeMap<_,_>>(),
             "peers":self.peers.list_peers().iter().map(|p| p.counterparty_node_id.to_string()).collect::<Vec<_>>(),
             "channels":self.manager.list_channels().iter().map(|c| json!({
                 "channel_id":c.channel_id.to_string(), "node_id":c.counterparty.node_id.to_string(),
@@ -697,6 +981,11 @@ impl Engine {
                 | Command::OpenChannel { .. }
                 | Command::SubmitFunding { .. }
                 | Command::Tick
+                | Command::CreateInvoice { .. }
+                | Command::PayInvoice { .. }
+                | Command::CloseChannel { .. }
+                | Command::ForceClose { .. }
+                | Command::SweepOutputs { .. }
         ) && (!self.recovering.is_empty()
             || self.services.journal.lock().unwrap().next_scan <= self.tip.height)
         {
@@ -710,6 +999,18 @@ impl Engine {
                 kem_key,
             } => {
                 let node = PublicKey::from_str(&node_id).map_err(|_| "invalid node id")?;
+                if let Some(pin) = self
+                    .services
+                    .journal
+                    .lock()
+                    .unwrap()
+                    .pins
+                    .get(&node.to_string())
+                {
+                    if pin.kem_key != kem_key.to_lowercase() {
+                        return Err("peer key differs from pin".into());
+                    }
+                }
                 let kem = hex::decode(kem_key)
                     .map_err(|_| "invalid KEM pin")?
                     .try_into()
@@ -764,8 +1065,10 @@ impl Engine {
                 amount_sat,
                 user_channel_id,
             } => {
-                if !(20_000..=16_777_215).contains(&amount_sat) {
-                    return Err("invalid regtest channel capacity".into());
+                if !(20_000..=16_777_215).contains(&amount_sat)
+                    || self.manager.list_channels().len() >= 8
+                {
+                    return Err("invalid regtest channel capacity or channel limit".into());
                 }
                 self.manager
                     .create_channel(
@@ -900,9 +1203,309 @@ impl Engine {
                     .fold(self.tip.height, u32::max);
                 self.services.update(|j| j.next_scan = 1)?;
             }
+            Command::PinPeer {
+                node_id,
+                kem_key,
+                signature_key,
+            } => {
+                let node = PublicKey::from_str(&node_id)
+                    .map_err(|_| "invalid node id")?
+                    .to_string();
+                if hex::decode(&kem_key).map_err(|_| "invalid KEM key")?.len() != 1184
+                    || hex::decode(&signature_key)
+                        .map_err(|_| "invalid signature key")?
+                        .len()
+                        != 1312
+                {
+                    return Err("invalid PQ key lengths".into());
+                }
+                let pin = PeerPin {
+                    kem_key: kem_key.to_lowercase(),
+                    signature_key: signature_key.to_lowercase(),
+                };
+                if let Some(saved) = self.services.journal.lock().unwrap().pins.get(&node) {
+                    if *saved != pin {
+                        return Err("peer keys differ from pin".into());
+                    }
+                }
+                self.services.update(|j| {
+                    j.pins.insert(node, pin);
+                })?;
+            }
+            Command::CreateInvoice {
+                request_id,
+                amount_msat,
+            } => {
+                if request_id.is_empty()
+                    || request_id.len() > 128
+                    || !(1..=1_000_000_000).contains(&amount_msat)
+                {
+                    return Err("invalid invoice request".into());
+                }
+                let existing = self
+                    .services
+                    .journal
+                    .lock()
+                    .unwrap()
+                    .invoices
+                    .get(&request_id)
+                    .cloned();
+                if let Some(saved) = existing {
+                    if saved["amount_msat"].as_u64() != Some(amount_msat) {
+                        return Err("invoice request changed".into());
+                    }
+                } else {
+                    let invoice = self
+                        .manager
+                        .create_bolt11_invoice(Bolt11InvoiceParameters {
+                            amount_msats: Some(amount_msat),
+                            invoice_expiry_delta_secs: Some(3600),
+                            ..Default::default()
+                        })
+                        .map_err(|_| "could not create invoice")?;
+                    self.services.update(|j| { j.invoices.insert(request_id, json!({"invoice":invoice.to_string(),
+                        "amount_msat":amount_msat,"payment_hash":invoice.payment_hash().to_string()})); })?;
+                }
+            }
+            Command::PayInvoice {
+                invoice,
+                amount_msat,
+                max_fee_msat,
+            } => {
+                if invoice.len() > 32768
+                    || !(1..=1_000_000_000).contains(&amount_msat)
+                    || max_fee_msat > amount_msat
+                {
+                    return Err("invalid payment limits".into());
+                }
+                let parsed = Bolt11Invoice::from_str(&invoice).map_err(|_| "invalid invoice")?;
+                if parsed.currency() != Currency::Regtest
+                    || parsed.amount_milli_satoshis() != Some(amount_msat)
+                {
+                    return Err("invoice network or amount mismatch".into());
+                }
+                let pin = self
+                    .services
+                    .journal
+                    .lock()
+                    .unwrap()
+                    .pins
+                    .get(&parsed.get_payee_pub_key().to_string())
+                    .cloned()
+                    .ok_or("invoice payee needs pinned PQ keys")?;
+                let trusted_key: [u8; 1312] = hex::decode(&pin.signature_key)
+                    .map_err(|_| "invalid pin")?
+                    .try_into()
+                    .map_err(|_| "invalid pin length")?;
+                if !matches!(
+                    lightning::ln::invoice_utils::verify_bolt11_pq_signature(
+                        &parsed,
+                        Some(&trusted_key),
+                        &QuietLogger
+                    ),
+                    lightning::ln::invoice_utils::Bolt11PqVerification::Verified
+                ) {
+                    return Err("invoice PQ signature does not match pin".into());
+                }
+                let hash = parsed.payment_hash().to_string();
+                let id = PaymentId(parsed.payment_hash().0);
+                let existing = self
+                    .services
+                    .journal
+                    .lock()
+                    .unwrap()
+                    .payments
+                    .get(&hash)
+                    .cloned();
+                if let Some(ref saved) = existing {
+                    if saved["invoice"] != invoice
+                        || saved["max_fee_msat"].as_u64() != Some(max_fee_msat)
+                    {
+                        return Err("payment request changed".into());
+                    }
+                }
+                let tracked = self.manager.list_recent_payments().iter().any(|payment| {
+                    let payment_id = match payment {
+                        RecentPaymentDetails::AwaitingInvoice { payment_id }
+                        | RecentPaymentDetails::Pending { payment_id, .. }
+                        | RecentPaymentDetails::Fulfilled { payment_id, .. }
+                        | RecentPaymentDetails::Abandoned { payment_id, .. } => payment_id,
+                    };
+                    *payment_id == id
+                });
+                let complete = existing
+                    .as_ref()
+                    .is_some_and(|v| v["state"] == "sent" || v["state"] == "failed");
+                if !tracked && !complete {
+                    self.services.update(|j| {
+                        j.payments.insert(
+                            hash.clone(),
+                            json!({"invoice":invoice,
+                        "amount_msat":amount_msat,"max_fee_msat":max_fee_msat,"state":"pending"}),
+                        );
+                    })?;
+                    let mut params = OptionalBolt11PaymentParams::default();
+                    params.trusted_pq_key = Some(trusted_key);
+                    params.retry_strategy = Retry::Timeout(Duration::from_secs(10));
+                    params.route_params_config.max_total_routing_fee_msat = Some(max_fee_msat);
+                    if let Err(error) = self
+                        .manager
+                        .pay_for_bolt11_invoice(&parsed, id, None, params)
+                    {
+                        self.services.update(|j| {
+                            j.payments.get_mut(&hash).unwrap()["state"] = json!("failed");
+                        })?;
+                        return Err(format!("payment rejected: {error:?}"));
+                    }
+                }
+            }
+            Command::CloseChannel {
+                channel_id,
+                node_id,
+                script,
+            } => {
+                let id = parse_channel_id(&channel_id)?;
+                let node = PublicKey::from_str(&node_id).map_err(|_| "invalid node id")?;
+                let destination = wallet_script(&script)?;
+                let intent = json!({"node_id":node.to_string(), "script":script.to_lowercase()});
+                let existing = self
+                    .services
+                    .journal
+                    .lock()
+                    .unwrap()
+                    .closing
+                    .get(&channel_id)
+                    .cloned();
+                if existing.as_ref().is_some_and(|saved| *saved != intent) {
+                    return Err("close destination changed".into());
+                }
+                if self
+                    .manager
+                    .list_channels()
+                    .iter()
+                    .any(|c| c.channel_id == id && c.counterparty.node_id == node)
+                {
+                    self.services.update(|j| {
+                        j.wallet_scripts.insert(script.to_lowercase());
+                        j.closing.insert(channel_id, intent);
+                    })?;
+                    let shutdown = lightning::ln::script::ShutdownScript::try_from(destination)
+                        .map_err(|_| "invalid shutdown script")?;
+                    self.manager
+                        .close_channel_with_feerate_and_script(
+                            &id,
+                            &node,
+                            Some(self.services.fee.load(Ordering::Relaxed)),
+                            Some(shutdown),
+                        )
+                        .map_err(|e| format!("close rejected: {e:?}"))?;
+                } else if existing.is_none() {
+                    return Err("unknown channel".into());
+                }
+            }
+            Command::ForceClose {
+                channel_id,
+                node_id,
+            } => {
+                let id = parse_channel_id(&channel_id)?;
+                let node = PublicKey::from_str(&node_id).map_err(|_| "invalid node id")?;
+                self.manager
+                    .force_close_broadcasting_latest_txn(&id, &node, "Winnow regtest close".into())
+                    .map_err(|e| format!("force close rejected: {e:?}"))?;
+            }
+            Command::SweepOutputs { event_id, script } => {
+                let destination = wallet_script(&script)?;
+                let existing = self
+                    .services
+                    .journal
+                    .lock()
+                    .unwrap()
+                    .sweeps
+                    .get(&event_id)
+                    .cloned();
+                let raw = if let Some(saved) = existing {
+                    if saved["script"] != script.to_lowercase() {
+                        return Err("sweep destination changed".into());
+                    }
+                    saved["transaction"]
+                        .as_str()
+                        .ok_or("damaged sweep")?
+                        .to_string()
+                } else {
+                    let outputs = self
+                        .services
+                        .journal
+                        .lock()
+                        .unwrap()
+                        .spendable
+                        .get(&event_id)
+                        .cloned()
+                        .ok_or("unknown spendable outputs")?;
+                    let descriptors: Vec<SpendableOutputDescriptor> = outputs
+                        .iter()
+                        .map(|value| {
+                            let bytes =
+                                hex::decode(value).map_err(|_| "damaged output descriptor")?;
+                            SpendableOutputDescriptor::read(&mut bitcoin::io::Cursor::new(bytes))
+                                .map_err(|_| "invalid output descriptor")
+                        })
+                        .collect::<std::result::Result<_, _>>()?;
+                    let descriptors = descriptors.iter().collect::<Vec<_>>();
+                    let tx = self
+                        .keys
+                        .spend_spendable_outputs(
+                            &descriptors,
+                            Vec::new(),
+                            destination,
+                            self.services.fee.load(Ordering::Relaxed),
+                            Some(
+                                bitcoin::absolute::LockTime::from_height(self.tip.height)
+                                    .map_err(|_| "invalid height")?,
+                            ),
+                            &bitcoin::secp256k1::Secp256k1::new(),
+                        )
+                        .map_err(|_| "could not sign channel sweep")?;
+                    let raw = hex::encode(serialize(&tx));
+                    raw
+                };
+                let broadcast = json!({"kind":"broadcast", "transactions":[raw]});
+                let broadcast_id =
+                    <sha256::Hash as Hash>::hash(&serde_json::to_vec(&broadcast).unwrap())
+                        .to_string();
+                self.services.update(|j| {
+                    j.wallet_scripts.insert(script.to_lowercase());
+                    j.sweeps.insert(
+                        event_id.clone(),
+                        json!({"script":script.to_lowercase(),"transaction":raw}),
+                    );
+                    j.events.insert(broadcast_id, broadcast);
+                    j.events.retain(|_, event| {
+                        event["kind"] != "sweep_required" || event["output_id"] != event_id
+                    });
+                })?;
+            }
+            Command::SetFee { sat_per_kw } => {
+                if !(253..=2_500_000).contains(&sat_per_kw) {
+                    return Err("invalid sat/kw fee".into());
+                }
+                self.services.fee.store(sat_per_kw, Ordering::Relaxed);
+            }
             Command::Tick => {
-                self.manager.timer_tick_occurred();
-                self.peers.timer_tick_occurred();
+                if self.last_forward.elapsed() >= self.next_forward {
+                    self.manager.process_pending_htlc_forwards();
+                    self.last_forward = Instant::now();
+                    self.next_forward = Duration::from_millis(
+                        100 + u64::from(self.keys.get_secure_random_bytes()[0]) % 100,
+                    );
+                }
+                if self.last_peer_tick.elapsed() >= Duration::from_secs(30) {
+                    self.peers.timer_tick_occurred();
+                    self.last_peer_tick = Instant::now();
+                }
+                if self.last_manager_tick.elapsed() >= Duration::from_secs(60) {
+                    self.manager.timer_tick_occurred();
+                    self.last_manager_tick = Instant::now();
+                }
             }
             Command::Drain => {}
         }
@@ -923,7 +1526,12 @@ impl Engine {
             // this returned data until its socket write completes or disconnects.
             let packet = {
                 let mut state = socket.state.lock().unwrap();
-                json!({"connection":socket.id, "bytes":hex::encode(std::mem::take(&mut state.bytes)),
+                let sequence = state.sequence;
+                state.sequence = state
+                    .sequence
+                    .checked_add(1)
+                    .expect("packet sequence exhausted");
+                json!({"connection":socket.id, "sequence":sequence, "bytes":hex::encode(std::mem::take(&mut state.bytes)),
                     "resume_read":state.resume_read, "closed":state.closed})
             };
             packets.push(packet);
@@ -934,4 +1542,20 @@ impl Engine {
         result["packets"] = json!(packets);
         Ok(result)
     }
+}
+
+fn parse_channel_id(value: &str) -> Result<ChannelId> {
+    Ok(ChannelId::from_bytes(
+        hex::decode(value)
+            .map_err(|_| "invalid channel id")?
+            .try_into()
+            .map_err(|_| "invalid channel id length")?,
+    ))
+}
+fn wallet_script(value: &str) -> Result<ScriptBuf> {
+    let script = ScriptBuf::from_bytes(hex::decode(value).map_err(|_| "invalid wallet script")?);
+    if !script.is_p2tr() {
+        return Err("Winnow destination must be P2TR".into());
+    }
+    Ok(script)
 }

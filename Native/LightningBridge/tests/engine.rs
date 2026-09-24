@@ -169,3 +169,47 @@ fn hybrid_handshake_funding_authorization_and_restart() {
         channels[0]["funding_txid"]
     );
 }
+
+#[test]
+fn journal_failure_stops_requests_until_reopen_without_publishing_candidate_state() {
+    let dir = TempDir::new().unwrap();
+    let mut engine = Engine::new(config(&dir), &[11; 32]).unwrap();
+    let journal = dir.path().join("winnow");
+    let saved = dir.path().join("saved-journal");
+    std::fs::rename(&journal, &saved).unwrap();
+    std::fs::write(&journal, b"injected storage failure").unwrap();
+    assert!(engine
+        .call(Command::CreateInvoice {
+            request_id: "failed".into(),
+            amount_msat: 1000
+        })
+        .is_err());
+    std::fs::remove_file(&journal).unwrap();
+    std::fs::rename(&saved, &journal).unwrap();
+    assert!(engine.call(Command::Status).is_err());
+    drop(engine);
+    let mut restored = Engine::new(config(&dir), &[11; 32]).unwrap();
+    assert!(restored.status()["invoices"]
+        .as_object()
+        .unwrap()
+        .is_empty());
+    assert!(restored
+        .call(Command::CreateInvoice {
+            request_id: "recovered".into(),
+            amount_msat: 1000
+        })
+        .is_ok());
+}
+
+#[test]
+fn fee_policy_updates_are_bounded_and_keep_explicit_sat_per_kw_units() {
+    let dir = TempDir::new().unwrap();
+    let mut engine = Engine::new(config(&dir), &[12; 32]).unwrap();
+    let updated = engine.call(Command::SetFee { sat_per_kw: 1250 }).unwrap();
+    assert_eq!(updated["fee_sat_per_kw"], 1250);
+    assert!(engine.call(Command::SetFee { sat_per_kw: 1 }).is_err());
+    assert_eq!(
+        engine.call(Command::Status).unwrap()["fee_sat_per_kw"],
+        1250
+    );
+}

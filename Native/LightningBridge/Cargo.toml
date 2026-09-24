@@ -9,6 +9,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [dependencies]
 lightning = { git = "https://github.com/ahmet-kurt/pq-rust-lightning", rev = "1d7dda453dd385f3ede84c39eed5d20afe34e02a", features = ["post-quantum"] }
+lightning-invoice = { git = "https://github.com/ahmet-kurt/pq-rust-lightning", rev = "1d7dda453dd385f3ede84c39eed5d20afe34e02a" }
 lightning-persister = { git = "https://github.com/ahmet-kurt/pq-rust-lightning", rev = "1d7dda453dd385f3ede84c39eed5d20afe34e02a" }
 bitcoin = "0.32.4"
 serde = { version = "1", features = ["derive"] }

@@ -101,4 +101,24 @@ struct FundingBridgeTests {
         }
         #expect(!FileManager.default.fileExists(atPath: dir.path))
     }
+    @Test("Invoices require an independently pinned PQ signature key")
+    func invoicePins() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let sender = try LightningEngine(seed: Data(repeating: 31, count: 32), storageURL: directory.appendingPathComponent("sender"), network: .regtest, feeRateSatPerVByte: 2)
+        let recipient = try LightningEngine(seed: Data(repeating: 32, count: 32), storageURL: directory.appendingPathComponent("recipient"), network: .regtest, feeRateSatPerVByte: 2)
+        defer { Task { await sender.close(); await recipient.close() } }
+        let peer = try await recipient.status()
+        let invoice = try #require(try await recipient.createInvoice(requestID: "pin-test", amountMsat: 10_000).invoices["pin-test"])
+        await #expect(throws: LightningError.native("invoice payee needs pinned PQ keys")) {
+            _ = try await sender.payInvoice(invoice.invoice, amountMsat: 10_000, maxFeeMsat: 0)
+        }
+        _ = try await sender.pinPeer(nodeID: peer.node_id, kemKey: peer.kem_key, signatureKey: Data(repeating: 0, count: 1312).hex)
+        await #expect(throws: LightningError.native("invoice PQ signature does not match pin")) {
+            _ = try await sender.payInvoice(invoice.invoice, amountMsat: 10_000, maxFeeMsat: 0)
+        }
+        #expect(try await sender.status().payments.isEmpty)
+        await sender.close(); await recipient.close()
+    }
+
 }

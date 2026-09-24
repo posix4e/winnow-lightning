@@ -1,7 +1,7 @@
 import Foundation
 import WalletCore
 
-public enum LightningChainError: Error {
+public enum LightningChainError: Error, Equatable {
     case busy, changedWatches, restartScan, missingHeader, recoveryRequired, catchUpDidNotConverge
 }
 

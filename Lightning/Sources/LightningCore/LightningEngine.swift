@@ -2,8 +2,17 @@ import Foundation
 import CLightningBridge
 import WalletCore
 
-public enum LightningError: Error, Equatable {
+public enum LightningError: Error, Equatable, LocalizedError {
     case invalidSeed, invalidFee, closed, invalidResponse, native(String)
+    public var errorDescription: String? {
+        switch self {
+        case .invalidSeed: "Invalid Lightning seed."
+        case .invalidFee: "Invalid Lightning fee rate."
+        case .closed: "Unlock the Lightning session before continuing."
+        case .invalidResponse: "The Lightning request or response is invalid."
+        case .native(let message): message
+        }
+    }
 }
 
 /// Values crossing ABI 1. Bitcoin hashes use display hex; transaction and
@@ -23,11 +32,31 @@ public struct LightningSnapshot: Decodable, Sendable {
     public let chain_positions: [LightningChainPosition]
     public let events: [String: LightningEvent]
     public let watches: [String: LightningWatch]
+    public let invoices: [String: LightningInvoice]
+    public let payments: [String: LightningPayment]
+    public let sweeps: [String: LightningSweep]
+    public let close_destinations: [String: String]
     public let peers: [String]
     public let channels: [LightningChannel]
     public let packets: [LightningPacket]?
 }
 
+public struct LightningSweep: Decodable, Sendable {
+    public let script: String
+    public let transaction: String
+}
+public struct LightningInvoice: Decodable, Sendable {
+    public let invoice: String
+    public let amount_msat: UInt64
+    public let payment_hash: String
+}
+public struct LightningPayment: Decodable, Sendable {
+    public let invoice: String
+    public let amount_msat: UInt64
+    public let max_fee_msat: UInt64
+    public let state: String
+    public let fee_paid_msat: UInt64?
+}
 public struct LightningChainPosition: Decodable, Sendable {
     public let height: UInt32
     public let block_hash: String
@@ -42,6 +71,10 @@ public struct LightningEvent: Decodable, Sendable {
     public let script: String?
     public let transactions: [String]?
     public let channel_id: String?
+    public let payment_hash: String?
+    public let output_id: String?
+    public let amount_msat: UInt64?
+    public let fee_paid_msat: UInt64?
 
     public var fundingRequestID: String? {
         // Winnow's bounded request identifier: channel ids are random 32-byte
@@ -67,6 +100,7 @@ public struct LightningChannel: Decodable, Sendable {
 }
 public struct LightningPacket: Decodable, Sendable {
     public let connection: UInt64
+    public let sequence: UInt64
     public let bytes: String
     public let resume_read: Bool
     public let closed: Bool
@@ -111,6 +145,18 @@ public actor LightningEngine {
 
     public func status() throws -> LightningSnapshot { try call(Request(command: "status")) }
     public func drain() throws -> LightningSnapshot { try call(Request(command: "drain")) }
+    public func pinPeer(nodeID: String, kemKey: String, signatureKey: String) throws -> LightningSnapshot {
+        try call(Request(command: "pin_peer", node_id: nodeID, kem_key: kemKey, signature_key: signatureKey))
+    }
+    public func createInvoice(requestID: String, amountMsat: UInt64) throws -> LightningSnapshot {
+        try call(Request(command: "create_invoice", request_id: requestID, amount_msat: amountMsat))
+    }
+    public func payInvoice(_ invoice: String, amountMsat: UInt64, maxFeeMsat: UInt64) throws -> LightningSnapshot {
+        try call(Request(command: "pay_invoice", amount_msat: amountMsat, invoice: invoice, max_fee_msat: maxFeeMsat))
+    }
+    public func setFeeRate(_ satPerVByte: Double) throws -> LightningSnapshot {
+        try call(Request(command: "set_fee", sat_per_kw: Self.satPerKW(satPerVByte)))
+    }
     public func tick() throws -> LightningSnapshot { try call(Request(command: "tick")) }
     public func accept(connection: UInt64) throws -> LightningSnapshot {
         try call(Request(command: "accept", connection: connection))
@@ -136,6 +182,16 @@ public actor LightningEngine {
         return try call(Request(command: "submit_funding", node_id: nodeID,
                                 temporary_channel_id: reservation.requestID,
                                 transaction: reservation.rawTransaction.hex))
+    }
+    public func closeChannel(_ channel: LightningChannel, destinationScript: Data) throws -> LightningSnapshot {
+        try call(Request(command: "close_channel", node_id: channel.node_id,
+                         channel_id: channel.channel_id, script: destinationScript.hex))
+    }
+    public func forceClose(_ channel: LightningChannel) throws -> LightningSnapshot {
+        try call(Request(command: "force_close", node_id: channel.node_id, channel_id: channel.channel_id))
+    }
+    public func sweepOutputs(outputID: String, destinationScript: Data) throws -> LightningSnapshot {
+        try call(Request(command: "sweep_outputs", event_id: outputID, script: destinationScript.hex))
     }
     public func acknowledge(eventID: String) throws -> LightningSnapshot {
         try call(Request(command: "acknowledge", event_id: eventID))
@@ -195,5 +251,13 @@ public actor LightningEngine {
         var block_hash: String? = nil
         var header: String? = nil
         var watch_revision: UInt64? = nil
+        var signature_key: String? = nil
+        var request_id: String? = nil
+        var amount_msat: UInt64? = nil
+        var invoice: String? = nil
+        var max_fee_msat: UInt64? = nil
+        var channel_id: String? = nil
+        var script: String? = nil
+        var sat_per_kw: UInt32? = nil
     }
 }

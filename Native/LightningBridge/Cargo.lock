@@ -698,6 +698,7 @@ dependencies = [
  "fs2",
  "hex",
  "lightning",
+ "lightning-invoice",
  "lightning-persister",
  "serde",
  "serde_json",
