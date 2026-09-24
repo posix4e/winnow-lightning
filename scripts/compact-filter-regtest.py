@@ -106,7 +106,6 @@ def main():
             return subprocess.check_output(
                 ["bitcoin-cli", f"-datadir={bitcoin_dir}", "-regtest", f"-rpcport={rpc_port}", *args],
                 text=True,
-                stderr=subprocess.DEVNULL,
             ).strip()
 
         def second(*args):
@@ -229,20 +228,40 @@ def main():
             output, log = run_client(f"test-watch {late_address}\nsync\nquit\n")
             assert "test watch registered" in output, output
             assert "Bitcoin watch replayed from height 105 through 106" in log, log[-3000:]
+            assert "Bitcoin compact filter cache loaded through height 106" in log, log[-3000:]
+            downloaded = re.findall(r"Bitcoin compact filter bodies downloaded since startup: (\d+)", log)
+            assert downloaded and int(downloaded[-1]) == 0, downloaded
             replay_counts = re.findall(r"Bitcoin compact filters: (\d+) header-only blocks, (\d+) full blocks downloaded", log)
             assert replay_counts and int(replay_counts[-1][1]) >= 1, replay_counts
             with sqlite3.connect(archive) as db:
                 assert db.execute("SELECT COUNT(*) FROM filters").fetchone()[0] == 106
             successful_replays = log.count("Bitcoin watch replayed from height")
 
+            old_tip = btc("getblockhash", "106")
+            btc("invalidateblock", old_tip)
+            btc("generatetoaddress", "2", btc("getnewaddress"))
+            for _ in range(120):
+                if second("getbestblockhash") == btc("getbestblockhash"):
+                    break
+                time.sleep(0.25)
+            else:
+                raise RuntimeError("second peer did not accept offline reorganization")
+            _, log = run_client("sync\nquit\n")
+            downloaded = re.findall(r"Bitcoin compact filter bodies downloaded since startup: (\d+)", log)
+            assert downloaded and int(downloaded[-1]) == 2, downloaded
+            with sqlite3.connect(archive) as db:
+                assert db.execute("SELECT COUNT(*) FROM filters WHERE height = 106").fetchone()[0] == 2
+
             def corrupt_archive():
                 with sqlite3.connect(archive) as db:
-                    db.execute("UPDATE filters SET contents = x'00' WHERE height = 105")
+                    db.execute("UPDATE filters SET contents = x'00' WHERE block_hash = ?", (bytes.fromhex(old_tip)[::-1],))
 
             _, log = run_client(f"test-watch {late_address}\nsync\nquit\n", after_sync=corrupt_archive)
             assert log.count("Bitcoin watch replayed from height") == successful_replays, "corrupt cached filter was accepted"
             print("compact filters skipped unrelated blocks and downloaded the wallet match")
             print("a late script watch replayed its earlier funding block")
+            print("a restart reused all 106 archived filter bodies without downloading them again")
+            print("an offline reorganization fetched only two replacement filters")
             print("a corrupted archived filter failed closed")
             print("a tampered second peer prevented initial sync")
             print(f"first sync: {counts[0]}; funded sync: {counts[-1]}")

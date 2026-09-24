@@ -38,7 +38,7 @@ index 0110c02..787d47e 100755
 +lightning-macros = { path = "../pq-rust-lightning/lightning-macros" }
 +lightning-dns-resolver = { path = "../pq-rust-lightning/lightning-dns-resolver" }
 diff --git a/src/builder.rs b/src/builder.rs
-index b85c717..583b724 100644
+index b85c717..7d82b02 100644
 --- a/src/builder.rs
 +++ b/src/builder.rs
 @@ -112,6 +112,8 @@ const PERSISTER_MAX_PENDING_UPDATES: u64 = 100;
@@ -79,20 +79,24 @@ index b85c717..583b724 100644
  #[cfg(all(feature = "uniffi", feature = "chain-esplora"))]
  impl ArcedNodeBuilder {
  	/// Configures the [`Node`] instance to source its chain data from the given Esplora server.
-@@ -1577,6 +1594,11 @@ fn build_with_store_internal(
+@@ -1577,6 +1594,15 @@ fn build_with_store_internal(
  	};
  
  	let (chain_source, chain_tip_opt) = match chain_data_source_config {
 +		#[cfg(feature = "chain-p2p")]
 +		Some(ChainDataSourceConfig::P2p { peer }) => ChainSource::new_p2p(
-+			peer.clone(), Arc::clone(&fee_estimator), Arc::clone(&tx_broadcaster),
-+			Arc::clone(&config), Arc::clone(&logger),
-+		).map_err(|()| BuildError::ChainSourceSetupFailed)?,
++			peer.clone(),
++			Arc::clone(&fee_estimator),
++			Arc::clone(&tx_broadcaster),
++			Arc::clone(&config),
++			Arc::clone(&logger),
++		)
++		.map_err(|()| BuildError::ChainSourceSetupFailed)?,
  		#[cfg(feature = "chain-esplora")]
  		Some(ChainDataSourceConfig::Esplora { server_url, headers, sync_config }) => {
  			let sync_config = sync_config.unwrap_or(EsploraSyncConfig::default());
 diff --git a/src/chain/mod.rs b/src/chain/mod.rs
-index f01c1c8..88ea86e 100644
+index f01c1c8..d846b57 100644
 --- a/src/chain/mod.rs
 +++ b/src/chain/mod.rs
 @@ -11,6 +11,8 @@ pub(crate) mod bitcoind;
@@ -113,7 +117,7 @@ index f01c1c8..88ea86e 100644
  #[cfg(feature = "chain-bitcoind")]
  use crate::config::BitcoindRestClientConfig;
  #[cfg(feature = "chain-electrum")]
-@@ -157,9 +161,25 @@ enum ChainSourceKind {
+@@ -157,9 +161,35 @@ enum ChainSourceKind {
  	Electrum(ElectrumChainSource),
  	#[cfg(feature = "chain-bitcoind")]
  	Bitcoind(BitcoindChainSource),
@@ -124,7 +128,9 @@ index f01c1c8..88ea86e 100644
  impl ChainSource {
 +	#[cfg(feature = "chain-p2p-test-hooks")]
 +	pub(crate) fn test_watch_script(&self, script: bitcoin::ScriptBuf) {
-+		if let ChainSourceKind::P2p(source) = &self.kind { source.register_tx(&script); }
++		if let ChainSourceKind::P2p(source) = &self.kind {
++			source.register_tx(&script);
++		}
 +	}
 +
 +	#[cfg(feature = "chain-p2p")]
@@ -133,13 +139,21 @@ index f01c1c8..88ea86e 100644
 +		config: Arc<Config>, logger: Arc<Logger>,
 +	) -> Result<(Self, Option<BlockLocator>), ()> {
 +		let source = P2pChainSource::new(peer, fee_estimator, config, Arc::clone(&logger))?;
-+		Ok((Self { kind: ChainSourceKind::P2p(source), registered_txids: Mutex::new(HashSet::new()), tx_broadcaster, logger }, None))
++		Ok((
++			Self {
++				kind: ChainSourceKind::P2p(source),
++				registered_txids: Mutex::new(HashSet::new()),
++				tx_broadcaster,
++				logger,
++			},
++			None,
++		))
 +	}
 +
  	#[cfg(feature = "chain-esplora")]
  	pub(crate) fn new_esplora(
  		server_url: String, headers: HashMap<String, String>, sync_config: EsploraSyncConfig,
-@@ -254,6 +274,8 @@ impl ChainSource {
+@@ -254,6 +284,8 @@ impl ChainSource {
  
  	pub(crate) fn start(&self, runtime: Arc<Runtime>) -> Result<(), Error> {
  		match &self.kind {
@@ -148,7 +162,7 @@ index f01c1c8..88ea86e 100644
  			#[cfg(feature = "chain-electrum")]
  			ChainSourceKind::Electrum(electrum_chain_source) => electrum_chain_source.start(runtime)?,
  			_ => {
-@@ -265,6 +287,8 @@ impl ChainSource {
+@@ -265,6 +297,8 @@ impl ChainSource {
  
  	pub(crate) fn stop(&self) {
  		match &self.kind {
@@ -157,7 +171,7 @@ index f01c1c8..88ea86e 100644
  			#[cfg(feature = "chain-electrum")]
  			ChainSourceKind::Electrum(electrum_chain_source) => electrum_chain_source.stop(),
  			_ => {
-@@ -275,6 +299,8 @@ impl ChainSource {
+@@ -275,6 +309,8 @@ impl ChainSource {
  
  	pub(crate) fn begin_shutdown(&self) {
  		match &self.kind {
@@ -166,7 +180,7 @@ index f01c1c8..88ea86e 100644
  			#[cfg(feature = "chain-electrum")]
  			ChainSourceKind::Electrum(electrum_chain_source) => electrum_chain_source.begin_shutdown(),
  			_ => {
-@@ -306,6 +332,8 @@ impl ChainSource {
+@@ -306,6 +342,8 @@ impl ChainSource {
  			ChainSourceKind::Electrum { .. } => true,
  			#[cfg(feature = "chain-bitcoind")]
  			ChainSourceKind::Bitcoind { .. } => false,
@@ -175,16 +189,26 @@ index f01c1c8..88ea86e 100644
  		}
  	}
  
-@@ -315,6 +343,8 @@ impl ChainSource {
+@@ -315,6 +353,18 @@ impl ChainSource {
  		output_sweeper: Arc<Sweeper>,
  	) {
  		match &self.kind {
 +			#[cfg(feature = "chain-p2p")]
-+			ChainSourceKind::P2p(source) => source.continuously_sync_wallets(stop_sync_receiver, onchain_wallet, channel_manager, chain_monitor, output_sweeper).await,
++			ChainSourceKind::P2p(source) => {
++				source
++					.continuously_sync_wallets(
++						stop_sync_receiver,
++						onchain_wallet,
++						channel_manager,
++						chain_monitor,
++						output_sweeper,
++					)
++					.await
++			},
  			#[cfg(feature = "chain-esplora")]
  			ChainSourceKind::Esplora(esplora_chain_source) => {
  				if let Some(background_sync_config) =
-@@ -457,6 +487,8 @@ impl ChainSource {
+@@ -457,6 +507,8 @@ impl ChainSource {
  				// `ChainPoller`. So nothing to do here.
  				unreachable!("Onchain wallet will be synced via chain polling")
  			},
@@ -193,7 +217,7 @@ index f01c1c8..88ea86e 100644
  		}
  	}
  
-@@ -485,6 +517,8 @@ impl ChainSource {
+@@ -485,6 +537,8 @@ impl ChainSource {
  				// `ChainPoller`. So nothing to do here.
  				unreachable!("Lightning wallet will be synced via chain polling")
  			},
@@ -202,16 +226,25 @@ index f01c1c8..88ea86e 100644
  		}
  	}
  
-@@ -496,6 +530,8 @@ impl ChainSource {
+@@ -496,6 +550,17 @@ impl ChainSource {
  		let _ = (&onchain_wallet, &channel_manager, &chain_monitor, &output_sweeper);
  
  		match &self.kind {
 +			#[cfg(feature = "chain-p2p")]
-+			ChainSourceKind::P2p(source) => source.poll_and_update_listeners(onchain_wallet, channel_manager, chain_monitor, output_sweeper).await,
++			ChainSourceKind::P2p(source) => {
++				source
++					.poll_and_update_listeners(
++						onchain_wallet,
++						channel_manager,
++						chain_monitor,
++						output_sweeper,
++					)
++					.await
++			},
  			#[cfg(feature = "chain-esplora")]
  			ChainSourceKind::Esplora { .. } => {
  				// In Esplora mode we sync lightning and onchain wallets via
-@@ -524,6 +560,8 @@ impl ChainSource {
+@@ -524,6 +589,8 @@ impl ChainSource {
  
  	pub(crate) async fn update_fee_rate_estimates(&self) -> Result<(), Error> {
  		match &self.kind {
@@ -220,7 +253,7 @@ index f01c1c8..88ea86e 100644
  			#[cfg(feature = "chain-esplora")]
  			ChainSourceKind::Esplora(esplora_chain_source) => {
  				esplora_chain_source.update_fee_rate_estimates().await
-@@ -547,6 +585,8 @@ impl ChainSource {
+@@ -547,6 +614,8 @@ impl ChainSource {
  		}
  
  		match &self.kind {
@@ -229,7 +262,7 @@ index f01c1c8..88ea86e 100644
  			#[cfg(feature = "chain-esplora")]
  			ChainSourceKind::Esplora(esplora_chain_source) => {
  				esplora_chain_source.validate_zero_fee_commitments_support().await
-@@ -593,6 +633,8 @@ impl ChainSource {
+@@ -593,6 +662,8 @@ impl ChainSource {
  					};
  					let package = package.into_sorted_transactions();
  					match &self.kind {
@@ -238,7 +271,7 @@ index f01c1c8..88ea86e 100644
  						#[cfg(feature = "chain-esplora")]
  						ChainSourceKind::Esplora(esplora_chain_source) => {
  							esplora_chain_source.process_transaction_broadcast(package).await
-@@ -616,6 +658,8 @@ impl Filter for ChainSource {
+@@ -616,6 +687,8 @@ impl Filter for ChainSource {
  	fn register_tx(&self, txid: &Txid, script_pubkey: &Script) {
  		self.registered_txids.lock().expect("lock").insert(*txid);
  		match &self.kind {
@@ -247,7 +280,7 @@ index f01c1c8..88ea86e 100644
  			#[cfg(feature = "chain-esplora")]
  			ChainSourceKind::Esplora(esplora_chain_source) => {
  				esplora_chain_source.register_tx(txid, script_pubkey)
-@@ -630,6 +674,8 @@ impl Filter for ChainSource {
+@@ -630,6 +703,8 @@ impl Filter for ChainSource {
  	}
  	fn register_output(&self, output: lightning::chain::WatchedOutput) {
  		match &self.kind {
@@ -258,10 +291,17 @@ index f01c1c8..88ea86e 100644
  			#[cfg(feature = "chain-electrum")]
 diff --git a/src/chain/p2p.rs b/src/chain/p2p.rs
 new file mode 100644
-index 0000000..d7fcabe
+index 0000000..a1acd02
 --- /dev/null
 +++ b/src/chain/p2p.rs
-@@ -0,0 +1,505 @@
+@@ -0,0 +1,842 @@
++// This file is Copyright its original authors, visible in version control history.
++//
++// This file is licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
++// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license <LICENSE-MIT or
++// http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
++// accordance with one or both of these licenses.
++
 +// Regtest-only direct Bitcoin peer backend using BIP 157/158 compact filters.
 +use std::collections::{HashMap, HashSet};
 +use std::io;
@@ -271,6 +311,7 @@ index 0000000..d7fcabe
 +use std::sync::{Arc, Mutex, RwLock};
 +use std::time::Duration;
 +
++use bip157::chain::{ChainState, IndexedHeader};
 +use bip157::{Builder as PeerBuilder, Client, Event, IndexedFilter, Package, Requester};
 +use bitcoin::bip158::BlockFilter;
 +use bitcoin::consensus::{deserialize, serialize};
@@ -286,7 +327,9 @@ index 0000000..d7fcabe
 +
 +use super::{WalletSyncGuard, WalletSyncStatus};
 +use crate::config::Config;
-+use crate::fee_estimator::{apply_post_estimation_adjustments, get_all_conf_targets, OnchainFeeEstimator};
++use crate::fee_estimator::{
++	apply_post_estimation_adjustments, get_all_conf_targets, OnchainFeeEstimator,
++};
 +use crate::logger::{log_error, log_info, LdkLogger, Logger};
 +use crate::runtime::Runtime;
 +use crate::tx_broadcaster::SortedTransactions;
@@ -296,7 +339,8 @@ index 0000000..d7fcabe
 +const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 +const RETRY_DELAY: Duration = Duration::from_secs(2);
 +
-+type PeerSpvClient = SpvClient<ChainPoller<Arc<PeerBlockSource>, PeerBlockSource>, Arc<ChainListener>>;
++type PeerSpvClient =
++	SpvClient<ChainPoller<Arc<PeerBlockSource>, PeerBlockSource>, Arc<ChainListener>>;
 +
 +// All records come from Kyoto's filter events, after its two-peer filter-header
 +// agreement and filter-hash check. Keep both branches of a reorganization; reads
@@ -307,7 +351,8 @@ index 0000000..d7fcabe
 +	fn open(storage_dir: &str) -> rusqlite::Result<Self> {
 +		let path = Path::new(storage_dir).join("compact-filter-history.sqlite");
 +		let connection = Connection::open(path)?;
-+		connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
++		connection.execute_batch(
++			"PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
 +			CREATE TABLE IF NOT EXISTS filters (
 +				block_hash BLOB PRIMARY KEY NOT NULL,
 +				height INTEGER NOT NULL,
@@ -315,8 +360,82 @@ index 0000000..d7fcabe
 +				filter_hash BLOB NOT NULL,
 +				contents BLOB NOT NULL
 +			);
-+			CREATE INDEX IF NOT EXISTS filters_height ON filters(height);")?;
++			CREATE INDEX IF NOT EXISTS filters_height ON filters(height);
++			CREATE TABLE IF NOT EXISTS filter_state (
++				key TEXT PRIMARY KEY NOT NULL,
++				value BLOB NOT NULL
++			);",
++		)?;
 +		Ok(Self(Mutex::new(connection)))
++	}
++
++	// The marker is advanced only after Kyoto has validated the entire winning
++	// branch. An interrupted download leaves the previous complete branch intact.
++	fn mark_tip(&self, height: u32, hash: BlockHash, network: Network) -> rusqlite::Result<()> {
++		let connection = self.0.lock().expect("lock");
++		Self::snapshot_from(&connection, height, hash, network)?;
++		connection.execute(
++			"INSERT OR REPLACE INTO filter_state(key, value) VALUES('canonical_tip', ?1)",
++			params![hash.to_byte_array().as_slice()],
++		)?;
++		Ok(())
++	}
++
++	fn snapshot(&self, network: Network) -> rusqlite::Result<Option<Vec<IndexedHeader>>> {
++		let connection = self.0.lock().expect("lock");
++		let tip: Option<Vec<u8>> = connection
++			.query_row("SELECT value FROM filter_state WHERE key='canonical_tip'", [], |row| {
++				row.get(0)
++			})
++			.optional()?;
++		let Some(tip) = tip else {
++			return Ok(None);
++		};
++		let hash = BlockHash::from_slice(&tip).map_err(|_| rusqlite::Error::InvalidQuery)?;
++		let height: u32 = connection.query_row(
++			"SELECT height FROM filters WHERE block_hash=?1",
++			params![tip],
++			|row| row.get(0),
++		)?;
++		Ok(Some(Self::snapshot_from(&connection, height, hash, network)?))
++	}
++
++	fn snapshot_from(
++		connection: &Connection, height: u32, tip: BlockHash, network: Network,
++	) -> rusqlite::Result<Vec<IndexedHeader>> {
++		let genesis = bitcoin::constants::genesis_block(network).header;
++		let mut result = Vec::with_capacity(height as usize + 1);
++		let mut expected = tip;
++		for current in (1..=height).rev() {
++			let (stored_height, header_bytes, stored_filter_hash, contents): (
++				u32,
++				Vec<u8>,
++				Vec<u8>,
++				Vec<u8>,
++			) = connection.query_row(
++				"SELECT height, header, filter_hash, contents FROM filters WHERE block_hash=?1",
++				params![expected.to_byte_array().as_slice()],
++				|row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
++			)?;
++			let header = deserialize::<bitcoin::block::Header>(&header_bytes)
++				.map_err(|_| rusqlite::Error::InvalidQuery)?;
++			if stored_height != current
++				|| header.block_hash() != expected
++				|| header.bits != genesis.bits
++				|| header.validate_pow(header.target()).is_err()
++				|| sha256d::Hash::hash(&contents).to_byte_array().as_slice() != stored_filter_hash
++			{
++				return Err(rusqlite::Error::InvalidQuery);
++			}
++			result.push(IndexedHeader { height: current, header });
++			expected = header.prev_blockhash;
++		}
++		if expected != genesis.block_hash() {
++			return Err(rusqlite::Error::InvalidQuery);
++		}
++		result.push(IndexedHeader { height: 0, header: genesis });
++		result.reverse();
++		Ok(result)
 +	}
 +
 +	fn insert(&self, filter: IndexedFilter) -> rusqlite::Result<()> {
@@ -331,20 +450,31 @@ index 0000000..d7fcabe
 +		Ok(())
 +	}
 +
-+	fn get(&self, hash: &BlockHash) -> rusqlite::Result<Option<(bitcoin::block::Header, BlockFilter)>> {
-+		let raw: Option<(Vec<u8>, Vec<u8>, Vec<u8>)> = self.0.lock().expect("lock").query_row(
-+			"SELECT header, filter_hash, contents FROM filters WHERE block_hash=?1",
-+			params![hash.to_byte_array().as_slice()], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-+		).optional()?;
++	fn get(
++		&self, hash: &BlockHash,
++	) -> rusqlite::Result<Option<(bitcoin::block::Header, BlockFilter)>> {
++		let raw: Option<(Vec<u8>, Vec<u8>, Vec<u8>)> = self
++			.0
++			.lock()
++			.expect("lock")
++			.query_row(
++				"SELECT header, filter_hash, contents FROM filters WHERE block_hash=?1",
++				params![hash.to_byte_array().as_slice()],
++				|row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
++			)
++			.optional()?;
 +		raw.map(|(header, stored_hash, contents)| {
 +			let header = deserialize::<bitcoin::block::Header>(&header)
 +				.map_err(|_| rusqlite::Error::InvalidQuery)?;
-+			if header.block_hash() != *hash { return Err(rusqlite::Error::InvalidQuery); }
++			if header.block_hash() != *hash {
++				return Err(rusqlite::Error::InvalidQuery);
++			}
 +			if sha256d::Hash::hash(&contents).to_byte_array().as_slice() != stored_hash {
 +				return Err(rusqlite::Error::InvalidQuery);
 +			}
 +			Ok((header, BlockFilter::new(&contents)))
-+		}).transpose()
++		})
++		.transpose()
 +	}
 +
 +	fn matches(&self, scripts: &[ScriptBuf], tip: u32) -> rusqlite::Result<Vec<(u32, BlockHash)>> {
@@ -352,7 +482,12 @@ index 0000000..d7fcabe
 +		let mut statement = connection.prepare(
 +			"SELECT height, block_hash, filter_hash, contents FROM filters WHERE height <= ?1 ORDER BY height")?;
 +		let rows = statement.query_map(params![tip], |row| {
-+			Ok((row.get::<_, u32>(0)?, row.get::<_, Vec<u8>>(1)?, row.get::<_, Vec<u8>>(2)?, row.get::<_, Vec<u8>>(3)?))
++			Ok((
++				row.get::<_, u32>(0)?,
++				row.get::<_, Vec<u8>>(1)?,
++				row.get::<_, Vec<u8>>(2)?,
++				row.get::<_, Vec<u8>>(3)?,
++			))
 +		})?;
 +		let mut result = Vec::new();
 +		for row in rows {
@@ -364,7 +499,9 @@ index 0000000..d7fcabe
 +			let matched = BlockFilter::new(&contents)
 +				.match_any(&hash, scripts.iter().map(|script| script.to_bytes()))
 +				.map_err(|_| rusqlite::Error::InvalidQuery)?;
-+			if matched { result.push((height, hash)); }
++			if matched {
++				result.push((height, hash));
++			}
 +		}
 +		Ok(result)
 +	}
@@ -378,15 +515,23 @@ index 0000000..d7fcabe
 +}
 +
 +impl ChainListener {
-+	fn upgrade(&self) -> Option<(Arc<Wallet>, Arc<ChannelManager>, Arc<ChainMonitor>, Arc<Sweeper>)> {
-+		Some((self.onchain_wallet.upgrade()?, self.channel_manager.upgrade()?,
-+			self.chain_monitor.upgrade()?, self.output_sweeper.upgrade()?))
++	fn upgrade(
++		&self,
++	) -> Option<(Arc<Wallet>, Arc<ChannelManager>, Arc<ChainMonitor>, Arc<Sweeper>)> {
++		Some((
++			self.onchain_wallet.upgrade()?,
++			self.channel_manager.upgrade()?,
++			self.chain_monitor.upgrade()?,
++			self.output_sweeper.upgrade()?,
++		))
 +	}
 +}
 +
 +impl Listen for ChainListener {
-+	fn filtered_block_connected(&self, header: &bitcoin::block::Header,
-+		txdata: &lightning::chain::transaction::TransactionData, height: u32) {
++	fn filtered_block_connected(
++		&self, header: &bitcoin::block::Header,
++		txdata: &lightning::chain::transaction::TransactionData, height: u32,
++	) {
 +		if let Some((wallet, manager, monitor, sweeper)) = self.upgrade() {
 +			wallet.filtered_block_connected(header, txdata, height);
 +			manager.filtered_block_connected(header, txdata, height);
@@ -431,12 +576,22 @@ index 0000000..d7fcabe
 +
 +impl PeerBlockSource {
 +	fn new(network: Network, filters: FilterHistory) -> Self {
-+		Self { network, requester: RwLock::new(None), ready: AtomicBool::new(false), stopped: AtomicBool::new(false),
-+			known_headers: Mutex::new(HashMap::new()), filters, archive_error: AtomicBool::new(false),
-+			channel_scripts: Mutex::new(HashSet::new()), pending_scripts: Mutex::new(Vec::new()),
-+			watch_version: AtomicU64::new(0), synced_watch_version: AtomicU64::new(0),
++		Self {
++			network,
++			requester: RwLock::new(None),
++			ready: AtomicBool::new(false),
++			stopped: AtomicBool::new(false),
++			known_headers: Mutex::new(HashMap::new()),
++			filters,
++			archive_error: AtomicBool::new(false),
++			channel_scripts: Mutex::new(HashSet::new()),
++			pending_scripts: Mutex::new(Vec::new()),
++			watch_version: AtomicU64::new(0),
++			synced_watch_version: AtomicU64::new(0),
 +			wallet: RwLock::new(std::sync::Weak::new()),
-+			skipped_blocks: AtomicU64::new(0), fetched_blocks: AtomicU64::new(0) }
++			skipped_blocks: AtomicU64::new(0),
++			fetched_blocks: AtomicU64::new(0),
++		}
 +	}
 +
 +	fn watch_script(&self, script: ScriptBuf) {
@@ -453,8 +608,9 @@ index 0000000..d7fcabe
 +	}
 +
 +	fn scripts_to_watch(&self) -> Result<HashSet<ScriptBuf>, BlockSourceError> {
-+		let wallet = self.wallet.read().expect("lock").upgrade().ok_or_else(||
-+			BlockSourceError::transient(io::Error::other("Bitcoin wallet is not ready")))?;
++		let wallet = self.wallet.read().expect("lock").upgrade().ok_or_else(|| {
++			BlockSourceError::transient(io::Error::other("Bitcoin wallet is not ready"))
++		})?;
 +		let mut scripts = self.channel_scripts.lock().expect("lock").clone();
 +		scripts.extend(wallet.revealed_scripts());
 +		Ok(scripts)
@@ -462,38 +618,63 @@ index 0000000..d7fcabe
 +
 +	fn requester(&self) -> Result<Requester, BlockSourceError> {
 +		if !self.ready.load(Ordering::Acquire) {
-+			return Err(BlockSourceError::transient(io::Error::other("Bitcoin peer filters are not synchronized")));
++			return Err(BlockSourceError::transient(io::Error::other(
++				"Bitcoin peer filters are not synchronized",
++			)));
 +		}
-+		self.requester.read().expect("lock").clone().ok_or_else(||
-+			BlockSourceError::transient(io::Error::other("Bitcoin peer is not running")))
++		self.requester.read().expect("lock").clone().ok_or_else(|| {
++			BlockSourceError::transient(io::Error::other("Bitcoin peer is not running"))
++		})
 +	}
 +
-+	async fn header_at(&self, requester: &Requester, height: u32) -> Result<bitcoin::block::Header, BlockSourceError> {
-+		if height == 0 { return Ok(bitcoin::constants::genesis_block(self.network).header); }
-+		let indexed = tokio::time::timeout(REQUEST_TIMEOUT, requester.get_header(height)).await
-+			.map_err(|_| BlockSourceError::transient(io::Error::other("Bitcoin header request timed out")))?
++	async fn header_at(
++		&self, requester: &Requester, height: u32,
++	) -> Result<bitcoin::block::Header, BlockSourceError> {
++		if height == 0 {
++			return Ok(bitcoin::constants::genesis_block(self.network).header);
++		}
++		let indexed = tokio::time::timeout(REQUEST_TIMEOUT, requester.get_header(height))
++			.await
++			.map_err(|_| {
++				BlockSourceError::transient(io::Error::other("Bitcoin header request timed out"))
++			})?
 +			.map_err(BlockSourceError::transient)?
-+			.ok_or_else(|| BlockSourceError::transient(io::Error::other(format!("Bitcoin header at height {height} is unavailable"))))?;
++			.ok_or_else(|| {
++				BlockSourceError::transient(io::Error::other(format!(
++					"Bitcoin header at height {height} is unavailable"
++				)))
++			})?;
 +		Ok(indexed.header)
 +	}
 +}
 +
 +impl BlockSource for PeerBlockSource {
-+	async fn get_header(&self, hash: &BlockHash, height_hint: Option<u32>) -> Result<BlockHeaderData, BlockSourceError> {
++	async fn get_header(
++		&self, hash: &BlockHash, height_hint: Option<u32>,
++	) -> Result<BlockHeaderData, BlockSourceError> {
 +		if let Some(header) = self.known_headers.lock().expect("lock").get(hash).copied() {
 +			return Ok(header);
 +		}
 +		let requester = self.requester()?;
 +		let height = match height_hint {
 +			Some(height) => height,
-+			None => tokio::time::timeout(REQUEST_TIMEOUT, requester.height_of_hash(*hash)).await
-+				.map_err(|_| BlockSourceError::transient(io::Error::other("Bitcoin height request timed out")))?
++			None => tokio::time::timeout(REQUEST_TIMEOUT, requester.height_of_hash(*hash))
++				.await
++				.map_err(|_| {
++					BlockSourceError::transient(io::Error::other(
++						"Bitcoin height request timed out",
++					))
++				})?
 +				.map_err(BlockSourceError::transient)?
-+				.ok_or_else(|| BlockSourceError::transient(io::Error::other("Unknown block hash")))?,
++				.ok_or_else(|| {
++					BlockSourceError::transient(io::Error::other("Unknown block hash"))
++				})?,
 +		};
 +		let header = self.header_at(&requester, height).await?;
 +		if header.block_hash() != *hash {
-+			return Err(BlockSourceError::transient(io::Error::other("Bitcoin header changed during a reorganization")));
++			return Err(BlockSourceError::transient(io::Error::other(
++				"Bitcoin header changed during a reorganization",
++			)));
 +		}
 +		// Kyoto validates the header chain. LDK's poller additionally needs cumulative work.
 +		// This prototype starts at genesis on regtest, where this bounded recomputation is cheap.
@@ -507,21 +688,31 @@ index 0000000..d7fcabe
 +	}
 +
 +	async fn get_block(&self, hash: &BlockHash) -> Result<BlockData, BlockSourceError> {
-+		let (header, filter) = self.filters.get(hash).map_err(BlockSourceError::persistent)?
-+			.ok_or_else(|| BlockSourceError::transient(io::Error::other(format!("Bitcoin compact filter for {hash} is unavailable"))))?;
++		let (header, filter) =
++			self.filters.get(hash).map_err(BlockSourceError::persistent)?.ok_or_else(|| {
++				BlockSourceError::transient(io::Error::other(format!(
++					"Bitcoin compact filter for {hash} is unavailable"
++				)))
++			})?;
 +		let scripts = self.scripts_to_watch()?;
-+		let matched = filter.match_any(hash, scripts.iter().map(|script| script.to_bytes()))
++		let matched = filter
++			.match_any(hash, scripts.iter().map(|script| script.to_bytes()))
 +			.map_err(BlockSourceError::persistent)?;
 +		if !matched {
 +			self.skipped_blocks.fetch_add(1, Ordering::Relaxed);
 +			return Ok(BlockData::HeaderOnly(header));
 +		}
 +		let requester = self.requester()?;
-+		let indexed = tokio::time::timeout(REQUEST_TIMEOUT, requester.get_block(*hash)).await
-+			.map_err(|_| BlockSourceError::transient(io::Error::other("Bitcoin block request timed out")))?
++		let indexed = tokio::time::timeout(REQUEST_TIMEOUT, requester.get_block(*hash))
++			.await
++			.map_err(|_| {
++				BlockSourceError::transient(io::Error::other("Bitcoin block request timed out"))
++			})?
 +			.map_err(BlockSourceError::transient)?;
 +		if indexed.block.block_hash() != *hash {
-+			return Err(BlockSourceError::persistent(io::Error::other("Bitcoin peer returned a different block")));
++			return Err(BlockSourceError::persistent(io::Error::other(
++				"Bitcoin peer returned a different block",
++			)));
 +		}
 +		self.fetched_blocks.fetch_add(1, Ordering::Relaxed);
 +		Ok(BlockData::FullBlock(indexed.block))
@@ -529,8 +720,11 @@ index 0000000..d7fcabe
 +
 +	async fn get_best_block(&self) -> Result<(BlockHash, Option<u32>), BlockSourceError> {
 +		let requester = self.requester()?;
-+		let tip = tokio::time::timeout(REQUEST_TIMEOUT, requester.chain_tip()).await
-+			.map_err(|_| BlockSourceError::transient(io::Error::other("Bitcoin tip request timed out")))?
++		let tip = tokio::time::timeout(REQUEST_TIMEOUT, requester.chain_tip())
++			.await
++			.map_err(|_| {
++				BlockSourceError::transient(io::Error::other("Bitcoin tip request timed out"))
++			})?
 +			.map_err(BlockSourceError::transient)?;
 +		Ok((tip.hash, Some(tip.height)))
 +	}
@@ -549,16 +743,32 @@ index 0000000..d7fcabe
 +}
 +
 +impl P2pChainSource {
-+	pub(super) fn new(peer: String, fee_estimator: Arc<OnchainFeeEstimator>, config: Arc<Config>, logger: Arc<Logger>) -> Result<Self, ()> {
-+		if config.network != Network::Regtest { return Err(()); }
++	pub(super) fn new(
++		peer: String, fee_estimator: Arc<OnchainFeeEstimator>, config: Arc<Config>,
++		logger: Arc<Logger>,
++	) -> Result<Self, ()> {
++		if config.network != Network::Regtest {
++			return Err(());
++		}
 +		let mut addresses = peer.split(',').map(str::trim);
 +		let first: SocketAddr = addresses.next().ok_or(())?.parse().map_err(|_| ())?;
 +		let second: SocketAddr = addresses.next().ok_or(())?.parse().map_err(|_| ())?;
-+		if addresses.next().is_some() || first == second { return Err(()); }
++		if addresses.next().is_some() || first == second {
++			return Err(());
++		}
 +		let filters = FilterHistory::open(&config.storage_dir_path).map_err(|_| ())?;
-+		Ok(Self { peers: [first, second], block_source: Arc::new(PeerBlockSource::new(config.network, filters)), spv_client: tokio::sync::Mutex::new(None),
-+			latest_tip: RwLock::new(None), wallet_polling_status: Mutex::new(WalletSyncStatus::Completed),
-+			fee_estimator, config, logger, last_logged_counts: Mutex::new((0, 0)) })
++		filters.snapshot(config.network).map_err(|_| ())?;
++		Ok(Self {
++			peers: [first, second],
++			block_source: Arc::new(PeerBlockSource::new(config.network, filters)),
++			spv_client: tokio::sync::Mutex::new(None),
++			latest_tip: RwLock::new(None),
++			wallet_polling_status: Mutex::new(WalletSyncStatus::Completed),
++			fee_estimator,
++			config,
++			logger,
++			last_logged_counts: Mutex::new((0, 0)),
++		})
 +	}
 +
 +	fn log_filter_counts(&self) {
@@ -566,7 +776,12 @@ index 0000000..d7fcabe
 +		let fetched = self.block_source.fetched_blocks.load(Ordering::Relaxed);
 +		let mut last = self.last_logged_counts.lock().expect("lock");
 +		if *last != (skipped, fetched) {
-+			log_info!(self.logger, "Bitcoin compact filters: {} header-only blocks, {} full blocks downloaded", skipped, fetched);
++			log_info!(
++				self.logger,
++				"Bitcoin compact filters: {} header-only blocks, {} full blocks downloaded",
++				skipped,
++				fetched
++			);
 +			*last = (skipped, fetched);
 +		}
 +	}
@@ -581,16 +796,33 @@ index 0000000..d7fcabe
 +			loop {
 +				if source.stopped.load(Ordering::Acquire) { break; }
 +				source.archive_error.store(false, Ordering::Release);
-+				let (node, client) = PeerBuilder::new(network).add_peer(peers[0]).add_peer(peers[1]).whitelist_only()
-+					.required_peers(2).fetch_witness_data().build();
-+				let Client { requester, mut info_rx, mut warn_rx, mut event_rx } = client;
-+				*source.requester.write().expect("lock") = Some(requester);
-+				let event_source = Arc::clone(&source);
-+				let event_task = tokio::spawn(async move {
-+					while let Some(event) = event_rx.recv().await {
-+						match event {
-+							Event::IndexedFilter(filter) => {
-+								if event_source.filters.insert(filter).is_err() {
++				let snapshot = match source.filters.snapshot(network) {
++					Ok(snapshot) => snapshot,
++					Err(error) => {
++						log_error!(logger, "Bitcoin compact filter archive is invalid: {:?}", error);
++						source.archive_error.store(true, Ordering::Release);
++						break;
++					},
++				};
++				let mut builder = PeerBuilder::new(network).add_peer(peers[0]).add_peer(peers[1]).whitelist_only()
++					.required_peers(2).fetch_witness_data();
++				if let Some(ref headers) = snapshot {
++					builder = builder.chain_state(ChainState::Snapshot(headers.clone())).headers_only_sync();
++					log_info!(logger, "Bitcoin compact filter cache loaded through height {}", headers.len() - 1);
++				}
++				let (node, client) = builder.build();
++			let Client { requester, mut info_rx, mut warn_rx, mut event_rx } = client;
++			*source.requester.write().expect("lock") = Some(requester.clone());
++			let event_source = Arc::clone(&source);
++			let event_logger = Arc::clone(&logger);
++			let event_task = tokio::spawn(async move {
++				let mut cache_reconciliation_pending = snapshot.is_some();
++				let mut downloaded_filters = 0u64;
++				while let Some(event) = event_rx.recv().await {
++					match event {
++						Event::IndexedFilter(filter) => {
++							downloaded_filters += 1;
++							if event_source.filters.insert(filter).is_err() {
 +									event_source.archive_error.store(true, Ordering::Release);
 +									event_source.ready.store(false, Ordering::Release);
 +									if let Some(requester) = event_source.requester.read().expect("lock").clone() {
@@ -598,14 +830,39 @@ index 0000000..d7fcabe
 +									}
 +								}
 +							},
-+							Event::FiltersSynced(_) => {
-+								if !event_source.archive_error.load(Ordering::Acquire) {
-+									event_source.ready.store(true, Ordering::Release);
++						Event::FiltersSynced(update) => {
++							if event_source.archive_error.load(Ordering::Acquire) { continue; }
++							if cache_reconciliation_pending {
++								cache_reconciliation_pending = false;
++								if let Some(ref headers) = snapshot {
++									let mut common = (headers.len() - 1).min(update.tip().height as usize);
++									while common > 0 {
++										let current = tokio::time::timeout(REQUEST_TIMEOUT, requester.get_header(common as u32)).await;
++										if matches!(current, Ok(Ok(Some(header))) if header.block_hash() == headers[common].header.block_hash()) { break; }
++										common -= 1;
++									}
++									if common < update.tip().height as usize {
++										if requester.rescan_from(common as u32).is_err() {
++											event_source.archive_error.store(true, Ordering::Release);
++											let _ = requester.shutdown();
++										}
++										continue;
++									}
 +								}
-+							},
++							}
++							if update.tip().height > 0 && event_source.filters.mark_tip(update.tip().height, update.tip().hash, network).is_err() {
++								event_source.archive_error.store(true, Ordering::Release);
++								event_source.ready.store(false, Ordering::Release);
++								let _ = requester.shutdown();
++							} else {
++								event_source.ready.store(true, Ordering::Release);
++								log_info!(event_logger, "Bitcoin compact filter bodies downloaded since startup: {}", downloaded_filters);
++							}
++						},
 +							Event::ChainUpdate(_) => event_source.ready.store(false, Ordering::Release),
-+						}
 +					}
++				}
++				log_info!(event_logger, "Bitcoin compact filter bodies downloaded this run: {}", downloaded_filters);
 +				});
 +				let info_task = tokio::spawn(async move { while info_rx.recv().await.is_some() {} });
 +				let warn_task = tokio::spawn(async move { while warn_rx.recv().await.is_some() {} });
@@ -616,6 +873,10 @@ index 0000000..d7fcabe
 +				info_task.abort();
 +				warn_task.abort();
 +				if source.stopped.load(Ordering::Acquire) { break; }
++				if source.archive_error.load(Ordering::Acquire) {
++					log_error!(logger, "Bitcoin compact filter archive failed; chain sync stopped");
++					break;
++				}
 +				if let Err(error) = result {
 +					log_error!(logger, "Bitcoin peer stopped; reconnecting: {}", error);
 +				}
@@ -640,59 +901,116 @@ index 0000000..d7fcabe
 +		self.block_source.watch_script(output.script_pubkey);
 +	}
 +
-+	pub(super) async fn continuously_sync_wallets(&self, mut stop: tokio::sync::watch::Receiver<()>, wallet: Arc<Wallet>,
-+		manager: Arc<ChannelManager>, monitor: Arc<ChainMonitor>, sweeper: Arc<Sweeper>) {
++	pub(super) async fn continuously_sync_wallets(
++		&self, mut stop: tokio::sync::watch::Receiver<()>, wallet: Arc<Wallet>,
++		manager: Arc<ChannelManager>, monitor: Arc<ChainMonitor>, sweeper: Arc<Sweeper>,
++	) {
 +		loop {
-+			if stop.has_changed().unwrap_or(true) { return; }
-+			let _ = self.poll_and_update_listeners(Arc::clone(&wallet), Arc::clone(&manager), Arc::clone(&monitor), Arc::clone(&sweeper)).await;
++			if stop.has_changed().unwrap_or(true) {
++				return;
++			}
++			let _ = self
++				.poll_and_update_listeners(
++					Arc::clone(&wallet),
++					Arc::clone(&manager),
++					Arc::clone(&monitor),
++					Arc::clone(&sweeper),
++				)
++				.await;
 +			tokio::select! { _ = stop.changed() => return, _ = tokio::time::sleep(RETRY_DELAY) => {} }
 +		}
 +	}
 +
-+	async fn initial_sync(&self, wallet: Arc<Wallet>, manager: Arc<ChannelManager>, monitor: Arc<ChainMonitor>, sweeper: Arc<Sweeper>) -> Result<(), Error> {
-+		if !self.block_source.ready.load(Ordering::Acquire) { return Err(Error::ConnectionFailed); }
++	async fn initial_sync(
++		&self, wallet: Arc<Wallet>, manager: Arc<ChannelManager>, monitor: Arc<ChainMonitor>,
++		sweeper: Arc<Sweeper>,
++	) -> Result<(), Error> {
++		if !self.block_source.ready.load(Ordering::Acquire) {
++			return Err(Error::ConnectionFailed);
++		}
 +		let watch_version = self.block_source.watch_version.load(Ordering::Acquire);
 +		let mut listeners = vec![
 +			(wallet.current_best_block(), &*wallet as &(dyn Listen + Send + Sync)),
 +			(manager.current_best_block(), &*manager as &(dyn Listen + Send + Sync)),
 +			(sweeper.current_best_block(), &*sweeper as &(dyn Listen + Send + Sync)),
 +		];
-+		if let Some(worst) = monitor.list_monitors().iter().flat_map(|id| monitor.get_monitor(*id))
-+			.map(|item| item.current_best_block()).min_by_key(|block| block.height) {
++		if let Some(worst) = monitor
++			.list_monitors()
++			.iter()
++			.flat_map(|id| monitor.get_monitor(*id))
++			.map(|item| item.current_best_block())
++			.min_by_key(|block| block.height)
++		{
 +			listeners.push((worst, &*monitor as &(dyn Listen + Send + Sync)));
 +		}
-+		let (cache, tip) = synchronize_listeners(self.block_source.as_ref(), self.config.network, listeners)
-+			.await.map_err(|error| { log_error!(self.logger, "Bitcoin peer initial sync failed: {:?}", error); Error::TxSyncFailed })?;
-+		let listener = Arc::new(ChainListener { onchain_wallet: Arc::downgrade(&wallet), channel_manager: Arc::downgrade(&manager),
-+			chain_monitor: Arc::downgrade(&monitor), output_sweeper: Arc::downgrade(&sweeper) });
++		let (cache, tip) =
++			synchronize_listeners(self.block_source.as_ref(), self.config.network, listeners)
++				.await
++				.map_err(|error| {
++					log_error!(self.logger, "Bitcoin peer initial sync failed: {:?}", error);
++					Error::TxSyncFailed
++				})?;
++		let listener = Arc::new(ChainListener {
++			onchain_wallet: Arc::downgrade(&wallet),
++			channel_manager: Arc::downgrade(&manager),
++			chain_monitor: Arc::downgrade(&monitor),
++			output_sweeper: Arc::downgrade(&sweeper),
++		});
 +		let poller = ChainPoller::new(Arc::clone(&self.block_source), self.config.network);
 +		*self.spv_client.lock().await = Some(SpvClient::new(tip, poller, cache, listener));
 +		*self.latest_tip.write().expect("lock") = Some(tip);
 +		self.block_source.mark_watches_synced(watch_version);
-+		log_info!(self.logger, "Direct Bitcoin peer initial sync complete at height {}", tip.height);
++		log_info!(
++			self.logger,
++			"Direct Bitcoin peer initial sync complete at height {}",
++			tip.height
++		);
 +		self.log_filter_counts();
 +		Ok(())
 +	}
 +
-+	pub(super) async fn poll_and_update_listeners(&self, wallet: Arc<Wallet>, manager: Arc<ChannelManager>,
-+		monitor: Arc<ChainMonitor>, sweeper: Arc<Sweeper>) -> Result<(), Error> {
-+		let receiver = self.wallet_polling_status.lock().expect("lock").register_or_subscribe_pending_sync();
-+		if let Some(mut receiver) = receiver { return receiver.recv().await.map_err(|_| Error::WalletOperationFailed)?; }
++	pub(super) async fn poll_and_update_listeners(
++		&self, wallet: Arc<Wallet>, manager: Arc<ChannelManager>, monitor: Arc<ChainMonitor>,
++		sweeper: Arc<Sweeper>,
++	) -> Result<(), Error> {
++		let receiver =
++			self.wallet_polling_status.lock().expect("lock").register_or_subscribe_pending_sync();
++		if let Some(mut receiver) = receiver {
++			return receiver.recv().await.map_err(|_| Error::WalletOperationFailed)?;
++		}
 +		let guard = WalletSyncGuard::new(&self.wallet_polling_status, Error::WalletOperationFailed);
 +		let result = self.poll_inner(wallet, manager, monitor, sweeper).await;
 +		guard.complete(result);
 +		result
 +	}
 +
-+	async fn poll_inner(&self, wallet: Arc<Wallet>, manager: Arc<ChannelManager>, monitor: Arc<ChainMonitor>, sweeper: Arc<Sweeper>) -> Result<(), Error> {
++	async fn poll_inner(
++		&self, wallet: Arc<Wallet>, manager: Arc<ChannelManager>, monitor: Arc<ChainMonitor>,
++		sweeper: Arc<Sweeper>,
++	) -> Result<(), Error> {
 +		*self.block_source.wallet.write().expect("lock") = Arc::downgrade(&wallet);
-+		if !self.block_source.ready.load(Ordering::Acquire) { return Err(Error::ConnectionFailed); }
-+		if self.spv_client.lock().await.is_none() { self.initial_sync(Arc::clone(&wallet), Arc::clone(&manager), Arc::clone(&monitor), Arc::clone(&sweeper)).await?; }
++		if !self.block_source.ready.load(Ordering::Acquire) {
++			return Err(Error::ConnectionFailed);
++		}
++		if self.spv_client.lock().await.is_none() {
++			self.initial_sync(
++				Arc::clone(&wallet),
++				Arc::clone(&manager),
++				Arc::clone(&monitor),
++				Arc::clone(&sweeper),
++			)
++			.await?;
++		}
 +		let mut client = self.spv_client.lock().await;
 +		match client.as_mut().expect("initial sync").poll_best_tip().await {
-+			Ok((ChainTip::Better(tip), true)) => *self.latest_tip.write().expect("lock") = Some(tip),
++			Ok((ChainTip::Better(tip), true)) => {
++				*self.latest_tip.write().expect("lock") = Some(tip)
++			},
 +			Ok(_) => {},
-+			Err(error) => { log_error!(self.logger, "Bitcoin peer chain polling failed: {:?}", error); return Err(Error::TxSyncFailed); },
++			Err(error) => {
++				log_error!(self.logger, "Bitcoin peer chain polling failed: {:?}", error);
++				return Err(Error::TxSyncFailed);
++			},
 +		}
 +		drop(client);
 +		self.replay_new_watches(&wallet, &manager, &monitor, &sweeper).await?;
@@ -700,25 +1018,50 @@ index 0000000..d7fcabe
 +		Ok(())
 +	}
 +
-+	async fn replay_new_watches(&self, wallet: &Arc<Wallet>, manager: &Arc<ChannelManager>,
-+		monitor: &Arc<ChainMonitor>, sweeper: &Arc<Sweeper>) -> Result<(), Error> {
++	async fn replay_new_watches(
++		&self, wallet: &Arc<Wallet>, manager: &Arc<ChannelManager>, monitor: &Arc<ChainMonitor>,
++		sweeper: &Arc<Sweeper>,
++	) -> Result<(), Error> {
 +		let synced = self.block_source.synced_watch_version.load(Ordering::Acquire);
 +		let version = self.block_source.watch_version.load(Ordering::Acquire);
-+		if version == synced { return Ok(()); }
-+		let scripts: Vec<_> = self.block_source.pending_scripts.lock().expect("lock").iter()
-+			.filter(|(v, _)| *v > synced && *v <= version).map(|(_, script)| script.clone()).collect();
++		if version == synced {
++			return Ok(());
++		}
++		let scripts: Vec<_> = self
++			.block_source
++			.pending_scripts
++			.lock()
++			.expect("lock")
++			.iter()
++			.filter(|(v, _)| *v > synced && *v <= version)
++			.map(|(_, script)| script.clone())
++			.collect();
 +		let tip = self.latest_tip.read().expect("lock").ok_or(Error::TxSyncFailed)?;
 +		let requester = self.block_source.requester().map_err(|_| Error::ConnectionFailed)?;
-+		let candidates = self.block_source.filters.matches(&scripts, tip.height)
++		let candidates = self
++			.block_source
++			.filters
++			.matches(&scripts, tip.height)
 +			.map_err(|_| Error::TxSyncFailed)?;
 +		let mut earliest = None;
 +		for (height, hash) in candidates {
-+			let header = self.block_source.header_at(&requester, height).await.map_err(|_| Error::TxSyncFailed)?;
-+			if header.block_hash() != hash { continue; }
-+			let block = match self.block_source.get_block(&hash).await.map_err(|_| Error::TxSyncFailed)? {
-+				BlockData::FullBlock(block) if block.check_merkle_root() && block.check_witness_commitment() => block,
-+				_ => return Err(Error::TxSyncFailed),
-+			};
++			let header = self
++				.block_source
++				.header_at(&requester, height)
++				.await
++				.map_err(|_| Error::TxSyncFailed)?;
++			if header.block_hash() != hash {
++				continue;
++			}
++			let block =
++				match self.block_source.get_block(&hash).await.map_err(|_| Error::TxSyncFailed)? {
++					BlockData::FullBlock(block)
++						if block.check_merkle_root() && block.check_witness_commitment() =>
++					{
++						block
++					},
++					_ => return Err(Error::TxSyncFailed),
++				};
 +			wallet.apply_historical_block(&block, height).await?;
 +			let txdata: Vec<_> = block.txdata.iter().enumerate().collect();
 +			manager.transactions_confirmed(&block.header, &txdata, height);
@@ -728,14 +1071,22 @@ index 0000000..d7fcabe
 +		}
 +		self.block_source.mark_watches_synced(version);
 +		if let Some(height) = earliest {
-+			log_info!(self.logger, "Bitcoin watch replayed from height {} through {}", height, tip.height);
++			log_info!(
++				self.logger,
++				"Bitcoin watch replayed from height {} through {}",
++				height,
++				tip.height
++			);
 +		}
 +		Ok(())
 +	}
 +
 +	pub(super) async fn update_fee_rate_estimates(&self) -> Result<(), Error> {
 +		let rate = FeeRate::from_sat_per_kwu(250);
-+		let fees = get_all_conf_targets().into_iter().map(|target| (target, apply_post_estimation_adjustments(target, rate))).collect();
++		let fees = get_all_conf_targets()
++			.into_iter()
++			.map(|target| (target, apply_post_estimation_adjustments(target, rate)))
++			.collect();
 +		self.fee_estimator.set_fee_rate_cache(fees);
 +		Ok(())
 +	}
@@ -744,23 +1095,42 @@ index 0000000..d7fcabe
 +		let transactions = txs.into_inner();
 +		if transactions.len() <= 2 {
 +			match Package::from_vec(transactions.clone()) {
-+				Ok(package) => { self.send_package(package).await; return; },
-+				Err(error) => log_error!(self.logger, "Invalid Bitcoin broadcast package: {:?}", error),
++				Ok(package) => {
++					self.send_package(package).await;
++					return;
++				},
++				Err(error) => {
++					log_error!(self.logger, "Invalid Bitcoin broadcast package: {:?}", error)
++				},
 +			}
 +		}
-+		for tx in transactions { self.send_package(Package::new_single(tx)).await; }
++		for tx in transactions {
++			self.send_package(Package::new_single(tx)).await;
++		}
 +	}
 +
 +	async fn send_package(&self, package: Package) {
 +		loop {
 +			if self.block_source.stopped.load(Ordering::Acquire) {
-+				log_error!(self.logger, "Bitcoin peer stopped before transaction could be broadcast");
++				log_error!(
++					self.logger,
++					"Bitcoin peer stopped before transaction could be broadcast"
++				);
 +				return;
 +			}
 +			if let Ok(requester) = self.block_source.requester() {
-+				match tokio::time::timeout(REQUEST_TIMEOUT, requester.submit_package(package.clone())).await {
++				match tokio::time::timeout(
++					REQUEST_TIMEOUT,
++					requester.submit_package(package.clone()),
++				)
++				.await
++				{
 +					Ok(Ok(_)) => return,
-+					other => log_error!(self.logger, "Bitcoin peer broadcast failed; retrying: {:?}", other),
++					other => log_error!(
++						self.logger,
++						"Bitcoin peer broadcast failed; retrying: {:?}",
++						other
++					),
 +				}
 +			}
 +			tokio::time::sleep(RETRY_DELAY).await;
@@ -781,7 +1151,7 @@ index 65e2561..d23f693 100644
  	if may_announce_channel(config).is_err() {
  		user_config.accept_forwards_to_priv_channels = false;
 diff --git a/src/connection.rs b/src/connection.rs
-index ccb6f98..c8487d5 100644
+index ccb6f98..1b8621c 100644
 --- a/src/connection.rs
 +++ b/src/connection.rs
 @@ -56,6 +56,7 @@ where
@@ -792,30 +1162,45 @@ index ccb6f98..c8487d5 100644
  	peer_manager: Arc<PeerManager>,
  	tor_proxy_config: Option<TorConfig>,
  	keys_manager: Arc<KeysManager>,
-@@ -71,8 +72,13 @@ where
+@@ -71,8 +72,22 @@ where
  		keys_manager: Arc<KeysManager>, logger: L,
  	) -> Self {
  		let pending_connections = Mutex::new(HashMap::new());
 +		let pq_peer_keys = Mutex::new(HashMap::new());
  
 -		Self { pending_connections, peer_manager, tor_proxy_config, keys_manager, logger }
-+		Self { pending_connections, pq_peer_keys, peer_manager, tor_proxy_config, keys_manager, logger }
++		Self {
++			pending_connections,
++			pq_peer_keys,
++			peer_manager,
++			tor_proxy_config,
++			keys_manager,
++			logger,
++		}
 +	}
 +
-+	pub(crate) fn register_pq_peer(&self, node_id: PublicKey, kem_key: [u8; lightning::ln::peer_handler::PQ_KEM_EK_LEN]) {
++	pub(crate) fn register_pq_peer(
++		&self, node_id: PublicKey, kem_key: [u8; lightning::ln::peer_handler::PQ_KEM_EK_LEN],
++	) {
 +		self.pq_peer_keys.lock().expect("lock").insert(node_id, kem_key);
  	}
  
  	pub(crate) async fn connect_peer_if_necessary(
-@@ -116,6 +122,7 @@ where
+@@ -116,6 +131,13 @@ where
  		&self, node_id: PublicKey, addr: SocketAddress,
  	) -> Result<(), Error> {
  		log_info!(self.logger, "Connecting to peer: {}@{}", node_id, addr);
-+		let kem_key = self.pq_peer_keys.lock().expect("lock").get(&node_id).copied().ok_or(Error::ConnectionFailed)?;
++		let kem_key = self
++			.pq_peer_keys
++			.lock()
++			.expect("lock")
++			.get(&node_id)
++			.copied()
++			.ok_or(Error::ConnectionFailed)?;
  
  		match addr {
  			SocketAddress::OnionV2(old_onion_addr) => {
-@@ -126,70 +133,7 @@ where
+@@ -126,70 +148,7 @@ where
  				);
  				Err(Error::InvalidSocketAddress)
  			},
@@ -887,7 +1272,7 @@ index ccb6f98..c8487d5 100644
  			_ => {
  				let resolved_addrs: Vec<_> = tokio::net::lookup_host(addr.to_string())
  					.await
-@@ -212,9 +156,10 @@ where
+@@ -212,9 +171,10 @@ where
  				let mut res = Err(Error::ConnectionFailed);
  				let mut had_failures = false;
  				for socket_addr in resolved_addrs {
@@ -1028,7 +1413,7 @@ index 6a44be0..78466bd 100644
  	(1, V1) => {},
  );
 diff --git a/src/lib.rs b/src/lib.rs
-index 821304a..d66b708 100644
+index 821304a..150cfeb 100644
 --- a/src/lib.rs
 +++ b/src/lib.rs
 @@ -84,7 +84,8 @@
@@ -1072,7 +1457,7 @@ index 821304a..d66b708 100644
  										Arc::clone(&peer_mgr),
  										tcp_stream,
  									)
-@@ -1175,6 +1182,44 @@ impl Node {
+@@ -1175,6 +1182,48 @@ impl Node {
  	}
  }
  
@@ -1080,7 +1465,9 @@ index 821304a..d66b708 100644
 +#[uniffi::export]
 +impl Node {
 +	/// Pin a peer's out-of-band verified ML-KEM key before connecting.
-+	pub fn register_pq_peer_bytes(&self, node_id: PublicKey, kem_key: Vec<u8>) -> Result<(), Error> {
++	pub fn register_pq_peer_bytes(
++		&self, node_id: PublicKey, kem_key: Vec<u8>,
++	) -> Result<(), Error> {
 +		let kem_key: [u8; lightning::ln::peer_handler::PQ_KEM_EK_LEN] =
 +			kem_key.try_into().map_err(|_| Error::InvalidPublicKey)?;
 +		self.register_pq_peer(node_id, kem_key);
@@ -1098,7 +1485,9 @@ index 821304a..d66b708 100644
 +	}
 +
 +	/// Require a fresh regtest invoice with a valid PQLN signature bound to the pinned key.
-+	pub fn verify_pq_invoice(&self, invoice_text: String, trusted_key: Vec<u8>) -> Result<(), Error> {
++	pub fn verify_pq_invoice(
++		&self, invoice_text: String, trusted_key: Vec<u8>,
++	) -> Result<(), Error> {
 +		use lightning::ln::invoice_utils::{verify_bolt11_pq_signature, Bolt11PqVerification};
 +		let trusted_key: [u8; lightning::sign::pq::PQ_PUBLIC_KEY_LEN] =
 +			trusted_key.try_into().map_err(|_| Error::InvalidPublicKey)?;
@@ -1117,7 +1506,7 @@ index 821304a..d66b708 100644
  #[cfg(all(feature = "unified-payments", feature = "uniffi"))]
  #[uniffi::export]
  impl Node {
-@@ -1258,6 +1303,24 @@ impl Node {
+@@ -1258,6 +1307,24 @@ impl Node {
  			.collect()
  	}
  
@@ -1142,7 +1531,7 @@ index 821304a..d66b708 100644
  	/// Connect to a node on the peer-to-peer network.
  	///
  	/// If `persist` is set to `true`, we'll remember the peer and reconnect to it on restart.
-@@ -2506,7 +2569,7 @@ impl PersistedNodeMetrics {
+@@ -2506,7 +2573,7 @@ impl PersistedNodeMetrics {
  	}
  }
  
@@ -1151,7 +1540,7 @@ index 821304a..d66b708 100644
  	(0, latest_lightning_wallet_sync_timestamp, option),
  	(1, latest_pathfinding_scores_sync_timestamp, option),
  	(2, latest_onchain_wallet_sync_timestamp, option),
-@@ -2590,7 +2653,7 @@ mod tests {
+@@ -2590,7 +2657,7 @@ mod tests {
  			latest_pathfinding_scores_sync_timestamp: Option<u64>,
  			latest_node_announcement_broadcast_timestamp: Option<u64>,
  		}
@@ -1256,7 +1645,7 @@ index 30a1135..a0fad89 100644
  	(2, conflicting_txids, optional_vec),
  	(4, candidates, optional_vec),
 diff --git a/src/payment/store.rs b/src/payment/store.rs
-index 3163ed1..793dc02 100644
+index 3163ed1..336b968 100644
 --- a/src/payment/store.rs
 +++ b/src/payment/store.rs
 @@ -16,8 +16,8 @@ use lightning::ln::types::ChannelId;
@@ -1265,8 +1654,8 @@ index 3163ed1..793dc02 100644
  use lightning::{
 -	_init_and_read_len_prefixed_tlv_fields, impl_writeable_tlv_based,
 -	impl_writeable_tlv_based_enum, write_tlv_fields,
-+	_init_and_read_len_prefixed_tlv_fields, impl_ser_tlv_based,
-+	impl_ser_tlv_based_enum, write_tlv_fields,
++	_init_and_read_len_prefixed_tlv_fields, impl_ser_tlv_based, impl_ser_tlv_based_enum,
++	write_tlv_fields,
  };
  use lightning_types::payment::{PaymentHash, PaymentPreimage, PaymentSecret};
  use lightning_types::string::UntrustedString;
@@ -1405,15 +1794,17 @@ index 1a61daa..7297db3 100644
  	(2, value, required),
  });
 diff --git a/src/wallet/mod.rs b/src/wallet/mod.rs
-index b9c12b4..ba02a26 100644
+index b9c12b4..dd747d1 100644
 --- a/src/wallet/mod.rs
 +++ b/src/wallet/mod.rs
-@@ -173,6 +173,20 @@ pub(crate) struct Wallet {
+@@ -173,6 +173,22 @@ pub(crate) struct Wallet {
  }
  
  impl Wallet {
 +	#[cfg(feature = "chain-p2p")]
-+	pub(crate) async fn apply_historical_block(&self, block: &bitcoin::Block, height: u32) -> Result<(), Error> {
++	pub(crate) async fn apply_historical_block(
++		&self, block: &bitcoin::Block, height: u32,
++	) -> Result<(), Error> {
 +		let mut update = Update::default();
 +		let anchor = bdk_chain::ConfirmationBlockTime {
 +			block_id: bdk_chain::BlockId { height, hash: block.block_hash() },
@@ -1429,23 +1820,25 @@ index b9c12b4..ba02a26 100644
  	pub(crate) fn new(
  		wallet: bdk_wallet::PersistedWallet<KVStoreWalletPersister>,
  		wallet_persister: KVStoreWalletPersister, persisted_pool_indices: Vec<u32>,
-@@ -209,6 +223,15 @@ impl Wallet {
+@@ -209,6 +225,17 @@ impl Wallet {
  		self.inner.lock().expect("lock").start_sync_with_revealed_spks().build()
  	}
  
 +	#[cfg(feature = "chain-p2p")]
 +	pub(crate) fn revealed_scripts(&self) -> Vec<ScriptBuf> {
 +		let wallet = self.inner.lock().expect("lock");
-+		[KeychainKind::External, KeychainKind::Internal].into_iter()
-+			.flat_map(|keychain| wallet.spk_index().revealed_keychain_spks(keychain)
-+				.map(|(_, script)| script))
++		[KeychainKind::External, KeychainKind::Internal]
++			.into_iter()
++			.flat_map(|keychain| {
++				wallet.spk_index().revealed_keychain_spks(keychain).map(|(_, script)| script)
++			})
 +			.collect()
 +	}
 +
  	pub(crate) fn get_cached_txs(&self) -> Vec<Arc<Transaction>> {
  		self.inner.lock().expect("lock").tx_graph().full_txs().map(|tx_node| tx_node.tx).collect()
  	}
-@@ -224,7 +247,7 @@ impl Wallet {
+@@ -224,7 +251,7 @@ impl Wallet {
  			.collect()
  	}
  
@@ -1454,7 +1847,7 @@ index b9c12b4..ba02a26 100644
  	pub(crate) fn current_best_block(&self) -> BlockLocator {
  		let checkpoint = self.inner.lock().expect("lock").latest_checkpoint();
  		let mut current_block = Some(checkpoint.clone());
-@@ -2313,13 +2336,13 @@ fn aggregate_local_stakes(candidate: &FundingCandidate) -> LocalStakeAggregate {
+@@ -2313,13 +2340,13 @@ fn aggregate_local_stakes(candidate: &FundingCandidate) -> LocalStakeAggregate {
  
  impl Listen for Wallet {
  	fn filtered_block_connected(
@@ -1473,7 +1866,7 @@ index b9c12b4..ba02a26 100644
  	}
  
  	fn block_connected(&self, block: &bitcoin::Block, height: u32) {
-@@ -2523,6 +2546,30 @@ impl NodeSigner for WalletKeysManager {
+@@ -2523,6 +2550,30 @@ impl NodeSigner for WalletKeysManager {
  	fn sign_message(&self, msg: &[u8]) -> Result<String, ()> {
  		self.inner.sign_message(msg)
  	}
