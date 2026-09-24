@@ -271,7 +271,11 @@ struct RegtestJourneyTests {
         // WalletCore detects the fork before Lightning sees replacement blocks.
         let removed = try node.rpc(["getblockhash", "107"])
         try node.rpc(["invalidateblock", removed])
-        try node.rpc(["generatetoaddress", "3", miningAddress], wallet: "bank")
+        // A fresh coinbase prevents regenerating the invalidated block when
+        // Core's next block timestamp is unchanged.
+        let forkMiningAddress = try node.rpc(["getnewaddress"], wallet: "bank")
+        try node.rpc(["generatetoaddress", "3", forkMiningAddress], wallet: "bank")
+        #expect(try node.rpc(["getblockhash", "107"]) != removed)
         try await node.waitForFilters()
         try await scan(resumedDriver, filters: filters, wallet: wallet, broadcaster: broadcaster, pair: resumedPair)
         try await settle(resumedPair, driver: resumedDriver, filters: filters, wallet: wallet, broadcaster: broadcaster)
