@@ -1,0 +1,4 @@
+module CLightningBridge {
+    header "winnow_lightning.h"
+    export *
+}

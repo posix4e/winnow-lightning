@@ -1,0 +1,28 @@
+[package]
+name = "winnow-lightning-bridge"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dependencies]
+lightning = { git = "https://github.com/ahmet-kurt/pq-rust-lightning", rev = "1d7dda453dd385f3ede84c39eed5d20afe34e02a", features = ["post-quantum"] }
+lightning-persister = { git = "https://github.com/ahmet-kurt/pq-rust-lightning", rev = "1d7dda453dd385f3ede84c39eed5d20afe34e02a" }
+bitcoin = "0.32.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hex = "0.4"
+fs2 = "0.4"
+zeroize = "1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.dev]
+debug = 0
+
+[profile.release]
+panic = "unwind"
+strip = "debuginfo"
