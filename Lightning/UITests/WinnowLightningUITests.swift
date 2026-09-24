@@ -167,7 +167,8 @@ final class WinnowLightningUITests: XCTestCase {
         tap(app, "createWalletButton")
         XCTAssertTrue(app.buttons["receiveButton"].appears(within: 60))
         if sender {
-            tap(app, "receiveButton")
+            // Receive belongs to the wallet toolbar, outside the scrollable form.
+            app.buttons["receiveButton"].tap()
             tap(app, "skipReceiveAddressLabelButton")
             let address = app.staticTexts["receiveAddress"]
             XCTAssertTrue(address.appears(within: 30))
@@ -185,7 +186,8 @@ final class WinnowLightningUITests: XCTestCase {
             try connect(app, card: cards[1]!, port: portA, control: control)
             tap(app, "openLightningChannelButton")
             tap(app, "fundLightningChannelButton")
-            tap(app, "Sign and reserve funding")
+            XCTAssertTrue(app.buttons["Sign and reserve funding"].appears(within: 30))
+            app.buttons["Sign and reserve funding"].tap()
         } else {
             try connect(app, card: cards[2]!, port: ports[2]!, control: control)
             print("CLAIM_JOURNEY_PHASE recipient-channel-request")
