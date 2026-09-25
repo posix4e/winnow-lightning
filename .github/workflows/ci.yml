@@ -46,11 +46,14 @@ jobs:
             echo "WINNOW_LIGHTNING_RESULTS=$RUNNER_TEMP/lightning-results"
             echo "WINNOW_BITCOIN_DIR=$(dirname "$(command -v bitcoind)")"
             echo "WINNOW_CLN_DIR=$RUNNER_TEMP/lightning-references/cln"
+            echo "WINNOW_LDK_HARNESS=$RUNNER_TEMP/lightning-references/harness/target/debug/winnow-lightning-reference"
           } >> "$GITHUB_ENV"
       - name: Build unmodified reference peers and verify pinned async behavior
         run: scripts/ci-lightning-references "$REFERENCE_DIR" > "$WINNOW_LIGHTNING_RESULTS/reference-build.log" 2>&1
       - name: Swift state, persistence, transport and vector tests
         run: swift test --filter LightningCoreTests
+      - name: Upstream LDK offer, request and static-invoice checks
+        run: scripts/ci-lightning-offers
       - name: Stock-peer payments, process restart and force close
         run: scripts/ci-lightning-peer --close force
       - name: Stock-peer payments, process restart and cooperative close

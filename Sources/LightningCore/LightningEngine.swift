@@ -25,6 +25,7 @@ public actor LightningEngine {
         case channelReady(Data)
         case paymentChanged(Payment)
         case broadcastClose(channelID: Data, transaction: Data)
+        case broadcastRecovery(channelID: Data, transaction: Data)
     }
     struct State: Codable {
         var version = 1
@@ -36,6 +37,7 @@ public actor LightningEngine {
         var outbox: [Outbound] = []
         var payments: [PaymentRecord] = []
         var incoming: [ReceiveRequest] = []
+        var scan = LightningChainState()
     }
     let journal: any LightningJournal
     var state: State
@@ -62,7 +64,7 @@ public actor LightningEngine {
     }
     public func channels() -> [Channel] {
         state.channels.map { Channel(id: $0.id, peer: $0.peer, capacitySat: $0.capacity, phase: $0.phase,
-                                     signedCommitment: $0.phase == .recovering ? nil : $0.signedCommitment) }
+                                     signedCommitment: $0.dataLossDetected ? nil : $0.signedCommitment) }
     }
     /// The adapter calls this only after its verified header/filter scan has
     /// caught up. Every restart starts paused, including fresh network sessions.
@@ -79,7 +81,13 @@ public actor LightningEngine {
     public func peerDisconnected(_ peer: Data) { peers.removeValue(forKey: peer) }
     public func pendingMessages(peer: Data) throws -> [Outbound] {
         try operational(peer)
-        return state.outbox.filter { $0.peer == peer && (!reestablishing.contains($0.channelID) || $0.message.type == 136) }
+        return state.outbox.filter { item in
+            guard item.peer == peer, !reestablishing.contains(item.channelID) || item.message.type == 136 else { return false }
+            guard let channel = state.channels.first(where: { $0.id == item.channelID }) else { return true }
+            // Opening and reestablishment remain possible while funding is
+            // unconfirmed. Never publish payment/revocation work after a reorg.
+            return channel.fundingIsConfirmed || [32, 33, 34, 35, 136].contains(item.message.type)
+        }
     }
     @discardableResult
     public func openChannel(peer: Data, capacitySat: UInt64, feePerKW: UInt32) throws -> Data {
@@ -112,6 +120,7 @@ public actor LightningEngine {
         var writer = LightningWire.Writer(); writer.append(temporaryID); writer.append(transaction.txid)
         writer.u16(output); writer.append(try channel.remoteSignature())
         var next = state; next.channels[index] = channel
+        rewindForNewFunding(in: &next)
         try Self.enqueue(.init(type: 34, payload: writer.data), channel: channel, in: &next)
         try persist(next)
     }

@@ -80,9 +80,15 @@ This remains a regtest research beta, not unattended mainnet protection.
 
 ## Evidence tracking
 
-Published transaction/transport vectors and Bitcoin Core transaction checks
-passed before this expansion. `ChannelEngineTests` adds initial channel opening,
-atomic publication and journal failure tests. `ci-lightning-peer` checks actual
-opening against the stock CLN release and acceptance of the independently signed
-initial local commitment by Core. Its receipt describes only that scope; it
-does not establish payment, reconnect, async, app or release completion.
+`ci-lightning-peer` now checks stock CLN channel opening, payments in both
+directions, stable payment IDs, actual Swift process termination/restart,
+reestablishment, cooperative close and an independently signed force close.
+Bitcoin Core validates commitment, HTLC, delayed, immediate and penalty spends,
+including penalties after a peer's second-stage transaction wins the first race.
+
+`ChainRecoveryTests` covers verified scanner sharing, journal cursor replay,
+funding reorgs, maturity recalculation, stale-backup protection and failed writes.
+`ci-lightning-offers` checks BOLT12 offers, requests and static-invoice signatures
+in both directions against the pinned LDK public APIs. Published BOLT12 encoding
+and signature vectors are also required. These checks do not yet establish the
+live async flow, full adversarial matrix, app journeys or release completion.

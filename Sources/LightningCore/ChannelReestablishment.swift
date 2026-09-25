@@ -2,7 +2,10 @@ import Foundation
 
 extension LightningEngine {
     func prepareReestablishment(_ peer: Data) throws {
-        let indices = state.channels.indices.filter { state.channels[$0].peer == peer && state.channels[$0].signedCommitment != nil }
+        let indices = state.channels.indices.filter {
+            state.channels[$0].peer == peer && state.channels[$0].signedCommitment != nil &&
+                !state.channels[$0].dataLossDetected && state.channels[$0].closingTransaction == nil && state.channels[$0].observedFundingSpend == nil
+        }
         guard !indices.isEmpty else { return }
         var next = state
         for index in indices {
@@ -37,6 +40,7 @@ extension LightningEngine {
             // The peer proves it has a secret which this snapshot never
             // disclosed: this is a stale backup. Never publish its commitment.
             channel.phase = .recovering
+            channel.dataLossDetected = true
             var next = state; next.channels[index] = channel
             next.outbox.removeAll { $0.peer == peer && $0.channelID == id }
             try persist(next)

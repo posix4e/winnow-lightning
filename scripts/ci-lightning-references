@@ -60,6 +60,10 @@ def main():
                             '--no-default-features', *features, '--', '--test-threads=2'], cwd=ldk,
                            env=rust, stdout=log, stderr=subprocess.STDOUT, check=True)
         print((directory / f'ldk-async-{name}.log').read_text())
+    harness = directory / 'harness'
+    shutil.copytree(ROOT / 'Tools/LightningReference/Harness', harness, dirs_exist_ok=True)
+    run('cargo', 'build', '--locked', cwd=harness, env=rust)
+    run('git', 'diff', '--exit-code', 'HEAD', '--', cwd=ldk)
     manifest = {'core_lightning': {'version': 'v26.06.8', 'commit': CLN}, 'ldk': {'commit': LDK},
                 'purpose': 'independent test peers only; never linked into the app',
                 'rustc': subprocess.check_output(['rustc', '--version'], text=True).strip()}

@@ -6,7 +6,7 @@ extension LightningEngine {
         try operational(peer)
         let index = try channelIndex(channelID, peer: peer)
         var channel = state.channels[index]
-        guard [.ready, .closing].contains(channel.phase), !reestablishing.contains(channelID),
+        guard [.ready, .closing].contains(channel.phase), channel.fundingIsConfirmed, !reestablishing.contains(channelID),
               ChannelTerms.validShutdown(destination), feeSat <= maximumFeeSat, maximumFeeSat < channel.capacity
         else { throw LightningError.invalidState }
         try channel.requireQuiescent()
@@ -25,7 +25,8 @@ extension LightningEngine {
         var reader = LightningWire.Reader(message.payload)
         let id = try reader.take(32), index = try channelIndex(id, peer: peer)
         var channel = state.channels[index]
-        guard [.ready, .closing].contains(channel.phase), !reestablishing.contains(id) else { throw LightningError.invalidState }
+        guard [.ready, .closing].contains(channel.phase), channel.fundingIsConfirmed,
+              channel.observedFundingSpend == nil, !reestablishing.contains(id) else { throw LightningError.invalidState }
         var next = state
         if message.type == 38 {
             let length = try reader.u16(), script = try reader.take(Int(length)); _ = try reader.tlvs(known: [])
@@ -74,7 +75,8 @@ extension LightningEngine {
         try healthy()
         guard chainIsCurrent else { throw LightningError.invalidState }
         return state.channels.compactMap { channel in
-            guard channel.phase == .closing, let transaction = channel.closingTransaction else { return nil }
+            guard channel.phase == .closing, channel.observedFundingSpend == nil,
+                  !channel.dataLossDetected, let transaction = channel.closingTransaction else { return nil }
             return .broadcastClose(channelID: channel.id, transaction: transaction)
         }
     }

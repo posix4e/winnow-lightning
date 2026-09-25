@@ -14,6 +14,8 @@ enum Fixture {
 
     static func run() throws -> [String: String] {
         let arguments = Array(CommandLine.arguments.dropFirst())
+        if arguments == ["bolt12"] { return try offerVectors() }
+        if arguments == ["onion-reply"] { return try onionReply() }
         let funding = try ChannelScripts.funding(key(1), key(2))
         if arguments == ["script"] {
             return ["script": funding.bytes.hex, "local": try key(1).hex, "remote": try key(2).hex]
@@ -65,6 +67,10 @@ enum Fixture {
         result["penalty_delayed"] = try ChannelRecovery.penaltyDelayed(parent: signed, outputIndex: UInt32(delayedIndex),
             destination: destination, feeSat: 500, revocationSecret: revocationSecret, delayedKey: keys.delayedLocal, delay: delay)
             .serialized(includeWitness: true).hex
+        if let immediate = signed.outputs.firstIndex(where: { $0.scriptPubKey == (try? ChannelScripts.witnessKeyHash(key(7))) }) {
+            result["remote_immediate"] = try ChannelRecovery.immediate(parent: signed, outputIndex: UInt32(immediate),
+                destination: destination, feeSat: 500, paymentSecret: secret(7)).serialized(includeWitness: true).hex
+        }
         for output in commitment.htlcOutputs {
             let name = output.htlc.offered ? "timeout" : "success"
             let digest = try ChannelRecovery.htlcDigest(commitment: commitment, output: output)
@@ -79,6 +85,12 @@ enum Fixture {
             result["penalty_" + name] = try ChannelRecovery.penaltyHTLC(parent: signed, outputIndex: output.index,
                 destination: destination, feeSat: 500, revocationSecret: revocationSecret,
                 localKey: keys.htlcLocal, remoteKey: keys.htlcRemote, htlc: output.htlc).serialized(includeWitness: true).hex
+            result[output.htlc.offered ? "remote_success" : "remote_timeout"] = try ChannelRecovery.remoteHTLC(
+                commitment: commitment, output: output, destination: destination, feeSat: 500,
+                htlcSecret: remoteHTLC, preimage: output.htlc.offered ? secret(9) : nil).serialized(includeWitness: true).hex
+            result["penalty_stage_" + name] = try ChannelRecovery.penaltyDelayed(parent: stage, outputIndex: 0,
+                destination: destination, feeSat: 500, revocationSecret: revocationSecret, delayedKey: keys.delayedLocal,
+                delay: delay).serialized(includeWitness: true).hex
         }
         return result
     }

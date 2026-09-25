@@ -43,6 +43,7 @@ extension LightningEngine {
         channel.phase = .awaitingConfirmation
         var writer = LightningWire.Writer(); writer.append(channel.id); writer.append(try channel.remoteSignature())
         var next = state; next.channels[index] = channel
+        rewindForNewFunding(in: &next)
         Self.acknowledge([33], channel: channel, in: &next)
         try Self.enqueue(.init(type: 35, payload: writer.data), channel: channel, in: &next)
         try persist(next)
@@ -94,6 +95,7 @@ extension LightningEngine {
         guard channel.signedCommitment != nil else { throw LightningError.invalidState }
         if channel.localReady { return [] }
         channel.localReady = true
+        channel.fundingIsConfirmed = true
         if channel.remoteReady { channel.phase = .ready }
         var writer = LightningWire.Writer(); writer.append(channel.id); writer.append(try channel.secrets.point(1))
         var next = state; next.channels[index] = channel

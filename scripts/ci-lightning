@@ -112,6 +112,27 @@ def main():
                 for name in ['penalty_delayed', 'penalty_timeout', 'penalty_success']:
                     send(revoked, name)
                 rpc('generatetoaddress', 1, address)
+                remote = funded()
+                send(remote, 'commitment')
+                rpc('generatetoaddress', 1, address)
+                send(remote, 'remote_immediate')
+                send(remote, 'remote_success')
+                check(remote, 'remote_timeout', False)
+                rpc('generatetoaddress', 3, address)
+                send(remote, 'remote_timeout')
+                rpc('generatetoaddress', 1, address)
+
+                raced = funded()
+                send(raced, 'commitment')
+                rpc('generatetoaddress', 1, address)
+                send(raced, 'success')
+                rpc('generatetoaddress', 1, address)
+                send(raced, 'penalty_stage_success')
+                rpc('generatetoaddress', 3, address)
+                send(raced, 'timeout')
+                rpc('generatetoaddress', 1, address)
+                send(raced, 'penalty_stage_timeout')
+                rpc('generatetoaddress', 1, address)
                 print(json.dumps({'bitcoin_core': rpc('getnetworkinfo')['subversion'],
                                   'accepted': accepted, 'rejected': rejected, 'result': 'passed'}, indent=2))
             finally:

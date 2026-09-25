@@ -152,6 +152,8 @@ final class ChannelEngineTests: XCTestCase, @unchecked Sendable {
         let br = try await bob.pendingMessages(peer: aliceKey).first { $0.message.type == 36 }!.message
         _ = try await alice.receive(peer: bobKey, message: br)
         _ = try await bob.receive(peer: aliceKey, message: ar)
+        try await alice.configureRecovery(channelID: id, peer: bobKey, destination: ChannelScripts.witnessKeyHash(aliceKey), feeSat: 500)
+        try await bob.configureRecovery(channelID: id, peer: aliceKey, destination: ChannelScripts.witnessKeyHash(bobKey), feeSat: 500)
         return Pair(alice: alice, bob: bob, aliceKey: aliceKey, bobKey: bobKey, id: id, aliceStore: aStore, bobStore: bStore)
     }
     private func pump(_ sender: LightningEngine, peer: Data, to receiver: LightningEngine, from: Data,

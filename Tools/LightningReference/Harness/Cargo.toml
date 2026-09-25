@@ -1,0 +1,16 @@
+[package]
+name = "winnow-lightning-reference"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Copied beside the verified, pinned reference checkout by ci-lightning-references.
+# This binary is a host fixture, never a dependency of the Swift app.
+[dependencies]
+lightning = { path = "../ldk/lightning", default-features = false, features = ["std"] }
+bitcoin = { version = "0.32.4", default-features = false, features = ["std", "secp-recovery"] }
+serde_json = "1.0"
+
+[profile.dev]
+debug = 0
+incremental = false

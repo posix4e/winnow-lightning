@@ -14,3 +14,10 @@ BIP143 vectors: Johnson Lau and Pieter Wuille, Public Domain. Nine examples cove
 three explicitly supplied payloads, including a payload longer than 252 bytes.
 The packet and shared secrets come from CLN, not the Swift implementation.
 The all-zero ChaCha20 stream in `OnionTests` is RFC 8439 Appendix A.1 vector #1.
+
+`BOLT12/{format-string,offers,signature}-test.json` are unmodified upstream
+vectors from the same BOLT revision and license above. `ldk-static-invoice.json`
+comes from public builders in the pinned LDK reference library. The separate
+host harness regenerates it and verifies Swift-built requests and static
+invoices through LDK's normal parsers and signature checks. Keys are public,
+disposable fixtures; codec acceptance alone is not async payment settlement.

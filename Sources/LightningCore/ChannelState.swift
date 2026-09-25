@@ -37,6 +37,7 @@ struct ChannelState: Codable {
     var signedCommitment: Data?
     var remoteNextPoint: Data?
     var localReady = false, remoteReady = false
+    var fundingIsConfirmed = false
     var localNumber: UInt64 = 0, remoteNumber: UInt64 = 0
     var remoteCurrentPoint: Data?
     var awaitingRevocation = false
@@ -50,6 +51,11 @@ struct ChannelState: Codable {
     var localShutdown: Data?, remoteShutdown: Data?
     var closingFee: UInt64?, closingFeeLimit: UInt64?
     var closingTransaction: Data?
+    var observedFundingSpend: Data?
+    var fundingSpendHeight: UInt32?
+    var dataLossDetected = false
+    var recovery: ChannelResolution.Policy?
+    var resolutions: [ChannelResolution.Spend] = []
 
     var id: Data {
         guard let fundingTxid, let fundingOutput else { return temporaryID }

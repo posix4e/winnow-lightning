@@ -5,6 +5,45 @@ import WalletCore
 /// These builders authorize no broadcast: the caller must select the current
 /// commitment and obtain height/confirmation information from Winnow's chain.
 public enum ChannelRecovery {
+    /// The non-owner's immediate static_remotekey output.
+    public static func immediate(parent: Transaction, outputIndex: UInt32, destination: Script,
+                                 feeSat: UInt64, paymentSecret: Data) throws -> Transaction {
+        let key = try ChannelKeys.publicKey(secret: paymentSecret)
+        guard parent.outputs.indices.contains(Int(outputIndex)) else { throw LightningError.invalidCommitment }
+        let output = parent.outputs[Int(outputIndex)]
+        guard output.scriptPubKey == (try ChannelScripts.witnessKeyHash(key)), output.value > 0,
+              feeSat < UInt64(output.value) else { throw LightningError.invalidAmount }
+        let hash = RIPEMD160.hash(ChannelKeys.hash(key))
+        let script = Script.build { $0.appendOpcode(0x76); $0.appendOpcode(0xa9); $0.appendPush(hash); $0.appendOpcode(0x88); $0.appendOpcode(0xac) }
+        var tx = Transaction(version: 2, inputs: [.init(previousOutput: .init(txid: parent.txid, vout: outputIndex),
+            scriptSig: Data(), sequence: .max)], outputs: [.init(value: output.value - Int64(feeSat), scriptPubKey: destination.bytes)], locktime: 0)
+        let digest = try SighashBIP143.sighash(tx: tx, inputIndex: 0, scriptCode: script.bytes, value: output.value)
+        tx.inputs[0].witness = [try ChannelKeys.sign(digest: digest, secret: paymentSecret) + Data([1]), key]
+        return tx
+    }
+
+    /// A non-owner claims the single-signature branch on the peer's commitment.
+    public static func remoteHTLC(commitment: ChannelTransactions.Commitment, output: ChannelTransactions.HTLCOutput,
+                                  destination: Script, feeSat: UInt64, htlcSecret: Data, preimage: Data? = nil) throws -> Transaction {
+        guard try ChannelKeys.publicKey(secret: htlcSecret) == commitment.parameters.keys.htlcRemote,
+              commitment.htlcOutputs.contains(where: { $0.index == output.index && $0.htlc == output.htlc }),
+              feeSat < output.htlc.amountMsat / 1000 else { throw LightningError.invalidCommitment }
+        let selector: Data
+        if output.htlc.offered {
+            guard let preimage, preimage.count == 32, ChannelKeys.hash(preimage) == output.htlc.paymentHash else { throw LightningError.invalidHash }
+            selector = preimage
+        } else {
+            guard preimage == nil else { throw LightningError.invalidHash }
+            selector = Data()
+        }
+        var tx = Transaction(version: 2, inputs: [.init(previousOutput: .init(txid: commitment.transaction.txid, vout: output.index),
+            scriptSig: Data(), sequence: 0)], outputs: [.init(value: Int64(output.htlc.amountMsat / 1000 - feeSat), scriptPubKey: destination.bytes)],
+            locktime: output.htlc.offered ? 0 : output.htlc.expiry)
+        let digest = try SighashBIP143.sighash(tx: tx, inputIndex: 0, scriptCode: output.witnessScript.bytes,
+                                             value: Int64(output.htlc.amountMsat / 1000))
+        tx.inputs[0].witness = [try ChannelKeys.sign(digest: digest, secret: htlcSecret) + Data([1]), selector, output.witnessScript.bytes]
+        return tx
+    }
     public static func htlcDigest(commitment: ChannelTransactions.Commitment,
                                   output: ChannelTransactions.HTLCOutput) throws -> Data {
         let tx = try ChannelTransactions.htlcTransaction(commitment: commitment, output: output)

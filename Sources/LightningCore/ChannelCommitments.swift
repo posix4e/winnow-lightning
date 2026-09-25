@@ -86,7 +86,10 @@ extension LightningEngine {
     }
     func activeChannelIndex(_ id: Data, peer: Data) throws -> Int {
         let index = try channelIndex(id, peer: peer)
-        guard [.ready, .closing].contains(state.channels[index].phase), !reestablishing.contains(id) else { throw LightningError.invalidState }
+        guard [.ready, .closing].contains(state.channels[index].phase), state.channels[index].fundingIsConfirmed,
+              state.channels[index].observedFundingSpend == nil,
+              state.channels[index].closingTransaction == nil, state.channels[index].recovery != nil,
+              !reestablishing.contains(id) else { throw LightningError.invalidState }
         return index
     }
 }

@@ -83,6 +83,13 @@ struct PeerFixture {
             guard let id = Data(hex: input["id"] ?? ""), let destination = Data(hex: input["destination"] ?? "") else { throw LightningError.invalidMessage }
             try await engine.closeChannel(channelID: id, peer: peer, destination: destination, feeSat: 500, maximumFeeSat: 724)
             return ["phase": "closing"]
+        case "recovery":
+            guard let id = Data(hex: input["id"] ?? ""), let destination = Data(hex: input["destination"] ?? "") else { throw LightningError.invalidMessage }
+            try await engine.configureRecovery(channelID: id, peer: peer, destination: destination, feeSat: 500)
+            return ["status": "recovery_configured"]
+        case "force_close":
+            guard let id = Data(hex: input["id"] ?? "") else { throw LightningError.invalidMessage }
+            return encode([try await engine.forceClose(channelID: id, peer: peer)])
         default: throw LightningError.invalidMessage
         }
     }
@@ -112,6 +119,7 @@ struct PeerFixture {
         case .channelReady(let id): return ["event": "channel_ready", "id": id.hex]
         case .paymentChanged(let payment): return ["event": "payment_changed", "id": payment.id.hex, "phase": payment.phase.rawValue]
         case .broadcastClose(let id, let transaction): return ["event": "broadcast_close", "id": id.hex, "transaction": transaction.hex]
+        case .broadcastRecovery(let id, let transaction): return ["event": "broadcast_recovery", "id": id.hex, "transaction": transaction.hex]
         }
     }
     static func emit(_ value: [String: String]) throws {

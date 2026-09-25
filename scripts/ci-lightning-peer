@@ -219,6 +219,8 @@ def main():
                 swift.receive(36)
                 snapshot = swift.call('snapshot')
                 assert snapshot['phase'] == 'ready'
+                recovery_destination = rpc('getaddressinfo', address)['scriptPubKey']
+                swift.call('recovery', id=snapshot['id'], destination=recovery_destination)
                 channels = wait_for(lambda: [channel for channel in ln('listpeerchannels')['channels'] if channel['state'] == 'CHANNELD_NORMAL'])
                 assert len(channels) == 1
                 remote = channels[0]
@@ -239,7 +241,9 @@ def main():
                 assert snapshot['commitment'] == previous_commitment
                 assert swift.call('payment', id='51' * 32) == payments['swift_to_cln']
                 assert swift.call('payment', id='52' * 32) == payments['cln_to_swift']
-                closing = snapshot['commitment']
+                closing = None
+                if close_mode == 'force':
+                    closing = swift.call('force_close', id=snapshot['id'])['transaction']
                 if close_mode == 'cooperative':
                     destination = rpc('getaddressinfo', address)['scriptPubKey']
                     swift.call('close', id=snapshot['id'], destination=destination)
