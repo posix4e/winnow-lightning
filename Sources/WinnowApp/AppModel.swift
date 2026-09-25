@@ -1143,12 +1143,14 @@ final class AppModel {
     /// Peer/header catch-up continues through the regular sync loop while the
     /// user backs up the phrase.
     func createWallet() async throws {
+        try requireResearchWalletPreserved()
         try await authenticateSensitiveAction(reason: "Create and protect your wallet")
         defer { keychainAuthentication.revoke() }
         try Task.checkCancellation()
         await buildStackIfNeeded()
         guard stack != nil else { throw AppError.noStack }
         let knownHeight = await creationHeightForNewWallet()
+        try requireResearchWalletPreserved()
         guard let walletURL = walletURL() else { throw AppError.noWallet }
         let wallet = try Wallet.create(network: network, keyStore: keyStore,
                                        storageURL: walletURL, entropy: e2e?.entropy,
@@ -1178,6 +1180,7 @@ final class AppModel {
 
     private func importWallet(bundle: ImportBundle, authenticate: Bool,
                               afterCommit: (@MainActor (String) async throws -> Void)? = nil) async throws -> ImportReport? {
+        try requireResearchWalletPreserved()
         try VaultStore.validate(bundle.vaults ?? [], network: network)
         guard bundle.network == network.rawValue else { throw AppError.wrongNetwork(bundle.network) }
         if authenticate, bundle.mnemonic != nil {
@@ -1188,6 +1191,7 @@ final class AppModel {
         // Do not cross the Keychain/storage commit boundary after the view
         // that requested a seed-bearing import has been invalidated.
         try Task.checkCancellation()
+        try requireResearchWalletPreserved()
         e2e?.journal("import.started", fields: [
             "bundleVersion": String(bundle.version),
             "seedBearing": String(bundle.mnemonic != nil),
@@ -1240,6 +1244,18 @@ final class AppModel {
             "nextScanHeight": String(status.nextScanHeight),
         ])
         return report
+    }
+
+    /// Channel recovery destinations belong to this wallet's keys. Replacing
+    /// the wallet while retaining its channel journal can strand those funds.
+    /// Check the file as well as memory so this also holds before boot and
+    /// after another creation/import completes across an authentication await.
+    private func requireResearchWalletPreserved() throws {
+        guard lightning != nil else { return }
+        let savedWallet = walletURL().map { FileManager.default.fileExists(atPath: $0.path) } ?? false
+        guard walletID == nil, !savedWallet else {
+            throw AppError.storageDamaged("Keep this research wallet on the device: replacing it could lose the keys needed to recover Lightning channel funds.")
+        }
     }
 
     /// Live wallet as a v2 import-bundle JSON string (docs/import.html).

@@ -69,12 +69,13 @@ final class LightningAppUITests: XCTestCase {
         try paste(offer)
         tap(app, "lightningSend")
         tap(app, "lightningPasteOffer")
+        XCTAssertTrue(scrollUntilExists(app, app.textFields["lightningAmount"], fullyVisible: true))
         app.typeInto("lightningAmount", "5000")
         tap(app, "lightningReviewPayment")
         XCTAssertTrue(app.navigationBars["Review Lightning"].appears(within: 15))
-        XCTAssertTrue(app.staticTexts["Amount, 5000 sats"].exists)
-        XCTAssertTrue(app.staticTexts["Maximum fee, 50 sats"].exists)
-        XCTAssertTrue(app.staticTexts["Maximum expiry, 2016 blocks"].exists)
+        for row in ["Amount, 5000 sats", "Maximum fee, 50 sats", "Maximum expiry, 2016 blocks"] {
+            XCTAssertTrue(scrollUntilExists(app, app.staticTexts[row], fullyVisible: true))
+        }
         Screenshots.capture(app, "lightning-04-payment-review", testCase: self)
         tap(app, "lightningConfirm")
         XCTAssertTrue(app.navigationBars["Review Lightning"].disappears(within: 30), app.debugDescription)
@@ -102,7 +103,7 @@ final class LightningAppUITests: XCTestCase {
         Screenshots.capture(app, "lightning-07-sender-reconciled-once", testCase: self)
         _ = try rpc("finish")
         tap(app, "lightningClose", up: true)
-        XCTAssertTrue(app.staticTexts["Maximum negotiated fee, 905 sats"].appears(within: 15))
+        XCTAssertTrue(scrollUntilExists(app, app.staticTexts["Maximum negotiated fee, 905 sats"], fullyVisible: true))
         Screenshots.capture(app, "lightning-08-close-review", testCase: self)
         tap(app, "lightningConfirm")
         XCTAssertTrue(app.navigationBars["Review Lightning"].disappears(within: 30), app.debugDescription)
@@ -141,10 +142,9 @@ final class LightningAppUITests: XCTestCase {
     private func configure(_ app: XCUIApplication, profile: [String: Any]) throws {
         try paste(String(decoding: JSONSerialization.data(withJSONObject: profile, options: [.sortedKeys]), as: UTF8.self))
         tap(app, "lightningSetup", up: true)
-        XCTAssertTrue(app.buttons["lightningPasteProfile"].appears(within: 15))
-        app.buttons["lightningPasteProfile"].tap()
+        tap(app, "lightningPasteProfile")
         tap(app, "lightningReviewProfile")
-        XCTAssertTrue(app.buttons["lightningConfirm"].appears(within: 15))
+        XCTAssertTrue(app.navigationBars["Review Lightning"].appears(within: 15))
         tap(app, "lightningConfirm")
         try dismissInput(app, done: "lightningSetupDone")
     }
@@ -164,9 +164,9 @@ final class LightningAppUITests: XCTestCase {
     }
     private func fundWallet(_ app: XCUIApplication) throws {
         selectTab(app, "Wallet")
-        app.buttons["receiveButton"].tap()
-        XCTAssertTrue(app.buttons["skipReceiveAddressLabelButton"].appears(within: 20))
-        app.buttons["skipReceiveAddressLabelButton"].tap()
+        tap(app, "receiveButton")
+        tap(app, "skipReceiveAddressLabelButton")
+        XCTAssertTrue(scrollUntilExists(app, app.staticTexts["receiveAddress"]))
         let address = try XCTUnwrap(app.staticTexts["receiveAddress"].value as? String)
         _ = try AddressDecoder.scriptPubKey(for: address, network: .regtest)
         app.buttons["Done"].tap()

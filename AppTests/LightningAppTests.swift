@@ -135,4 +135,45 @@ final class LightningAppTests: XCTestCase {
         XCTAssertEqual(attributes[kSecAttrAccessible] as? String, kSecAttrAccessibleWhenUnlockedThisDeviceOnly as String)
         XCTAssertEqual(attributes[kSecAttrSynchronizable] as? Bool, false)
     }
+
+    func testResearchWalletCannotBeReplacedBeforeOrAfterBoot() async throws {
+        let environment = ["WINNOW_E2E": "1", "WINNOW_E2E_RUN": "preserve-\(UUID().uuidString)",
+            "WINNOW_E2E_ENTROPY": "000102030405060708090a0b0c0d0e0f",
+            "WINNOW_E2E_PEER": "127.0.0.1:1", "WINNOW_E2E_NETWORK": "regtest"]
+        guard case let .active(mode) = E2EMode.resolve(environment: environment),
+              case let .active(cleanup) = E2EMode.resolve(
+                environment: environment.merging(["WINNOW_E2E_RESET": "1"]) { _, reset in reset })
+        else { return XCTFail("could not create isolated research wallet") }
+        defer { cleanup.wipeIfRequested() }
+        let keys = InMemoryKeyStore(), auth = Denied()
+        let model = AppModel(deviceAuthenticator: auth, e2e: mode,
+                             storeKeys: InMemoryStoreKeyVault(), keyStore: keys)
+        let root = try FileManager.default.url(for: .applicationSupportDirectory,
+            in: .userDomainMask, appropriateFor: nil, create: true)
+            .appending(path: mode.storageDirectoryName).appending(path: "regtest")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let file = root.appending(path: "wallet.json")
+        let wallet = try Wallet.create(network: .regtest, keyStore: keys, storageURL: file, entropy: mode.entropy)
+        let walletID = await wallet.id
+        let original = try Data(contentsOf: file), secret = try keys.load(walletID: walletID).serialized
+        let replacementDirectory = directory()
+        try FileManager.default.createDirectory(at: replacementDirectory, withIntermediateDirectories: true)
+        let replacement = try Wallet.create(network: .regtest, keyStore: InMemoryKeyStore(),
+            storageURL: replacementDirectory.appending(path: "wallet.json"), entropy: Data(repeating: 7, count: 16))
+        let bundle = try await replacement.exportBundle(includeMnemonic: false)
+        let json = String(decoding: try JSONEncoder().encode(bundle), as: UTF8.self)
+        let replacementID = await replacement.id
+        XCTAssertNotEqual(walletID, replacementID)
+        for booted in [false, true] {
+            if booted { await model.boot(); XCTAssertEqual(model.walletID, walletID) }
+            do { try await model.createWallet(); XCTFail("replaced research wallet") }
+            catch AppModel.AppError.storageDamaged {}
+            do { try await model.importWallet(bundleJSON: json); XCTFail("import replaced research wallet") }
+            catch AppModel.AppError.storageDamaged {}
+            XCTAssertEqual(try Data(contentsOf: file), original)
+            XCTAssertEqual(try keys.load(walletID: walletID).serialized, secret)
+        }
+        XCTAssertEqual(auth.attempts, 0, "refuse replacement before requesting owner authentication")
+        XCTAssertNil(model.stack, "replacement must not start networking")
+    }
 }
