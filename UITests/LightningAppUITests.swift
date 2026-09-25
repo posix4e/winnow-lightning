@@ -108,13 +108,19 @@ final class LightningAppUITests: XCTestCase {
         XCTAssertTrue(app.navigationBars["Review Lightning"].disappears(within: 30), app.debugDescription)
         let closed = try rpc("mine_close")
         let expectedBalance = try XCTUnwrap(closed["expected_balance"] as? Int64)
-        app.tabBars.buttons["Wallet"].tap()
+        selectTab(app, "Wallet")
         XCTAssertTrue(poll(timeout: 90, interval: 1, "wallet discovers returned channel funds") {
             Int64(self.balanceText(app).filter(\.isNumber)) == expectedBalance
         })
         Screenshots.capture(app, "lightning-09-returned-wallet-funds", testCase: self)
     }
 
+    private func selectTab(_ app: XCUIApplication, _ name: String) {
+        // iPadOS 18 exposes the top tab strip outside the TabBar hierarchy.
+        let button = app.buttons[name].firstMatch
+        XCTAssertTrue(button.appears(within: 60), app.debugDescription)
+        button.tap()
+    }
     private func launch(_ app: XCUIApplication, role: String, fresh: Bool) throws {
         let run = try XCTUnwrap(setup["run"] as? String)
         app.launchEnvironment = ["WINNOW_E2E": "1", "WINNOW_E2E_RUN": run + "-" + role,
@@ -127,8 +133,7 @@ final class LightningAppUITests: XCTestCase {
             XCTAssertTrue(app.buttons["createWalletButton"].appears(within: 60))
             app.buttons["createWalletButton"].tap()
         }
-        XCTAssertTrue(app.tabBars.buttons["Lightning"].appears(within: 60))
-        app.tabBars.buttons["Lightning"].tap()
+        selectTab(app, "Lightning")
         let node = app.staticTexts["lightningNodeID"]
         XCTAssertTrue(scrollUntilExists(app, node))
         XCTAssertTrue(poll(timeout: 30, interval: 0.2, "durable node identity") { (node.value as? String)?.count == 66 })
@@ -159,7 +164,7 @@ final class LightningAppUITests: XCTestCase {
         }, connection.debugDescription)
     }
     private func fundWallet(_ app: XCUIApplication) throws {
-        app.tabBars.buttons["Wallet"].tap()
+        selectTab(app, "Wallet")
         app.buttons["receiveButton"].tap()
         XCTAssertTrue(app.buttons["skipReceiveAddressLabelButton"].appears(within: 20))
         app.buttons["skipReceiveAddressLabelButton"].tap()
@@ -170,7 +175,7 @@ final class LightningAppUITests: XCTestCase {
         XCTAssertTrue(poll(timeout: 90, interval: 1, "Winnow discovers regtest funding") {
             Int64(self.balanceText(app).filter(\.isNumber)) == 2_000_000
         })
-        app.tabBars.buttons["Lightning"].tap()
+        selectTab(app, "Lightning")
     }
     private func tap(_ app: XCUIApplication, _ identifier: String, up: Bool = false) {
         let button = app.buttons[identifier]
