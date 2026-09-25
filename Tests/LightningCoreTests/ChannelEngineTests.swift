@@ -132,9 +132,12 @@ final class ChannelEngineTests: XCTestCase, @unchecked Sendable {
         let aliceKey: Data, bobKey: Data, id: Data
         let aliceStore: JournalMemory, bobStore: JournalMemory
     }
-    private func pair(holdingPeer: Bool = false) async throws -> Pair {
+    private func pair(holdingPeer: Bool = false, anySegwit: Bool = true) async throws -> Pair {
         let aliceKey = try key(1), bobKey = try key(2), aStore = JournalMemory(), bStore = JournalMemory()
-        let alice = try await engine(aStore, peer: bobKey, secret: Data(repeating: 1, count: 32), features: LightningFeatures(bits: LightningFeatures.channelOpening.bits.union(holdingPeer ? [153] : []))), bob = try await engine(bStore, peer: aliceKey, secret: Data(repeating: 2, count: 32))
+        let base = LightningFeatures.channelOpening.bits.subtracting(anySegwit ? [] : [39])
+        let alice = try await engine(aStore, peer: bobKey, secret: Data(repeating: 1, count: 32),
+            features: LightningFeatures(bits: base.union(holdingPeer ? [153] : [])))
+        let bob = try await engine(bStore, peer: aliceKey, secret: Data(repeating: 2, count: 32), features: LightningFeatures(bits: base))
         let temporary = try await alice.openChannel(peer: bobKey, capacitySat: 100_000, feePerKW: 1000)
         _ = try await bob.receive(peer: aliceKey, message: alice.pendingMessages(peer: bobKey)[0].message)
         let events = try await alice.receive(peer: bobKey, message: bob.pendingMessages(peer: aliceKey)[0].message)
@@ -156,6 +159,33 @@ final class ChannelEngineTests: XCTestCase, @unchecked Sendable {
         try await bob.configureRecovery(channelID: id, peer: aliceKey, destination: ChannelScripts.witnessKeyHash(bobKey), feeSat: 500)
         return Pair(alice: alice, bob: bob, aliceKey: aliceKey, bobKey: bobKey, id: id, aliceStore: aStore, bobStore: bStore)
     }
+    func testTaprootRecoveryDoesNotRequirePeerSupportButCooperativeCloseDoes() async throws {
+        let destination = Data([0x51, 32]) + Data(repeating: 7, count: 32)
+        for negotiated in [false, true] {
+            let p = try await pair(anySegwit: negotiated)
+            try await p.alice.configureRecovery(channelID: p.id, peer: p.bobKey, destination: destination, feeSat: 500)
+            let saved = try JSONDecoder().decode(LightningEngine.State.self, from: XCTUnwrap(p.aliceStore.load()))
+            XCTAssertEqual(saved.channels.first?.recovery?.destination, destination)
+            let before = p.aliceStore.load()
+            do {
+                try await p.alice.closeChannel(channelID: p.id, peer: p.bobKey, destination: destination, feeSat: 500, maximumFeeSat: 724)
+                XCTAssertTrue(negotiated, "unnegotiated Taproot shutdown was published")
+            } catch {
+                XCTAssertFalse(negotiated)
+                XCTAssertEqual(error as? LightningError, .invalidState)
+                XCTAssertEqual(p.aliceStore.load(), before)
+            }
+            var writer = LightningWire.Writer(); writer.append(p.id); writer.u16(UInt16(destination.count)); writer.append(destination)
+            do {
+                _ = try await p.bob.receive(peer: p.aliceKey, message: .init(type: 38, payload: writer.data))
+                XCTAssertTrue(negotiated, "unnegotiated peer shutdown was accepted")
+            } catch {
+                XCTAssertFalse(negotiated)
+                XCTAssertEqual(error as? LightningError, .invalidMessage)
+            }
+        }
+    }
+
     private func pump(_ sender: LightningEngine, peer: Data, to receiver: LightningEngine, from: Data,
                       sent: inout Set<UInt64>) async throws {
         for message in try await sender.pendingMessages(peer: peer) where !sent.contains(message.sequence) {

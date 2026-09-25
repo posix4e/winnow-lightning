@@ -6,7 +6,7 @@ enum ChannelResolution {
         let destination: Data
         let feeSat: UInt64
         var script: Script { Script(destination) }
-        var dust: UInt64 { destination.count == 22 ? 294 : 330 }
+        var dust: UInt64 { UInt64(CoinSelection.dustThreshold(scriptPubKey: destination)) }
         func economic(_ value: Int64) -> Bool { value > 0 && UInt64(value) >= feeSat + dust }
     }
     struct Spend: Codable {

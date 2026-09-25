@@ -7,7 +7,7 @@ extension LightningEngine {
         let index = try channelIndex(channelID, peer: peer)
         var channel = state.channels[index]
         guard [.ready, .closing].contains(channel.phase), channel.fundingIsConfirmed, !reestablishing.contains(channelID),
-              ChannelTerms.validShutdown(destination), feeSat <= maximumFeeSat, maximumFeeSat < channel.capacity
+              ChannelTerms.validShutdown(destination, anySegwit: peers[peer]?.supports(38) == true), feeSat <= maximumFeeSat, maximumFeeSat < channel.capacity
         else { throw LightningError.invalidState }
         try channel.requireQuiescent()
         guard channel.local.shutdownScript.isEmpty || channel.local.shutdownScript == destination else { throw LightningError.invalidMessage }
@@ -30,7 +30,7 @@ extension LightningEngine {
         var next = state
         if message.type == 38 {
             let length = try reader.u16(), script = try reader.take(Int(length)); _ = try reader.tlvs(known: [])
-            guard ChannelTerms.validShutdown(script), channel.remoteShutdown == nil || channel.remoteShutdown == script,
+            guard ChannelTerms.validShutdown(script, anySegwit: peers[peer]?.supports(38) == true), channel.remoteShutdown == nil || channel.remoteShutdown == script,
                   channel.remote?.shutdownScript.isEmpty == true || channel.remote?.shutdownScript == script
             else { throw LightningError.invalidMessage }
             channel.remoteShutdown = script; channel.phase = .closing
@@ -97,7 +97,7 @@ extension ChannelState {
         var outputs: [Transaction.Output] = []
         if ours > 0 { outputs.append(.init(value: Int64(ours), scriptPubKey: localShutdown)) }
         if theirs > 0 { outputs.append(.init(value: Int64(theirs), scriptPubKey: remoteShutdown)) }
-        guard !outputs.isEmpty, outputs.allSatisfy({ $0.value >= ($0.scriptPubKey.count == 22 ? 294 : 330) }) else { throw LightningError.invalidAmount }
+        guard !outputs.isEmpty, outputs.allSatisfy({ $0.value >= CoinSelection.dustThreshold(scriptPubKey: $0.scriptPubKey) }) else { throw LightningError.invalidAmount }
         outputs.sort { $0.value == $1.value ? $0.scriptPubKey.lexicographicallyPrecedes($1.scriptPubKey) : $0.value < $1.value }
         return Transaction(version: 2, inputs: [.init(previousOutput: .init(txid: txid, vout: UInt32(output)), scriptSig: Data(), sequence: .max)],
                            outputs: outputs, locktime: 0)

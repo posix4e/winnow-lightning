@@ -28,13 +28,15 @@ public struct ChannelTerms: Sendable, Codable, Equatable {
               minimumHTLCMsat <= capacity * 1000, (1...483).contains(maximumHTLCCount),
               (1...2016).contains(delay) else { throw LightningError.invalidMessage }
         for point in [funding, revocation, payment, delayed, htlc, firstPoint] { _ = try ChannelKeys.point(point) }
-        // The initial implementation supports only standard native witness closes.
-        guard shutdownScript.isEmpty || Self.validShutdown(shutdownScript) else { throw LightningError.invalidMessage }
+        // Validate the encoding here; the engine also checks the negotiated
+        // anysegwit feature before accepting an upfront shutdown script.
+        guard shutdownScript.isEmpty || Self.validShutdown(shutdownScript, anySegwit: true) else { throw LightningError.invalidMessage }
     }
-    static func validShutdown(_ script: Data) -> Bool {
+    static func validShutdown(_ script: Data, anySegwit: Bool = false) -> Bool {
         let bytes = Array(script)
-        guard [22, 34].contains(bytes.count) else { return false }
-        return bytes[0] == 0 && Int(bytes[1]) == bytes.count - 2
+        guard (4...42).contains(bytes.count), Int(bytes[1]) == bytes.count - 2 else { return false }
+        if bytes[0] == 0 { return [22, 34].contains(bytes.count) }
+        return anySegwit && (0x51...0x60).contains(bytes[0])
     }
 }
 

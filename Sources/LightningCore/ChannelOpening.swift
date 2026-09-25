@@ -4,6 +4,8 @@ import WalletCore
 extension LightningEngine {
     func receiveOpen(peer: Data, message: LightningWire.Message) throws -> [Event] {
         let open = try ChannelNegotiation.Open(message: message)
+        guard open.terms.shutdownScript.isEmpty || ChannelTerms.validShutdown(open.terms.shutdownScript, anySegwit: peers[peer]?.supports(38) == true)
+        else { throw LightningError.invalidMessage }
         guard open.chain == state.chain, state.channels.count < 64,
               !state.channels.contains(where: { $0.peer == peer && $0.temporaryID == open.temporaryID })
         else { throw LightningError.invalidMessage }
@@ -20,6 +22,8 @@ extension LightningEngine {
     }
     func receiveAccept(peer: Data, message: LightningWire.Message) throws -> [Event] {
         let accept = try ChannelNegotiation.Accept(message: message)
+        guard accept.terms.shutdownScript.isEmpty || ChannelTerms.validShutdown(accept.terms.shutdownScript, anySegwit: peers[peer]?.supports(38) == true)
+        else { throw LightningError.invalidMessage }
         let index = try channelIndex(accept.temporaryID, peer: peer)
         var channel = state.channels[index]
         guard channel.isFunder, channel.phase == .opening else { throw LightningError.invalidState }

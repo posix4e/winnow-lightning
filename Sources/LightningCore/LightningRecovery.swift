@@ -8,7 +8,9 @@ extension LightningEngine {
         try healthy()
         let index = try channelIndex(channelID, peer: peer)
         let policy = ChannelResolution.Policy(destination: destination, feeSat: feeSat)
-        guard ChannelTerms.validShutdown(destination), feeSat > 0, feeSat < state.channels[index].capacity else {
+        // Our unilateral recovery output is independent of peer shutdown
+        // negotiation and can use Winnow's native Taproot receive address.
+        guard ChannelTerms.validShutdown(destination, anySegwit: true), feeSat > 0, feeSat < state.channels[index].capacity else {
             throw LightningError.invalidAmount
         }
         if state.channels[index].recovery == policy { return }
