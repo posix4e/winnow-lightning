@@ -36,6 +36,7 @@ extension LightningEngine {
         guard !channel.dataLossDetected, channel.recovery != nil, channel.observedFundingSpend == nil,
               let raw = channel.signedCommitment else { throw LightningError.invalidState }
         channel.phase = .closing
+        _ = markPaymentsRecovering(channelID: channel.id, in: &next)
         if channel.closingTransaction == nil { channel.closingTransaction = raw }
         next.outbox.removeAll { $0.channelID == channel.id && $0.peer == channel.peer }
         next.channels[index] = channel

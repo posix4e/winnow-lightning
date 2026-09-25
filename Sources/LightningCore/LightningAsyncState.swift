@@ -30,23 +30,30 @@ extension LightningEngine {
         public let peer: Data, message: LightningWire.Message
         let key: Data
         let expiresAt: UInt64
+        var publishedAt: UInt64?
     }
     var asyncAuthKey: Data { OnionPacket.derive("winnow_async_context_v1", secret: state.nodeSecret) }
     func replyPath(purpose: UInt8, id: Data, through peers: [Data]) throws -> BlindedPath {
         try OnionMessage.path(nodes: peers + [nodeID()], context: Data([purpose]) + id, authenticationKey: asyncAuthKey)
     }
-    /// Messages remain durable until the transport confirms publication or an
-    /// authenticated reply supersedes them. A disconnect before acknowledgement
-    /// replays the exact bytes; application operations are idempotent.
+    /// Requests and held notifications remain durable until an authenticated
+    /// response, settlement or expiry. TCP acceptance is not delivery: retry
+    /// those exact bytes at a bounded interval without creating another HTLC.
     public func pendingOnionMessages(peer: Data, now: UInt64) throws -> [OnionOutbound] {
         try operational(peer)
-        return state.async.outbox.filter { $0.peer == peer && $0.expiresAt >= now }
+        return state.async.outbox.filter {
+            guard $0.peer == peer, $0.expiresAt >= now else { return false }
+            guard let published = $0.publishedAt else { return true }
+            return now >= published && now - published >= 10
+        }
     }
-    public func onionMessagePublished(sequence: UInt64) throws {
+    public func onionMessagePublished(sequence: UInt64, now: UInt64 = UInt64(Date().timeIntervalSince1970)) throws {
         try healthy()
-        guard state.async.outbox.contains(where: { $0.sequence == sequence }) else { return }
+        guard let index = state.async.outbox.firstIndex(where: { $0.sequence == sequence }) else { return }
         var next = state
-        next.async.outbox.removeAll { $0.sequence == sequence }
+        if [1, 2, 5].contains(next.async.outbox[index].key.first) {
+            next.async.outbox[index].publishedAt = now
+        } else { next.async.outbox.remove(at: index) }
         try persist(next)
     }
     func enqueueOnion(to originalPath: BlindedPath, through: [Data], content: LightningWire.TLV,

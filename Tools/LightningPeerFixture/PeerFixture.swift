@@ -13,33 +13,29 @@ struct PeerFixture {
     }
     static func run() async throws {
         let args = Array(CommandLine.arguments.dropFirst())
+        if args.first == "inspect-held" { try inspectHeld(args); return }
         guard [5, 7].contains(args.count), let port = UInt16(args[1]), let peer = Data(hex: args[2]), let chain = Data(hex: args[3])
         else { throw LightningError.invalidMessage }
         let automatic = args.count == 7
         let secret = Data(repeating: automatic ? (UInt8(args[5]) ?? 1) : 1, count: 32)
-        let connection = try LightningConnection(host: args[0], port: port, secret: secret, peer: peer)
         let journal = try FileLightningJournal(directory: URL(fileURLWithPath: args[4]), key: Data(repeating: 42, count: 32))
         let engine = try LightningEngine(chain: chain, nodeSecret: secret, journal: journal)
         try await engine.chainCaughtUp(height: automatic ? (UInt32(args[6]) ?? 0) : 0) // The test driver has synchronized its own regtest fixture.
+        if automatic { try await runAutomatic(engine: engine, peer: peer, host: args[0], port: port); return }
+        let connection = try LightningConnection(host: args[0], port: port, secret: secret, peer: peer)
         try await connection.start()
-        try await connection.send((automatic ? LightningFeatures.asyncClient : LightningFeatures.channelOpening).initialization())
+        try await connection.send(LightningFeatures.channelOpening.initialization())
         let initialization = try await connection.receive()
         let features = try LightningFeatures.readInitialization(initialization)
         FileHandle.standardError.write(Data("Reference init features: \(features.bits.sorted())\n".utf8))
         try await engine.peerInitialized(peer, features: features)
         try emit(["status": "initialized", "node_id": try ChannelKeys.publicKey(secret: secret).hex,
                   "peer_features": features.bytes.hex])
-        let pump = AutomaticPeer(engine: engine, connection: connection, peer: peer)
-        let loop = automatic ? Task.detached { await pump.run() } : nil
-        defer { loop?.cancel() }
         var sent = Set<UInt64>()
         while let line = readLine() {
             let input = try JSONDecoder().decode([String: String].self, from: Data(line.utf8))
-            let output: [String: String]
-            if automatic && input["command"] == "events" { output = ["events": try await pump.drain()] }
-            else { output = try await execute(input, engine: engine, connection: connection, peer: peer) }
-            if automatic { try await pump.flush() }
-            for pending in try await engine.pendingMessages(peer: peer) where !automatic && !sent.contains(pending.sequence) {
+            let output = try await execute(input, engine: engine, connection: connection, peer: peer)
+            for pending in try await engine.pendingMessages(peer: peer) where !sent.contains(pending.sequence) {
                 try await connection.send(pending.message); sent.insert(pending.sequence)
             }
             try emit(output)
@@ -47,12 +43,14 @@ struct PeerFixture {
         await connection.close()
     }
     static func execute(_ input: [String: String], engine: LightningEngine,
-                        connection: LightningConnection, peer: Data) async throws -> [String: String] {
+                        connection: LightningConnection?, peer: Data) async throws -> [String: String] {
         switch input["command"] {
         case "open":
             let id = try await engine.openChannel(peer: peer, capacitySat: UInt64(input["capacity"] ?? "") ?? 100_000, feePerKW: 1000)
             return ["temporary_id": id.hex]
-        case "receive": return try await receive(engine: engine, connection: connection, peer: peer)
+        case "receive":
+            guard let connection else { throw LightningError.invalidState }
+            return try await receive(engine: engine, connection: connection, peer: peer)
         case "fund":
             guard let id = Data(hex: input["id"] ?? ""), let raw = Data(hex: input["transaction"] ?? ""),
                   let output = UInt16(input["output"] ?? "") else { throw LightningError.invalidMessage }

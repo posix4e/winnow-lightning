@@ -316,4 +316,90 @@ extension ChannelEngineTests {
         do { _ = try await q.alice.acceptStaticInvoice(.init(type: 70, value: invoice.bytes), id: underBudget.id, now: 101); XCTFail() } catch {}
         XCTAssertEqual(saved, q.aliceStore.load())
     }
+    func testLostOnionDeliveryRetriesExactRequestAcrossRestartAndStopsAfterInvoice() async throws {
+        let p = try await pair(holdingPeer: true), (request, invoice) = try offerPayment(p)
+        _ = try await p.alice.payOffer(request, now: 100)
+        let messages = try await p.alice.pendingOnionMessages(peer: p.bobKey, now: 100)
+        let message = try XCTUnwrap(messages.first)
+        try await p.alice.onionMessagePublished(sequence: message.sequence, now: 100)
+        let delayed = try await p.alice.pendingOnionMessages(peer: p.bobKey, now: 109)
+        XCTAssertTrue(delayed.isEmpty)
+        let restored = try await engine(p.aliceStore, peer: p.bobKey,
+            features: LightningFeatures(bits: LightningFeatures.channelOpening.bits.union([153])))
+        await p.bob.peerDisconnected(p.aliceKey)
+        try await p.bob.peerInitialized(p.aliceKey, features: .channelOpening)
+        let ours = try await restored.pendingMessages(peer: p.bobKey).first { $0.message.type == 136 }!
+        let theirs = try await p.bob.pendingMessages(peer: p.aliceKey).first { $0.message.type == 136 }!
+        _ = try await p.bob.receive(peer: p.aliceKey, message: ours.message)
+        _ = try await restored.receive(peer: p.bobKey, message: theirs.message)
+        let replay = try await restored.pendingOnionMessages(peer: p.bobKey, now: 110)
+        XCTAssertEqual(replay.map(\.message), [message.message]); XCTAssertEqual(replay.map(\.sequence), [message.sequence])
+        _ = try await restored.acceptStaticInvoice(.init(type: 70, value: invoice.bytes), id: request.id, now: 111)
+        let acknowledged = try await restored.pendingOnionMessages(peer: p.bobKey, now: 120)
+        XCTAssertTrue(acknowledged.isEmpty)
+        let saved = p.aliceStore.load()
+        _ = try await restored.acceptStaticInvoice(.init(type: 70, value: invoice.bytes), id: request.id, now: 121)
+        XCTAssertEqual(saved, p.aliceStore.load())
+    }
+    func testRegistrationOrderingDuplicateHeldAndExpiredPath() async throws {
+        let p = try await pair(), id = Data(repeating: 42, count: 32)
+        let path = try OnionMessage.path(nodes: [p.bobKey], context: Data([1]), authenticationKey: Data(repeating: 4, count: 32))
+        let config = LightningEngine.ReceiveOfferConfiguration(id: id, provider: p.bobKey, serverPath: path,
+            inboundShortChannelID: 1, baseMsat: 1000, proportionalMillionths: 0, expiryDelta: 18, maximumMsat: 50_000_000)
+        try await p.alice.registerReceiveOffer(config, now: 100)
+        let before = p.aliceStore.load()
+        do { try await p.alice.receiveOfferRegistration(AsyncPaymentMessage.persisted.record(), reply: nil, id: id, now: 100); XCTFail() } catch {}
+        do { try await p.alice.releaseHeldPayment(AsyncPaymentMessage.held.record(), reply: path, id: id, now: 100); XCTFail() } catch {}
+        do { try await p.alice.receiveOfferRegistration(AsyncPaymentMessage.offerPaths([path], expiry: 99).record(), reply: path, id: id, now: 100); XCTFail() } catch {}
+        XCTAssertEqual(before, p.aliceStore.load())
+        try await p.alice.receiveOfferRegistration(AsyncPaymentMessage.offerPaths([path], expiry: 3700).record(), reply: path, id: id, now: 100)
+        try await p.alice.receiveOfferRegistration(AsyncPaymentMessage.persisted.record(), reply: nil, id: id, now: 100)
+        let ready = p.aliceStore.load()
+        try await p.alice.receiveOfferRegistration(AsyncPaymentMessage.persisted.record(), reply: nil, id: id, now: 101)
+        // A client is not a holding provider: an early release cannot advance
+        // channel state, fabricate success or authorize an outgoing payment.
+        let context = try await p.alice.replyPath(purpose: 3, id: id, through: [])
+        let release = try OnionMessage.create(to: context, content: AsyncPaymentMessage.release.record(), reply: path)
+        _ = try await p.alice.receiveOnionMessage(release, now: 101)
+        XCTAssertEqual(ready, p.aliceStore.load())
+        try await p.alice.releaseHeldPayment(AsyncPaymentMessage.held.record(), reply: path, id: id, now: 102)
+        let held = p.aliceStore.load()
+        try await p.alice.releaseHeldPayment(AsyncPaymentMessage.held.record(), reply: path, id: id, now: 103)
+        XCTAssertEqual(held, p.aliceStore.load())
+        do { try await p.alice.releaseHeldPayment(AsyncPaymentMessage.held.record(), reply: path, id: id, now: 3701); XCTFail() } catch {}
+        XCTAssertEqual(held, p.aliceStore.load())
+        let history = await p.alice.payments(); XCTAssertTrue(history.isEmpty)
+    }
+    func testHeldNotificationWaitsForBothCommitmentDirectionsRegardlessOfReleasePathOrder() async throws {
+        let p = try await pair(holdingPeer: true), (request, invoice) = try offerPayment(p)
+        _ = try await p.alice.payOffer(request, now: 100)
+        _ = try await p.alice.acceptStaticInvoice(.init(type: 70, value: invoice.bytes), id: request.id, now: 101)
+        try await p.alice.assertHeldNotificationOrdering()
+    }
+}
+
+private extension LightningEngine {
+    /// Test-only actor-isolated inspection of every ordering of the two
+    /// commitment acknowledgements and the provider's authenticated path.
+    func assertHeldNotificationOrdering() throws {
+        let path = try replyPath(purpose: 3, id: Data(repeating: 9, count: 32), through: [])
+        for local in [false, true] {
+            for remote in [false, true] {
+                for hasPath in [false, true] {
+                    var next = state
+                    next.channels[0].updates[0].localNumber = local ? 1 : nil
+                    next.channels[0].updates[0].remoteAcknowledged = remote
+                    next.async.outgoing[0].releasePath = hasPath ? path : nil
+                    let ready = local && remote && hasPath
+                    let events = try reconcileHeldPayments(in: &next)
+                    XCTAssertEqual(events.count, ready ? 1 : 0)
+                    XCTAssertEqual(next.payments[0].payment.phase, ready ? .awaitingRecipient : .inFlight)
+                    XCTAssertEqual(next.async.outbox.count, ready ? 1 : 0)
+                    let sequence = next.nextSequence
+                    XCTAssertTrue(try reconcileHeldPayments(in: &next).isEmpty)
+                    XCTAssertEqual(next.nextSequence, sequence, "duplicate notification allocated another outbound intent")
+                }
+            }
+        }
+    }
 }

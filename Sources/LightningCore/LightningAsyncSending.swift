@@ -100,7 +100,8 @@ extension LightningEngine {
             next.async.outbox.removeAll { $0.key == Data([1]) + outgoing.request.id }
             events.append(.paymentChanged(next.payments[index].payment))
         }
-        if !events.isEmpty { try persist(next) }
+        next.async.outbox.removeAll { $0.expiresAt < now }
+        if !events.isEmpty || next.async.outbox.count != state.async.outbox.count { try persist(next) }
         return events
     }
 }

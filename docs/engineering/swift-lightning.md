@@ -110,5 +110,23 @@ messages are discarded according to BOLT4 without interrupting channel messages;
 a persistence failure still stops every publication path. Receive preimages are
 persisted with the fulfill intent for on-chain recovery after a crash.
 
-The full adversarial matrix, app integration/journeys and TestFlight release
-remain open gates. These host fixtures alone do not establish release readiness.
+The foreground `LightningPeerSession` now drives both the app and independent
+host fixtures. Request and held-notification onions retry their original bytes
+at a bounded interval until an authenticated response, settlement or expiry.
+Tests cover lost delivery across restart, duplicate invoices/notifications,
+registration acknowledgement ordering, expired paths, and every ordering of
+the commitment acknowledgements and release path before notification.
+
+`ci-lightning-timeout` kills the recipient permanently and then both providers.
+After a sender restart, complete Core-validated blocks drive the Swift monitor
+through automatic commitment publication, HTLC timeout and delayed recovery.
+Core validates all four recovery transactions and the exact returned balance;
+the payment becomes failed only after sufficient confirmations. A local run
+returned 997,440 of 1,000,000 sats, with 2,560 sats of independently calculated
+transaction fees. Chain tests also revert confirmed payment outcomes to
+recovering after a reorg while retaining learned preimages.
+
+App integration and the recorded journey are under validation. Physical-device
+authentication/file protection, iPad/large text, final CI and the exact-source
+TestFlight release remain open gates. Host fixtures alone do not establish
+release readiness.

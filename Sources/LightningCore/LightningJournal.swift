@@ -10,7 +10,7 @@ public protocol LightningJournal: AnyObject {
 }
 
 /// A single encrypted, versioned snapshot, replaced durably under an exclusive
-/// process lock. The host supplies a wallet-derived key; no key is stored here.
+/// process lock. The host supplies a device-protected key; no key is stored here.
 /// This store detects torn/corrupt writes, not restoration of an entire older
 /// wallet backup. Restored backups must remain recovery-only.
 public final class FileLightningJournal: LightningJournal {
@@ -68,7 +68,7 @@ public final class FileLightningJournal: LightningJournal {
         guard descriptor >= 0 else { throw LightningError.storageFailed }
         defer { Darwin.close(descriptor); try? FileManager.default.removeItem(at: temporary) }
         #if os(iOS)
-        try FileManager.default.setAttributes([.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+        try FileManager.default.setAttributes([.protectionKey: FileProtectionType.complete],
                                               ofItemAtPath: temporary.path)
         #endif
         try writeAll(bytes, descriptor: descriptor)

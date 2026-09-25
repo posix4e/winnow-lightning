@@ -2,7 +2,7 @@ import Foundation
 import P256K
 
 extension LightningEngine {
-    public enum PaymentPhase: String, Codable, Sendable { case preparing, inFlight, awaitingRecipient, settled, failed }
+    public enum PaymentPhase: String, Codable, Sendable { case preparing, inFlight, awaitingRecipient, recovering, settled, failed }
     public struct Payment: Codable, Sendable, Equatable {
         public let id: Data, hash: Data
         public let amountMsat: UInt64
@@ -28,6 +28,7 @@ extension LightningEngine {
         let channelID: Data
         var htlcID: UInt64?
         let request: DirectPayment?
+        var chainResolution: PaymentChainResolution?
     }
     struct ReceiveRequest: Codable {
         let id: Data, preimage: Data, secret: Data

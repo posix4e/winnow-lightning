@@ -17,7 +17,8 @@ struct LightningChainState: Codable {
 extension LightningEngine {
     func pendingChainEvents() throws -> [Event] {
         let ready = state.channels.filter { $0.phase == .ready && $0.fundingIsConfirmed }.map { Event.channelReady($0.id) }
-        return try ready + pendingFundingBroadcasts() + pendingRecoveryBroadcasts()
+        let payments = state.payments.filter { $0.payment.phase == .recovering || $0.chainResolution != nil }.map { Event.paymentChanged($0.payment) }
+        return try ready + payments + pendingFundingBroadcasts() + pendingRecoveryBroadcasts()
     }
     func rewindForNewFunding(in next: inout State) {
         // A fundee may learn the outpoint after it has already confirmed.
@@ -69,6 +70,7 @@ extension LightningEngine {
         next.scan.nextHeight = block.height + 1
         var events = try updateChainChannels(height: block.height, in: &next)
         events += try updateRecovery(height: block.height, in: &next)
+        events += try reconcileChainPayments(height: block.height, in: &next)
         try persist(next)
         chainHeight = block.height
         return events
@@ -96,6 +98,7 @@ extension LightningEngine {
                 channel.observedFundingSpend = spend.1.serialized(includeWitness: true)
                 channel.fundingSpendHeight = spend.0
                 channel.phase = channel.dataLossDetected ? .recovering : .closing
+                events += markPaymentsRecovering(channelID: channel.id, in: &next)
                 next.outbox.removeAll { $0.peer == channel.peer && $0.channelID == channel.id }
             } else if let funding = observed.first(where: { $0.1.txid == txid }) {
                 try channel.checkFunding(funding.1, output: output)
@@ -129,6 +132,7 @@ extension LightningEngine {
         next.scan.transactions.removeAll { $0.height > height }
         next.scan.nextHeight = height + 1
         next.scan.rescanRequired = false
+        rollBackChainPayments(to: height, in: &next)
         for index in next.channels.indices {
             let funding = next.scan.transactions.first { (try? Transaction.decode($0.raw).txid) == next.channels[index].fundingTxid }
             next.channels[index].fundingIsConfirmed = funding.map {

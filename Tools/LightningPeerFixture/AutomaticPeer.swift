@@ -1,40 +1,11 @@
 import Foundation
 import LightningCore
+import WalletCore
 
-/// An independently running receive loop for the process-lifecycle fixtures.
-/// Channel/async decisions and all durable state remain in LightningEngine.
+/// Records callbacks from the production foreground session used by the app.
 actor AutomaticPeer {
-    let engine: LightningEngine, connection: LightningConnection, peer: Data
-    var sent = Set<UInt64>(), sending = false
     var events: [[String: String]] = []
-    init(engine: LightningEngine, connection: LightningConnection, peer: Data) {
-        self.engine = engine; self.connection = connection; self.peer = peer
-    }
-    func run() async {
-        do {
-            try await flush()
-            while !Task.isCancelled {
-                let event = try await PeerFixture.receive(engine: engine, connection: connection, peer: peer)
-                events.append(event)
-                try await flush()
-            }
-        } catch {
-            FileHandle.standardError.write(Data("Automatic peer stopped: \(error)\n".utf8))
-            events.append(["error": String(describing: error)])
-            await connection.close(); await engine.peerDisconnected(peer)
-        }
-    }
-    func flush() async throws {
-        guard !sending else { return }
-        sending = true; defer { sending = false }
-        for item in try await engine.pendingMessages(peer: peer) where !sent.contains(item.sequence) {
-            try await connection.send(item.message); sent.insert(item.sequence)
-        }
-        for item in try await engine.pendingOnionMessages(peer: peer, now: UInt64(Date().timeIntervalSince1970)) {
-            try await connection.send(item.message)
-            try await engine.onionMessagePublished(sequence: item.sequence)
-        }
-    }
+    func record(_ received: [LightningEngine.Event]) { events += received.map { PeerFixture.encode([$0]) } }
     func drain() throws -> String {
         let encoded = try JSONSerialization.data(withJSONObject: events, options: [.sortedKeys])
         events.removeAll(); return String(decoding: encoded, as: UTF8.self)
@@ -42,12 +13,46 @@ actor AutomaticPeer {
 }
 
 extension PeerFixture {
+    static func runAutomatic(engine: LightningEngine, peer: Data, host: String, port: UInt16) async throws {
+        let buffer = AutomaticPeer()
+        let session = LightningPeerSession(engine: engine, peer: peer, host: host, port: port) { await buffer.record($0) }
+        let features = try await session.start()
+        try emit(["status": "initialized", "node_id": try await engine.nodeID().hex, "peer_features": features.bytes.hex])
+        while let line = readLine() {
+            let input = try JSONDecoder().decode([String: String].self, from: Data(line.utf8))
+            if case .failed(let reason) = await session.status,
+               !["scan_begin", "scan_block", "height", "snapshot", "payment", "events", "force_close"].contains(input["command"]) {
+                throw NSError(domain: reason, code: 1)
+            }
+            let output: [String: String]
+            if input["command"] == "events" { output = ["events": try await buffer.drain()] }
+            else { output = try await execute(input, engine: engine, connection: nil, peer: peer) }
+            try await session.flush()
+            try emit(output)
+        }
+        await session.stop()
+    }
     static func asyncCommand(_ input: [String: String], engine: LightningEngine, peer: Data) async throws -> [String: String] {
         let now = UInt64(Date().timeIntervalSince1970)
         switch input["command"] {
+        case "scan_begin":
+            await engine.chainDisconnected()
+            if await engine.chainStatus().rescanRequired {
+                guard let genesis = Data(hex: input["genesis"] ?? "") else { throw LightningError.invalidMessage }
+                try await engine.blocksDisconnected(to: 0, hash: genesis)
+            }
+            return ["next": String(await engine.chainStatus().nextHeight)]
+        case "scan_block":
+            guard let height = UInt32(input["height"] ?? ""), let raw = Data(hex: input["hex"] ?? "") else { throw LightningError.invalidMessage }
+            let block = try Block.decode(raw)
+            _ = try await engine.scannedBlock(.init(height: height, header: block.header, block: block,
+                watchRevision: engine.chainStatus().revision))
+            return ["height": String(height)]
         case "height":
             guard let height = UInt32(input["height"] ?? "") else { throw LightningError.invalidMessage }
-            try await engine.chainCaughtUp(height: height); return ["height": String(height)]
+            try await engine.chainCaughtUp(height: height)
+            let events = try await engine.pendingRecoveryBroadcasts().map { encode([$0]) }
+            return ["height": String(height), "chain_events": String(decoding: try JSONSerialization.data(withJSONObject: events), as: UTF8.self)]
         case "async_pay":
             guard let id = Data(hex: input["id"] ?? ""), let channel = Data(hex: input["channel"] ?? ""), let intro = Data(hex: input["introduction"] ?? ""),
                   let scid = UInt64(input["scid"] ?? ""), let amount = UInt64(input["amount"] ?? ""), let fee = UInt64(input["fee"] ?? "") else { throw LightningError.invalidMessage }

@@ -149,11 +149,20 @@ impl Node {
     }
     async fn command(&self, input: Value) -> Result<Value, String> {
         match input["command"].as_str() {
+            Some("offline_queue") => {
+                let peer = PublicKey::from_str(input["peer"].as_str().ok_or("peer")?).map_err(|e| e.to_string())?;
+                let pending: Vec<String> = match self.store.read("offline", "", &peer.to_string()) {
+                    Ok(raw) => serde_json::from_slice(&raw).map_err(|e| e.to_string())?,
+                    Err(e) if e.kind() == lightning::io::ErrorKind::NotFound => vec![],
+                    Err(e) => return Err(e.to_string()),
+                };
+                Ok(json!({"messages":pending}))
+            },
             Some("status") => Ok(json!({"node":self.manager.get_our_node_id().to_string(), "height":self.manager.current_best_block().height,
                 "peers":self.peers.list_peers().iter().map(|p| p.counterparty_node_id.to_string()).collect::<Vec<_>>(),
                 "channels": self.manager.list_channels().iter().map(|c| json!({"id":hex(&c.channel_id.0),"peer":c.counterparty.node_id.to_string(),"ready":c.is_channel_ready,"usable":c.is_usable,"public":c.is_announced,"scid":c.short_channel_id,"inbound_alias":c.inbound_scid_alias,"outbound_alias":c.outbound_scid_alias,"outbound_msat":c.outbound_capacity_msat,"inbound_msat":c.inbound_capacity_msat,
-                    "pending_inbound": c.pending_inbound_htlcs.iter().map(|h| json!({"hash":hex(&h.payment_hash.0),"amount":h.amount_msat,"state":format!("{:?}", h.state)})).collect::<Vec<_>>(),
-                    "pending_outbound": c.pending_outbound_htlcs.iter().map(|h| json!({"hash":hex(&h.payment_hash.0),"amount":h.amount_msat,"state":format!("{:?}", h.state)})).collect::<Vec<_>>()
+                    "pending_inbound": c.pending_inbound_htlcs.iter().map(|h| json!({"hash":hex(&h.payment_hash.0),"amount":h.amount_msat,"expiry":h.cltv_expiry,"state":format!("{:?}", h.state)})).collect::<Vec<_>>(),
+                    "pending_outbound": c.pending_outbound_htlcs.iter().map(|h| json!({"hash":hex(&h.payment_hash.0),"amount":h.amount_msat,"expiry":h.cltv_expiry,"state":format!("{:?}", h.state)})).collect::<Vec<_>>()
                 })).collect::<Vec<_>>() })),
             Some("connect") => {
                 let peer = PublicKey::from_str(input["peer"].as_str().ok_or("peer")?).map_err(|e| e.to_string())?;

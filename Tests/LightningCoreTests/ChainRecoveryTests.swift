@@ -59,6 +59,75 @@ final class ChainRecoveryTests: XCTestCase, @unchecked Sendable {
     private func state(_ store: RecoveryStore) throws -> LightningEngine.State {
         try JSONDecoder().decode(LightningEngine.State.self, from: XCTUnwrap(store.load()))
     }
+    private func paymentFixture(preimage: Data, success: Bool) throws -> (ChannelState, Transaction, Transaction) {
+        var (channel, _) = try fixture()
+        let bob = try ChannelSecrets()
+        channel.remote = try bob.terms(capacity: channel.capacity)
+        let funding = try Transaction(version: 2, inputs: [.init(previousOutput: .init(txid: Data(repeating: 9, count: 32), vout: 0),
+            scriptSig: Data(), sequence: .max, witness: [Data([1])])],
+            outputs: [.init(value: 100_000, scriptPubKey: channel.fundingScript())], locktime: 0)
+        channel.fundingTxid = funding.txid
+        channel.fundingTransaction = funding.serialized(includeWitness: true)
+        channel.localNumber = 1; channel.remoteNumber = 1
+        channel.remoteCurrentPoint = try bob.point(1); channel.remoteNextPoint = try bob.point(2)
+        let htlc = ChannelTransactions.HTLC(id: 0, offered: true, amountMsat: 5_000_000,
+                                           paymentHash: ChannelKeys.hash(preimage), expiry: 12)
+        channel.updates = [.init(change: .add(htlc, onion: Data()), fromLocal: true,
+                                 localNumber: 1, remoteNumber: 1, remoteAcknowledged: true)]
+        let commitment = try channel.commitment(localOwner: true), point = try channel.secrets.point(1)
+        let digest = try ChannelTransactions.fundingDigest(commitment)
+        channel.signedCommitment = try ChannelTransactions.signed(commitment,
+            localSignature: ChannelKeys.sign(digest: digest, secret: channel.secrets.funding),
+            remoteSignature: ChannelKeys.sign(digest: digest, secret: bob.funding)).serialized(includeWitness: true)
+        let output = try XCTUnwrap(commitment.htlcOutputs.first)
+        let remoteKey = try ChannelKeys.derivedPrivateKey(baseSecret: bob.htlc, commitmentPoint: point)
+        let remoteSignature = try ChannelKeys.sign(digest: ChannelRecovery.htlcDigest(commitment: commitment, output: output), secret: remoteKey)
+        channel.localHTLCSignatures = [remoteSignature]
+        let spend: Transaction
+        if success {
+            spend = try ChannelRecovery.remoteHTLC(commitment: commitment, output: output,
+                destination: channel.recovery!.script, feeSat: 500, htlcSecret: remoteKey, preimage: preimage)
+        } else {
+            let localKey = try ChannelKeys.derivedPrivateKey(baseSecret: channel.secrets.htlc, commitmentPoint: point)
+            let signature = try ChannelKeys.sign(digest: ChannelRecovery.htlcDigest(commitment: commitment, output: output), secret: localKey)
+            spend = try ChannelRecovery.signedHTLC(commitment: commitment, output: output,
+                localSignature: signature, remoteSignature: remoteSignature, preimage: nil)
+        }
+        return (channel, funding, spend)
+    }
+    func testOnChainSuccessAndTimeoutReconcileOnceAfterDepthAndUndoOnReorg() async throws {
+        for success in [false, true] {
+            let preimage = Data(repeating: 23, count: 32), store = RecoveryStore()
+            let (channel, funding, spend) = try paymentFixture(preimage: preimage, success: success)
+            var snapshot = LightningEngine.State(chain: genesis.hash, nodeSecret: Data(repeating: 1, count: 32))
+            snapshot.channels = [channel]
+            snapshot.payments = [.init(payment: .init(id: Data(repeating: 4, count: 32), hash: ChannelKeys.hash(preimage),
+                amountMsat: 5_000_000, incoming: false, phase: .awaitingRecipient), channelID: channel.id, htlcID: 0, request: nil)]
+            try store.store(JSONEncoder().encode(snapshot))
+            let engine = try LightningEngine(chain: genesis.hash, journal: RecoveryJournal(store))
+            let first = try await scan(engine, height: 1, previous: genesis.hash, transaction: funding)
+            var header = try await scan(engine, height: 2, previous: first.hash,
+                                        transaction: Transaction.decode(XCTUnwrap(channel.signedCommitment)))
+            XCTAssertEqual(try state(store).payments[0].payment.phase, .recovering)
+            for height: UInt32 in 3...12 { header = try await scan(engine, height: height, previous: header.hash) }
+            header = try await scan(engine, height: 13, previous: header.hash, transaction: spend)
+            for height: UInt32 in 14...17 { header = try await scan(engine, height: height, previous: header.hash) }
+            XCTAssertEqual(try state(store).payments[0].payment.phase, .recovering)
+            header = try await scan(engine, height: 18, previous: header.hash)
+            XCTAssertEqual(try state(store).payments[0].payment.phase, success ? .settled : .failed)
+            XCTAssertEqual(try state(store).payments[0].chainResolution?.transactionID, spend.txid)
+            let restored = try LightningEngine(chain: genesis.hash, journal: RecoveryJournal(store))
+            _ = try await scan(restored, height: 19, previous: header.hash)
+            XCTAssertEqual(try state(store).payments.count, 1)
+            try await restored.blocksDisconnected(to: 17, hash: state(store).scan.positions.first { $0.height == 17 }!.hash)
+            XCTAssertEqual(try state(store).payments[0].payment.phase, .recovering)
+            XCTAssertNil(try state(store).payments[0].chainResolution)
+            if success { XCTAssertTrue(try state(store).channels[0].learnedPreimages.contains(preimage)) }
+            try await restored.blocksDisconnected(to: 1, hash: first.hash)
+            XCTAssertEqual(try state(store).payments[0].payment.phase, .recovering)
+            XCTAssertNil(try state(store).channels[0].observedFundingSpend)
+        }
+    }
     func testRejectsWrongAncestryStaleWatchesAndIncompleteScan() async throws {
         let store = RecoveryStore(), engine = try engine(store: store)
         let before = store.load()

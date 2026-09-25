@@ -4,7 +4,7 @@ use lightning::blinded_path::EmptyNodeIdLookUp;
 use lightning::blinded_path::payment::{AsyncBolt12OfferContext, BlindedPaymentPath, PaymentConstraints, PaymentContext, ReceiveTlvs};
 use lightning::ln::{msgs::OnionMessage, peer_handler::IgnoringMessageHandler};
 use lightning::onion_message::{messenger::{create_onion_message, peel_onion_message, Destination, OnionMessagePath, PeeledOnion}, offers::OffersMessage};
-use lightning::onion_message::async_payments::{OfferPathsRequest, OfferPaths, ServeStaticInvoice, StaticInvoicePersisted, HeldHtlcAvailable, ReleaseHeldHtlc};
+use lightning::onion_message::async_payments::{AsyncPaymentsMessage, OfferPathsRequest, OfferPaths, ServeStaticInvoice, StaticInvoicePersisted, HeldHtlcAvailable, ReleaseHeldHtlc};
 use lightning::types::payment::PaymentSecret;
 use lightning::offers::{invoice_request::InvoiceRequest, nonce::Nonce, offer::{Offer, OfferBuilder}, static_invoice::{StaticInvoice, StaticInvoiceBuilder}};
 use lightning::sign::{EntropySource, KeysManager, NodeSigner, Recipient};
@@ -70,6 +70,17 @@ fn generated_vectors() -> Result<Value, String> {
 fn execute(input: Value) -> Result<Value, String> {
     match input["command"].as_str() {
         Some("vectors") => generated_vectors(),
+        Some("held_message") => {
+            // Read-only evidence decoder. This does not instantiate a payment
+            // manager, handle the message, or wake the stopped recipient.
+            let seed = u8::try_from(input["seed"].as_u64().ok_or("seed")?).map_err(|_| "seed")?;
+            let keys = KeysManager::new(&[seed;32], 1, 0, false, FixtureLogger);
+            let raw = bytes(&input["hex"])?;
+            let message = OnionMessage::read_from_fixed_length_buffer(&mut FixedLengthReader::new(&mut raw.as_slice(), raw.len() as u64)).map_err(|e| format!("{e:?}"))?;
+            let held = matches!(peel_onion_message(&message, &Secp256k1::new(), &keys, &FixtureLogger, &IgnoringMessageHandler {}),
+                Ok(PeeledOnion::AsyncPayments(AsyncPaymentsMessage::HeldHtlcAvailable(_), _, Some(_))));
+            Ok(json!({"held":held}))
+        },
         Some("offer") => {
             let offer: Offer = input["string"].as_str().ok_or("offer string")?.parse().map_err(|e| format!("{e:?}"))?;
             Ok(json!({"roundtrip": offer.to_string(), "hex": hex(&offer.encode())}))

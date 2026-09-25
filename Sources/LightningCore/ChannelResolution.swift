@@ -39,7 +39,7 @@ enum ChannelResolution {
             }
             return result
         }
-        private func recognized(_ parent: Transaction) throws -> (local: Bool, value: ChannelTransactions.Commitment)? {
+        func recognized(_ parent: Transaction) throws -> (local: Bool, value: ChannelTransactions.Commitment)? {
             if let raw = channel.signedCommitment, try Transaction.decode(raw).txid == parent.txid {
                 return (true, try channel.commitment(localOwner: true))
             }

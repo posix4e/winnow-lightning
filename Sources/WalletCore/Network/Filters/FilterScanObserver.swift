@@ -16,6 +16,12 @@ public struct FilterScannedBlock: Sendable {
     public let header: BlockHeader
     public let block: Block?
     public let watchRevision: UInt64
+    // Package-only construction also lets the host reference fixture replay
+    // complete blocks independently validated by Bitcoin Core. Applications
+    // obtain observations from FilterSync, never from an untrusted RPC tip.
+    package init(height: UInt32, header: BlockHeader, block: Block?, watchRevision: UInt64) {
+        self.height = height; self.header = header; self.block = block; self.watchRevision = watchRevision
+    }
 }
 
 /// Optional consumers share the ordinary peer pool and filter verification.
