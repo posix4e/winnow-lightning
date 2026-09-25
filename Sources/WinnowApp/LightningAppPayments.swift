@@ -66,11 +66,14 @@ extension LightningAppController {
     func reviewClose(_ channel: LightningEngine.Channel, force: Bool, model: AppModel) async throws -> CloseReview {
         guard let engine, let wallet = model.wallet else { throw LightningError.invalidState }
         if force { return CloseReview(channel: channel, force: true, address: "", destination: Data(), feeSat: 0) }
+        model.e2e?.journal("lightning.closeReviewStarted")
         let address = try await wallet.freshReceiveAddress()
+        model.e2e?.journal("lightning.closeDestinationPersisted")
         let destination = try AddressDecoder.scriptPubKey(for: address, network: .regtest)
         let rate = await model.resolvedFeeRate(priority: .medium, override: nil)
         let fee = try await engine.estimatedClosingFee(channelID: channel.id, peer: channel.peer,
             destination: destination, feeRateSatPerVByte: rate)
+        model.e2e?.journal("lightning.closeReviewReady", fields: ["feeSat": String(fee)])
         return CloseReview(channel: channel, force: false, address: address, destination: destination, feeSat: fee)
     }
     func close(_ review: CloseReview, model: AppModel) async throws {

@@ -252,7 +252,15 @@ def main():
         pass
     finally:
         server.server_close()
-        journey.fixture.close()
+        try:
+            # Include the restarted clients and final close review, not only
+            # the journal snapshots taken before each intentional crash.
+            for role, client in journey.clients.items():
+                journal = Path(client['journal'])
+                if journal.is_file():
+                    (journey.evidence / (role + '-story-events.jsonl')).write_bytes(journal.read_bytes())
+        finally:
+            journey.fixture.close()
 
 
 if __name__ == '__main__':

@@ -107,6 +107,7 @@ final class LightningAppUITests: XCTestCase {
         Screenshots.capture(app, "lightning-07-sender-reconciled-once", testCase: self)
         _ = try rpc("finish")
         tap(app, "lightningClose", up: true)
+        XCTAssertTrue(app.navigationBars["Review Lightning"].appears(within: 60), app.debugDescription)
         XCTAssertTrue(scroll(app, app.staticTexts["Maximum negotiated fee, 905 sats"], fullyVisible: true))
         Screenshots.capture(app, "lightning-08-close-review", testCase: self)
         tap(app, "lightningConfirm")
