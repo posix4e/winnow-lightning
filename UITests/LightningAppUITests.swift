@@ -40,6 +40,10 @@ final class LightningAppUITests: XCTestCase {
         Screenshots.capture(app, "lightning-01-reusable-offer", testCase: self)
         tap(app, "lightningShareOffer")
         let copy = app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", "Copy")).firstMatch
+        let more = app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", "View More")).firstMatch
+        XCTAssertTrue(poll(timeout: 15, interval: 0.2, "Apple Share actions") { copy.exists || more.exists })
+        // At accessibility text sizes iOS groups actions behind View More.
+        if !copy.exists { more.tap() }
         XCTAssertTrue(copy.appears(within: 15), "Apple Share sheet did not open: \(app.debugDescription)")
         Screenshots.capture(app, "lightning-02-apple-share", testCase: self)
         copy.tap()
@@ -180,7 +184,9 @@ final class LightningAppUITests: XCTestCase {
                         up: Bool = false, fullyVisible: Bool = false) -> Bool {
         // At accessibility sizes a centered drag can land in a TextEditor and
         // scroll its contents. The form gutter moves the surrounding controls.
-        scrollUntilExists(app, element, up: up, fullyVisible: fullyVisible, dragX: 0.03)
+        // On iPad the modal form is centered within the wider app surface.
+        return scrollUntilExists(app, element, up: up, fullyVisible: fullyVisible,
+                                 dragX: app.frame.width < 600 ? 0.03 : 0.5)
     }
     private func tap(_ app: XCUIApplication, _ identifier: String, up: Bool = false) {
         let button = app.buttons[identifier]
