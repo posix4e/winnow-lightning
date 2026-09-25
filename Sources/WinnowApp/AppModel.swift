@@ -1,4 +1,5 @@
 import WalletCore
+import LightningCore
 import CryptoKit
 import Foundation
 import LocalAuthentication
@@ -311,6 +312,7 @@ final class AppModel {
     let vaultStore: VaultStore
     let peopleStore: PeopleStore
     let cloudBackups: CloudBackupController
+    let lightning: LightningAppController?
     private let allowsCloudBackup: Bool
     private var cloudPreparationTask: Task<Void, Never>?
     private var cloudPreparationEpoch = UUID()
@@ -409,12 +411,19 @@ final class AppModel {
          storeKeys: (any StoreKeyVault)? = nil, keyStore: (any KeyStore)? = nil,
          cloudBackups: CloudBackupController? = nil) {
         self.cloudBackups = cloudBackups ?? CloudBackupController()
-        allowsCloudBackup = e2e == nil || cloudBackups != nil
+        allowsCloudBackup = !LightningResearch.enabled(e2e: e2e) && (e2e == nil || cloudBackups != nil)
         self.deviceAuthenticator = deviceAuthenticator
             ?? LocalDeviceAuthenticator(keychain: keychainAuthentication)
         self.e2e = e2e
         e2e?.wipeIfRequested()
-        let keychainService = e2e?.keychainService ?? KeychainStore.defaultService
+        let keychainService = e2e?.keychainService ?? (LightningResearch.isResearchApp ? LightningResearch.keychainService : KeychainStore.defaultService)
+        lightning = LightningResearch.enabled(e2e: e2e)
+            ? LightningAppController(keys: storeKeys ?? KeychainStoreKeyVault(service: keychainService, protection: .whenUnlocked)) : nil
+        #if DEBUG
+        if e2e?.forcedNetwork == .regtest, let entropy = e2e?.entropy {
+            lightning?.fixtureNodeSecret = Data(CryptoKit.SHA256.hash(data: Data("winnow-lightning-ui".utf8) + entropy))
+        }
+        #endif
         self.keyStore = keyStore ?? KeychainStore(
             service: keychainService,
             protection: e2e == nil ? .userPresence : .deviceOnly,
@@ -424,7 +433,8 @@ final class AppModel {
         let storeKeys = storeKeys ?? KeychainStoreKeyVault(service: keychainService)
         vaultStore = VaultStore(keys: storeKeys)
         peopleStore = PeopleStore(keys: storeKeys)
-        let defaults = e2e?.defaults ?? defaults
+        let defaults = e2e?.defaults ?? (LightningResearch.isResearchApp
+            ? UserDefaults(suiteName: LightningResearch.keychainService + ".preferences")! : defaults)
         self.defaults = defaults
         // 0.7.0 and earlier shipped an opt-in Tor route (`torEnabled`). It
         // is gone with 0.7.1; an installation that had it on is told once
@@ -435,7 +445,7 @@ final class AppModel {
         }
         // Mainnet is the default (#9). The E2E harness is a custom-signet
         // fixture, so a test launch that names no network still gets signet.
-        let selectedNetwork = e2e?.forcedNetwork
+        let selectedNetwork = (LightningResearch.isResearchApp ? BitcoinNetwork.regtest : e2e?.forcedNetwork)
             ?? BitcoinNetwork(rawValue: defaults.string(forKey: DefaultsKey.network) ?? "")
             ?? (e2e != nil ? .signet : Self.defaultNetwork)
         network = selectedNetwork
@@ -456,14 +466,14 @@ final class AppModel {
             explorerProvider = scoped.esploraURL.isEmpty ? .blockstream : .custom
         }
         verifyFromGenesis = defaults.bool(forKey: DefaultsKey.verifyFromGenesis)
-        advancedMode = defaults.bool(forKey: DefaultsKey.advancedMode) || e2e?.advancedMode == true
+        advancedMode = LightningResearch.enabled(e2e: e2e) || defaults.bool(forKey: DefaultsKey.advancedMode) || e2e?.advancedMode == true
         // Test mode preconfigures the local node as the (only) manual peer;
         // custom signets have no DNS seeds.
         if let peer = e2e?.peer, !manualPeers.contains(peer) {
             manualPeers = [peer]
             defaults.set(manualPeers, forKey: DefaultsKey.manualPeers(selectedNetwork))
         }
-        e2e?.journal("app.initialized", fields: ["network": network.rawValue])
+        e2e?.journal("app.initialized", fields: ["network": network.rawValue, "processID": String(ProcessInfo.processInfo.processIdentifier)])
     }
 
     /// What a Paste button reads: the runner's control file under the UI
@@ -784,6 +794,7 @@ final class AppModel {
             // then scan on state already known to be stale, which is the one
             // thing every other damaged-state path in this app refuses to do.
             try await resumeInterruptedRollback()
+            try await lightning?.prepare(directory: dir, headers: chain)
         } catch {
             status.lastSyncError = error.localizedDescription
             e2e?.journal("network.stackFailed", fields: ["error": error.localizedDescription])
@@ -976,7 +987,7 @@ final class AppModel {
             let broadcaster = stack.broadcaster
             let network = network
             let vaultStore = vaultStore
-            try await filters.sync(watchScripts: scripts,
+            try await syncWalletAndLightning(filters: filters, scripts: scripts,
                                    onReorg: { [weak self] forkHeight in
                 guard let self else { return }
                 try await self.rollBackStores(to: forkHeight)
@@ -1016,6 +1027,7 @@ final class AppModel {
             // threw applied nothing. Keep WalletState from lagging it.
             try? await wallet.recordScanHeight(await filters.nextScanHeight)
             status.lastSyncError = error.localizedDescription
+            e2e?.journal("wallet.syncFailed", fields: ["error": String(describing: error)])
         }
         await refresh()
     }
@@ -1392,6 +1404,9 @@ final class AppModel {
     /// Kept: headers and known peers. Those describe the chain, not the
     /// wallet, so a re-import does not pay for a fresh header sync.
     func destroyWallet() async throws {
+        guard lightning == nil else {
+            throw AppError.storageDamaged("Keep this research wallet on the device: its Lightning journal may still be needed to recover channel funds.")
+        }
         cloudBackups.suspend()
         guard let walletID else { throw AppError.noWallet }
         try await authenticateSensitiveAction(reason: "Delete this wallet from this device")
@@ -1655,9 +1670,12 @@ final class AppModel {
         /// Whether `built` is the transaction that was reviewed.
         ///
         func authorizes(_ built: BuiltTransaction) -> Bool {
-            guard built.fee == fee,
-                  built.changeAmount == changeAmount,
-                  built.transaction.inputs.map({
+            authorizes(transaction: built.transaction, fee: built.fee, changeAmount: built.changeAmount)
+        }
+        func authorizes(transaction: WalletCore.Transaction, fee actualFee: Int64, changeAmount actualChange: Int64?) -> Bool {
+            guard actualFee == fee,
+                  actualChange == changeAmount,
+                  transaction.inputs.map({
                       ReviewedOutpoint(txid: $0.previousOutput.txid, vout: $0.previousOutput.vout)
                   }) == selectedOutpoints
             else { return false }
@@ -1679,9 +1697,9 @@ final class AppModel {
             // fingerprint, so nothing may assume payments-then-change.
             var expected = payments
             if let change { expected.append(change) }
-            guard built.transaction.outputs.count == expected.count else { return false }
+            guard transaction.outputs.count == expected.count else { return false }
 
-            var unmatched = built.transaction.outputs
+            var unmatched = transaction.outputs
             for payment in expected {
                 guard let index = unmatched.firstIndex(where: {
                     $0.value == payment.amount && $0.scriptPubKey == payment.scriptPubKey
@@ -2510,6 +2528,7 @@ final class AppModel {
     func switchNetwork(to newNetwork: BitcoinNetwork) async {
         cloudBackups.suspend()
         guard e2e?.forcedNetwork == nil || e2e?.forcedNetwork == newNetwork else { return }
+        guard lightning == nil || newNetwork == .regtest else { return }
         guard newNetwork != network else { return }
         suspendNetworking()
         syncTask?.cancel()
@@ -2576,6 +2595,7 @@ final class AppModel {
     }
 
     private func stopNetworking() async {
+        await lightning?.stop()
         syncTask?.cancel(); syncTask = nil
         phaseTask?.cancel(); phaseTask = nil
         broadcasterEventTask?.cancel(); broadcasterEventTask = nil
@@ -2807,7 +2827,7 @@ final class AppModel {
                                                       in: .userDomainMask,
                                                       appropriateFor: nil, create: true)
         else { return nil }
-        var root = base.appending(path: e2e?.storageDirectoryName ?? "BTCSwift",
+        var root = base.appending(path: e2e?.storageDirectoryName ?? (LightningResearch.isResearchApp ? LightningResearch.storageName : "BTCSwift"),
                                   directoryHint: .isDirectory)
         let dir = root.appending(path: network.rawValue, directoryHint: .isDirectory)
         do {
@@ -2846,6 +2866,7 @@ extension AppModel {
     }
 
     func setAutomaticCloudBackup(_ enabled: Bool) async {
+        guard allowsCloudBackup else { return }
         guard let walletID else { return }
         cloudBackups.configure(directory: storageDirectory(), walletID: walletID)
         do {
@@ -2965,7 +2986,7 @@ extension AppModel {
     }
 
     private func scheduleCloudBackup() {
-        guard e2e == nil else { return }
+        guard allowsCloudBackup, e2e == nil else { return }
         cloudBackups.configure(directory: storageDirectory(), walletID: walletID)
         guard isActive, let walletID else { return }
         let selectedNetwork = network

@@ -6,9 +6,10 @@ Curve operations use the unchanged P256K 0.23.2 dependency (C libsecp256k1);
 ChaCha20-Poly1305 and HKDF use Apple's CryptoKit. There is no Rust, LDK, PQLN,
 Kyoto, second wallet, scanner, or transaction representation in this target.
 
-This draft now includes a durable Swift channel engine and independent-peer
-tests. It is not yet connected to the app or a TestFlight build. The complete
-accepted scope and remaining release gates are in
+This draft includes a durable Swift channel engine, independent-peer tests and
+a native SwiftUI research app. Simulator validation and the TestFlight release
+gates are tracked separately; no TestFlight upload is implied by engine tests.
+The complete accepted scope and remaining release gates are in
 [the implementation plan](../../docs/engineering/swift-lightning.md).
 
 ## Implemented
@@ -31,15 +32,20 @@ accepted scope and remaining release gates are in
   verified chain adapter explicitly catches up. Proven stale state disables
   commitment publication; whole-backup rollback still needs recovery handling.
 - BOLT 4 Sphinx construction/peeling, final TLV payloads and payment-secret
-  validation. These are prerequisites for the pending BOLT 12 async work.
+  validation; BOLT12 offers/static invoices, blinded paths and the pinned LDK
+  hold/release async flow, including durable request retries.
 - Winnow-owned funding reservations and ordered verified-filter observers,
   selectively reused from the prior research work without its native bridge.
+- Taproot recovery destinations, negotiated anysegwit cooperative close, and
+  dust limits from Winnow's existing coin-selection policy.
+- Shared foreground peer sessions, verified-chain recovery, HTLC timeout and
+  preimage resolution, reorg reconciliation, and recovery publication after restart.
 
 `Commitment` retains its validated parameters: recovery/signing cannot silently
 substitute its capacity, fee rate or channel keys. The low-level transaction
-builder follows BOLT 3's funder-fee exhaustion rule; a future channel policy must
-reject unaffordable negotiated updates before signing. The builder does not
-enforce reserve, expiry, confirmation or channel-state policy.
+builder follows BOLT 3's funder-fee exhaustion rule. The channel engine applies
+reserve, expiry, confirmation and channel-state policy before signing; the
+low-level builder alone does not establish that a payment is safe.
 
 Each handshake/transport has one owner (normally a connection actor). These
 non-Sendable objects must not be shared concurrently. Complete handshake acts
@@ -95,19 +101,21 @@ the clients are offline. Receipts check actual channel amounts, forwarding fees,
 payment hashes/preimages and process ordering. Rust runs only in the independent
 host reference; these tests do not establish app behavior or release readiness.
 
-## Remaining engine and application work
+`ci-lightning-timeout` verifies automatic commitment, HTLC timeout and delayed
+recovery after the recipient and both providers disappear. Core validates the
+transactions and returned balance. `ci-lightning-ui` builds the research app,
+records actual process crashes and Apple Share/Copy, and checks the independent
+provider receipts plus the app's restored payment history and wallet balance.
+Its Debug authentication fixture is not physical-device authentication evidence.
 
-Keep one Swift implementation and Winnow's existing ownership boundaries:
+## Research scope and release gates
 
-- Expand interrupted-exchange tests across every commitment/revocation boundary,
-  concurrent updates, failed writes, exact replay and stale/rolled-back state.
-- Winnow-owned funding reservations, fees, validated chain/reorg notifications,
-  spend watches and broadcast. Current commitment selection and unattended
-  resolution must precede real-fund use.
-- Complete adversarial async coverage, then recipient-shared reusable receive
-  offers and Apple sharing in the app.
-- App integration, simulator journeys/video and a separately validated
-  TestFlight build. Do not ship this library as a replacement for those flows.
+This is a configured-route, foreground-only regtest beta. Keep the channel
+journal on the device; seed recovery alone does not restore current channel
+state. Device authentication, file protection, iPad/large text, final CI and an
+exact-source signed TestFlight release have separate required gates in the
+[release procedure](../../docs/engineering/lightning-release.md).
 
 Anchors, zero-fee commitments, splicing and post-quantum protocol extensions are
-not implemented or advertised. Classical Lightning is this branch's target.
+not implemented or advertised. Unattended protection and general mainnet routing
+are outside this research release.

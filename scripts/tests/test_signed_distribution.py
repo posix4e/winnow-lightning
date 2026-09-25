@@ -86,6 +86,25 @@ class SignedAppTests(unittest.TestCase):
             with self.subTest(architecture=architecture), self.assertRaises(AssertionError):
                 self.verify(architectures=architecture)
 
+    def test_research_distribution_requires_reviewed_encryption_and_no_cloud(self):
+        self.info['CFBundleIdentifier'] = 'com.btcswift.lightning'
+        self.entitlements = {'application-identifier': '2858MX5336.com.btcswift.lightning',
+                             'com.apple.developer.team-identifier': '2858MX5336', 'get-task-allow': False}
+        with patch.dict(os.environ, TESTFLIGHT_BUNDLE_ID='com.btcswift.lightning', LIGHTNING_NONEXEMPT_ENCRYPTION=''):
+            with self.assertRaises(AssertionError):
+                self.verify(True)
+            for value in (True, False):
+                self.info['ITSAppUsesNonExemptEncryption'] = value
+                os.environ['LIGHTNING_NONEXEMPT_ENCRYPTION'] = 'YES' if value else 'NO'
+                self.verify(True)
+                self.info['ITSAppUsesNonExemptEncryption'] = not value
+                with self.assertRaises(AssertionError):
+                    self.verify(True)
+            self.info['ITSAppUsesNonExemptEncryption'] = False
+            self.entitlements['com.apple.developer.icloud-services'] = ['CloudKit']
+            with self.assertRaises(AssertionError):
+                self.verify(True)
+
 
 class UploadIntegrityTests(unittest.TestCase):
     def test_upload_only_accepts_the_verified_ipa_bytes(self):

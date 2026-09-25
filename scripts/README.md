@@ -140,3 +140,19 @@ The old story/demo publisher, standalone differential launcher, LOC reporter,
 and bundled-peer generator/crawler are retired. Their replacement or historical
 status is documented in the [debug runbook](../Tools/Debug/README.md#removed-commands)
 and [test-suite map](../docs/security/test-suite-map.md).
+
+## Swift Lightning research checks
+
+The existing CI workflow also runs pinned, unmodified CLN/LDK reference peers,
+both async directions and provider restarts, the recipient-never-returns timeout,
+and `ci-lightning-ui`. That runner records the actual `com.btcswift.lightning`
+research app with distinct client namespaces and host-observed SIGKILLs. Use a
+fresh result directory; its final `journey.json` is written only after XCTest,
+independent receipts and video finalization succeed. Fixture state is disposable
+and is excluded from uploaded evidence.
+
+`release-lightning` reuses the signing, exported-IPA, dependency, test-hook and
+provenance checks for the existing internal TestFlight app. It requires exact
+source, green CI and reviewed device/display/encryption evidence. See the
+[release procedure](../docs/engineering/lightning-release.md) for commands and
+the evidence format. Do not use the ordinary app's tag release for this bundle.

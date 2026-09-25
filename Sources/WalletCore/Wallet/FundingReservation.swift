@@ -23,6 +23,10 @@ public struct FundingReservation: Codable, Equatable, Sendable {
     let changeOutputIndex: UInt32?
 
     public func transaction() throws -> Transaction { try Transaction.decode(rawTransaction) }
+    public func changeOutput() throws -> Transaction.Output? {
+        let tx = try transaction()
+        return changeOutputIndex.map { tx.outputs[Int($0)] }
+    }
 
     func validate() throws {
         guard !requestID.isEmpty, requestID.utf8.count <= 128,

@@ -36,6 +36,14 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Use the same Python runtime as Winnow validation
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - name: Research release evidence and signing policy tests
+        run: |
+          python3 -m unittest discover -s scripts/tests -p test_lightning_release.py
+          python3 -m unittest discover -s scripts/tests -p test_signed_distribution.py
       - name: Prepare host-only reference tools
         run: |
           brew install autoconf automake libtool gnu-sed gettext libsodium lowdown pkgconf openssl@3 make sqlite uv bitcoin
@@ -62,10 +70,43 @@ jobs:
         run: scripts/ci-lightning-async --direction swift-to-ldk --restart-providers
       - name: LDK-to-Swift async settlement across provider crashes
         run: scripts/ci-lightning-async --direction ldk-to-swift --restart-providers
+      - name: Recipient never returns; Swift recovers without either provider
+        run: scripts/ci-lightning-timeout
       - name: Stock-peer payments, process restart and force close
         run: scripts/ci-lightning-peer --close force
       - name: Stock-peer payments, process restart and cooperative close
         run: scripts/ci-lightning-peer --close cooperative
+      - name: Install pinned app project generator
+        run: scripts/install-xcodegen
+      - name: Record Swift app sharing, offline payment, crashes and returned funds
+        env:
+          DERIVED_DATA: ${{ runner.temp }}/lightning-app-build
+        run: scripts/ci-lightning-ui "$RUNNER_TEMP/lightning-ui"
+      - name: Compile the device research release and exclude test activation
+        run: |
+          xcodebuild build -project WinnowApp.xcodeproj -scheme WinnowLightning -configuration ResearchRelease \
+            -destination 'generic/platform=iOS' -derivedDataPath "$RUNNER_TEMP/lightning-app-build" \
+            -skipPackagePluginValidation -skipMacroValidation CODE_SIGNING_ALLOWED=NO \
+            > "$RUNNER_TEMP/lightning-ui/research-release-build.log" 2>&1
+          app="$RUNNER_TEMP/lightning-app-build/Build/Products/ResearchRelease-iphoneos/WinnowApp.app"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Info.plist")" = com.btcswift.lightning
+          test "$(lipo -archs "$app/WinnowApp")" = arm64
+          scripts/verify-release-e2e-exclusion "$app"
+          scripts/check-dependencies --xcode "$RUNNER_TEMP/lightning-app-build"
+      - name: Preserve app recording and independent evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: swift-lightning-app
+          path: |
+            ${{ runner.temp }}/lightning-ui/journey.mp4
+            ${{ runner.temp }}/lightning-ui/screenshots
+            ${{ runner.temp }}/lightning-ui/LightningUI.xcresult
+            ${{ runner.temp }}/lightning-ui/*.log
+            ${{ runner.temp }}/lightning-ui/manifest.json
+            ${{ runner.temp }}/lightning-ui/journey.json
+            ${{ runner.temp }}/lightning-ui/fixture/evidence
+          retention-days: 14
       - name: Preserve reference and interoperability evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
