@@ -90,5 +90,25 @@ including penalties after a peer's second-stage transaction wins the first race.
 funding reorgs, maturity recalculation, stale-backup protection and failed writes.
 `ci-lightning-offers` checks BOLT12 offers, requests and static-invoice signatures
 in both directions against the pinned LDK public APIs. Published BOLT12 encoding
-and signature vectors are also required. These checks do not yet establish the
-live async flow, full adversarial matrix, app journeys or release completion.
+and signature vectors are also required.
+
+`ci-lightning-async` now runs both Swift-to-LDK and LDK-to-Swift over real TCP,
+with separate sender, recipient and two provider processes. The recipient is
+killed after its reusable offer is acknowledged by the static-invoice server;
+the sender is killed after the held HTLC is committed; the recipient settles
+while the sender remains stopped; the sender then restores and reconciles.
+Both directions also pass with both providers killed and restored during the
+offline interval. Receipts compare hashes/preimages, committed HTLC values and
+forwarding fees, and record process order plus source/reference identities.
+LDK can insert dummy hops: distinguish the actual incoming channel amount from
+the post-dummy-hop amount in its claim event, while checking the exact total debit.
+
+The shared journal payload is schema 2; pre-release schema 1 is refused rather
+than silently discarding channel state. The app integration must use its own new
+Swift namespace and preserve the prior PQLN application's files. Optional onion
+messages are discarded according to BOLT4 without interrupting channel messages;
+a persistence failure still stops every publication path. Receive preimages are
+persisted with the fulfill intent for on-chain recovery after a crash.
+
+The full adversarial matrix, app integration/journeys and TestFlight release
+remain open gates. These host fixtures alone do not establish release readiness.

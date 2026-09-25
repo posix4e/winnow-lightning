@@ -28,7 +28,7 @@ public actor LightningEngine {
         case broadcastRecovery(channelID: Data, transaction: Data)
     }
     struct State: Codable {
-        var version = 1
+        var version = 2
         var revision: UInt64 = 0
         var nextSequence: UInt64 = 0
         var chain: Data
@@ -38,6 +38,7 @@ public actor LightningEngine {
         var payments: [PaymentRecord] = []
         var incoming: [ReceiveRequest] = []
         var scan = LightningChainState()
+        var async = AsyncState()
     }
     let journal: any LightningJournal
     var state: State
@@ -52,7 +53,7 @@ public actor LightningEngine {
         self.journal = journal
         if let bytes = try journal.load() {
             let loaded = try JSONDecoder().decode(State.self, from: bytes)
-            guard loaded.version == 1, loaded.chain == chain else { throw LightningError.storageFailed }
+            guard loaded.version == 2, loaded.chain == chain else { throw LightningError.storageFailed }
             guard nodeSecret == nil || nodeSecret == loaded.nodeSecret else { throw LightningError.storageFailed }
             try Self.validateLoaded(loaded)
             state = loaded
@@ -73,7 +74,7 @@ public actor LightningEngine {
     public func chainDisconnected() { chainIsCurrent = false }
     public func peerInitialized(_ peer: Data, features: LightningFeatures) throws {
         try healthy(); _ = try ChannelKeys.point(peer)
-        try features.validateRequired(supported: [0, 8, 12, 14, 44])
+        try features.validateRequired(supported: [0, 8, 12, 14, 24, 38, 44])
         guard features.supports(12), features.supports(44) else { throw LightningError.invalidMessage }
         try prepareReestablishment(peer)
         peers[peer] = features
@@ -172,9 +173,11 @@ public actor LightningEngine {
         }
     }
     private static func validateLoaded(_ state: State) throws {
-        guard state.channels.count <= 64, state.outbox.count <= 1024,
-              Set(state.outbox.map(\.sequence)).count == state.outbox.count,
-              state.outbox.allSatisfy({ $0.sequence < state.nextSequence }) else { throw LightningError.storageFailed }
+        let sequences = state.outbox.map(\.sequence) + state.async.outbox.map(\.sequence)
+        guard state.channels.count <= 64, state.outbox.count <= 1024, state.async.outbox.count <= 1024,
+              state.payments.count <= 4096, state.async.outgoing.count <= 4096, state.async.receives.count <= 128,
+              Set(sequences).count == sequences.count,
+              sequences.allSatisfy({ $0 < state.nextSequence }) else { throw LightningError.storageFailed }
         for channel in state.channels {
             _ = try ChannelKeys.point(channel.peer)
             try channel.local.validate(capacity: channel.capacity)

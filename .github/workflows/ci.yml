@@ -54,6 +54,14 @@ jobs:
         run: swift test --filter LightningCoreTests
       - name: Upstream LDK offer, request and static-invoice checks
         run: scripts/ci-lightning-offers
+      - name: Swift-to-LDK async settlement with both clients offline
+        run: scripts/ci-lightning-async --direction swift-to-ldk
+      - name: LDK-to-Swift async settlement with both clients offline
+        run: scripts/ci-lightning-async --direction ldk-to-swift
+      - name: Swift-to-LDK async settlement across provider crashes
+        run: scripts/ci-lightning-async --direction swift-to-ldk --restart-providers
+      - name: LDK-to-Swift async settlement across provider crashes
+        run: scripts/ci-lightning-async --direction ldk-to-swift --restart-providers
       - name: Stock-peer payments, process restart and force close
         run: scripts/ci-lightning-peer --close force
       - name: Stock-peer payments, process restart and cooperative close

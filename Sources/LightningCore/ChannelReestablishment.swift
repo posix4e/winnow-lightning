@@ -29,9 +29,9 @@ extension LightningEngine {
         let id = try reader.take(32), nextCommitment = try reader.u64(), nextRevocation = try reader.u64()
         let lastSecret = try reader.take(32), point = try reader.take(33)
         let tlvs = try reader.tlvs(known: [1, 5]); _ = try ChannelKeys.point(point)
-        guard tlvs.isEmpty else { throw LightningError.invalidMessage } // No interactive funding or splicing.
         let index = try channelIndex(id, peer: peer)
         var channel = state.channels[index]
+        try validateFundingIdentity(tlvs, channel: channel)
         guard reestablishing.contains(id), channel.signedCommitment != nil else { throw LightningError.invalidState }
         if nextRevocation > channel.localNumber {
             guard nextRevocation <= ChannelKeys.maximumCommitmentNumber,
@@ -62,6 +62,16 @@ extension LightningEngine {
         reestablishing.remove(id)
         return []
     }
+    private func validateFundingIdentity(_ tlvs: [LightningWire.TLV], channel: ChannelState) throws {
+        // A static-remotekey channel can carry its original funding identity.
+        // This private-channel profile cannot resume interactive funding.
+        guard !tlvs.contains(where: { $0.type == 1 }) else { throw LightningError.invalidMessage }
+        if let locked = tlvs.first(where: { $0.type == 5 }) {
+            var funding = LightningWire.Reader(locked.value)
+            guard try funding.take(32) == channel.fundingTxid, try funding.u8() == 0 else { throw LightningError.invalidMessage }
+            try funding.requireEnd()
+        }
+    }
     private func validateReestablishment(_ channel: ChannelState, nextCommitment: UInt64,
                                         nextRevocation: UInt64, lastSecret: Data) throws {
         guard nextCommitment == channel.remoteNumber + 1 || (channel.awaitingRevocation && nextCommitment == channel.remoteNumber + 2),
@@ -73,7 +83,7 @@ extension LightningEngine {
     }
     private func discardUncommittedIncoming(_ channel: inout ChannelState) {
         for update in channel.updates where !update.fromLocal && update.localNumber == nil {
-            if case .add(let htlc, _) = update.change { channel.nextRemoteHTLC = min(channel.nextRemoteHTLC, htlc.id) }
+            if case .add(let htlc, _) = update.change { channel.nextRemoteHTLC = min(channel.nextRemoteHTLC, htlc.id); channel.incomingBlinding.removeValue(forKey: htlc.id) }
         }
         channel.updates.removeAll { !$0.fromLocal && $0.localNumber == nil }
     }

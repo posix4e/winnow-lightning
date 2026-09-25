@@ -195,7 +195,7 @@ def main():
                     f'--addr=127.0.0.1:{peer_port}', '--autolisten=false', '--announce-addr-discovered=false',
                     f'--bitcoin-cli={bitcoin / "bitcoin-cli"}', f'--bitcoin-datadir={core_dir}', f'--bitcoin-rpcport={rpc_port}',
                     '--log-level=debug'], stdout=cln_log, stderr=cln_log)
-                info = wait_for(lambda: ln('getinfo'))
+                info = wait_for(lambda: (value if value.get('blockheight') == rpc('getblockcount') else None) if (value := ln('getinfo')) else None)
                 chain = bytes.fromhex(rpc('getblockhash', 0))[::-1].hex()
                 swift = SwiftPeer([executable, '127.0.0.1', str(peer_port), info['id'], chain, str(root / 'swift-journal')], swift_log)
                 check_onions(ln, swift, evidence)

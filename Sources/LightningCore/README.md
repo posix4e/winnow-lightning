@@ -84,8 +84,16 @@ requests, actual Swift process termination, persistent receipts, reestablishment
 and close. Bitcoin Core verifies/mines the independent parties' final signed
 transaction. `--close force` and `--close cooperative` use fresh fixtures.
 Receipts record source identity (including whether it is dirty), peer commit,
-amounts, hashes and balances. These tests do not establish asynchronous-payment
-interoperability or app behavior.
+amounts, hashes and balances.
+
+`ci-lightning-async` separately checks the pinned LDK async protocol against
+Swift in both directions, including reusable BOLT12 offers, static invoices,
+blinded payment/onion paths, committed held HTLCs and recipient-triggered
+release. Sender and recipient are separate processes killed and restarted in
+non-overlapping order. `--restart-providers` also kills both LDK providers while
+the clients are offline. Receipts check actual channel amounts, forwarding fees,
+payment hashes/preimages and process ordering. Rust runs only in the independent
+host reference; these tests do not establish app behavior or release readiness.
 
 ## Remaining engine and application work
 
@@ -96,8 +104,8 @@ Keep one Swift implementation and Winnow's existing ownership boundaries:
 - Winnow-owned funding reservations, fees, validated chain/reorg notifications,
   spend watches and broadcast. Current commitment selection and unattended
   resolution must precede real-fund use.
-- BOLT 12 offers, blinded paths, static invoices and the pinned upstream async
-  protocol, then recipient-shared reusable receive offers and Apple sharing.
+- Complete adversarial async coverage, then recipient-shared reusable receive
+  offers and Apple sharing in the app.
 - App integration, simulator journeys/video and a separately validated
   TestFlight build. Do not ship this library as a replacement for those flows.
 

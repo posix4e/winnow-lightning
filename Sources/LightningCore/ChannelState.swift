@@ -48,6 +48,7 @@ struct ChannelState: Codable {
     var localHTLCSignatures: [Data] = []
     var previousRemoteCommitments: [Data] = []
     var learnedPreimages: [Data] = []
+    var incomingBlinding: [UInt64: Data] = [:]
     var localShutdown: Data?, remoteShutdown: Data?
     var closingFee: UInt64?, closingFeeLimit: UInt64?
     var closingTransaction: Data?

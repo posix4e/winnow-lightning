@@ -2,13 +2,14 @@ import Foundation
 import P256K
 
 extension LightningEngine {
-    public enum PaymentPhase: String, Codable, Sendable { case inFlight, settled, failed }
+    public enum PaymentPhase: String, Codable, Sendable { case preparing, inFlight, awaitingRecipient, settled, failed }
     public struct Payment: Codable, Sendable, Equatable {
         public let id: Data, hash: Data
         public let amountMsat: UInt64
         public let incoming: Bool
         public var phase: PaymentPhase
         public var preimage: Data?
+        public var feeMsat: UInt64?
     }
     /// The initial direct-channel adapter. BOLT12 routing supplies a separate
     /// authenticated request before using this same durable payment machinery.
@@ -24,7 +25,8 @@ extension LightningEngine {
     }
     struct PaymentRecord: Codable {
         var payment: Payment
-        let channelID: Data, htlcID: UInt64
+        let channelID: Data
+        var htlcID: UInt64?
         let request: DirectPayment?
     }
     struct ReceiveRequest: Codable {
@@ -84,7 +86,7 @@ extension LightningEngine {
         var events: [Event] = []
         for index in next.payments.indices {
             var record = next.payments[index]
-            guard record.payment.phase == .inFlight, let channel = next.channels.first(where: { $0.id == record.channelID }) else { continue }
+            guard [.inFlight, .awaitingRecipient].contains(record.payment.phase), let channel = next.channels.first(where: { $0.id == record.channelID }) else { continue }
             for update in channel.updates where update.irrevocable {
                 switch update.change {
                 case .fulfill(let id, let offered, let preimage) where id == record.htlcID && offered != record.payment.incoming:
@@ -96,8 +98,10 @@ extension LightningEngine {
             }
             if record.payment != next.payments[index].payment {
                 next.payments[index] = record; events.append(.paymentChanged(record.payment))
+                next.async.outbox.removeAll { $0.key == Data([5]) + record.payment.id }
             }
         }
+        events += try reconcileHeldPayments(in: &next)
         try claimIncoming(in: &next)
         return events
     }
@@ -115,15 +119,21 @@ extension LightningEngine {
         }
     }
     private func claim(_ htlc: ChannelTransactions.HTLC, onion: Data, channel: inout ChannelState, state: inout State) throws {
-        guard let peeled = try? OnionPacket.peel(onion, secret: state.nodeSecret, associatedData: htlc.paymentHash) else {
+        let blinding = channel.incomingBlinding[htlc.id]
+        let peeled: OnionPacket.Peeled?
+        if let blinding { peeled = try? BlindedPayment.peel(onion: onion, blinding: blinding, nodeSecret: state.nodeSecret, hash: htlc.paymentHash) }
+        else { peeled = try? OnionPacket.peel(onion, secret: state.nodeSecret, associatedData: htlc.paymentHash) }
+        guard let peeled else {
             try failIncoming(htlc, onion: onion, sharedSecret: nil, channel: &channel, state: &state)
             return
         }
-        guard let request = validReceive(htlc, peeled: peeled, state: state) else {
+        let request = blinding.map { validAsyncReceive(htlc, peeled: peeled, blinding: $0, state: state) } ?? validReceive(htlc, peeled: peeled, state: state)
+        guard let request else {
             try failIncoming(htlc, onion: onion, sharedSecret: peeled.sharedSecret, channel: &channel, state: &state)
             return
         }
         channel.updates.append(ChannelUpdate(change: .fulfill(id: htlc.id, offered: false, preimage: request.preimage), fromLocal: true))
+        if !channel.learnedPreimages.contains(request.preimage) { channel.learnedPreimages.append(request.preimage) }
         var writer = LightningWire.Writer(); writer.append(channel.id); writer.u64(htlc.id); writer.append(request.preimage)
         try Self.enqueue(.init(type: 130, payload: writer.data), channel: channel, in: &state)
         let payment = Payment(id: request.id, hash: htlc.paymentHash, amountMsat: request.amountMsat, incoming: true, phase: .inFlight)

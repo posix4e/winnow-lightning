@@ -28,6 +28,14 @@ public struct LightningFeatures: Sendable, Equatable, Codable {
     /// keys and explicit channel types. No MPP, anchors or async extensions.
     public static var channelOpening: LightningFeatures { LightningFeatures(bytes: Data([0x20, 0, 0, 0, 0xa2, 2])) }
 
+    /// Client support for blinded receives and onion messages. The client does
+    /// not advertise the holding-provider feature.
+    public static var asyncClient: LightningFeatures {
+        var bytes = channelOpening.bytes
+        bytes[bytes.endIndex - 4] |= 2; bytes[bytes.endIndex - 5] |= 128
+        return LightningFeatures(bytes: bytes)
+    }
+
     public func initialization() throws -> LightningWire.Message {
         var writer = LightningWire.Writer()
         writer.u16(0); writer.u16(UInt16(bytes.count)); writer.append(bytes)

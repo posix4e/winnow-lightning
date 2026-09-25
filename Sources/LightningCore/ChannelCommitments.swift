@@ -58,7 +58,8 @@ extension LightningEngine {
     func receiveRevocation(peer: Data, message: LightningWire.Message) throws -> [Event] {
         var reader = LightningWire.Reader(message.payload)
         let id = try reader.take(32), secret = try reader.take(32), point = try reader.take(33)
-        try reader.requireEnd(); _ = try ChannelKeys.point(point)
+        let fields = try reader.tlvs(known: [75537]); _ = try ChannelKeys.point(point)
+        let releasePaths = try fields.first(where: { $0.type == 75537 }).map { try HTLCReleasePath.decode($0.value) } ?? []
         let index = try activeChannelIndex(id, peer: peer)
         var channel = state.channels[index]
         guard channel.awaitingRevocation,
@@ -77,6 +78,7 @@ extension LightningEngine {
         if let through = channel.remoteCommitmentSequence {
             next.outbox.removeAll { $0.peer == peer && $0.channelID == id && $0.sequence <= through && [128, 130, 131, 132, 134, 135].contains($0.message.type) }
         }
+        try recordReleasePaths(releasePaths, channel: channel, in: &next)
         channel.remoteCommitmentSequence = nil
         try signPending(&channel, in: &next)
         next.channels[index] = channel

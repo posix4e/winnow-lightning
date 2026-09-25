@@ -23,10 +23,10 @@ private final class MemoryJournal: LightningJournal {
 final class ChannelEngineTests: XCTestCase, @unchecked Sendable {
     private let chain = Data(repeating: 7, count: 32)
     private func key(_ byte: UInt8) throws -> Data { try ChannelKeys.publicKey(secret: Data(repeating: byte, count: 32)) }
-    private func engine(_ memory: JournalMemory, peer: Data, secret: Data? = nil) async throws -> LightningEngine {
+    private func engine(_ memory: JournalMemory, peer: Data, secret: Data? = nil, features: LightningFeatures = .channelOpening) async throws -> LightningEngine {
         let engine = try LightningEngine(chain: chain, nodeSecret: secret, journal: MemoryJournal(memory))
         try await engine.chainCaughtUp()
-        try await engine.peerInitialized(peer, features: .channelOpening)
+        try await engine.peerInitialized(peer, features: features)
         return engine
     }
     func testOpeningPersistsEnforceableCommitmentBeforeBroadcast() async throws {
@@ -132,9 +132,9 @@ final class ChannelEngineTests: XCTestCase, @unchecked Sendable {
         let aliceKey: Data, bobKey: Data, id: Data
         let aliceStore: JournalMemory, bobStore: JournalMemory
     }
-    private func pair() async throws -> Pair {
+    private func pair(holdingPeer: Bool = false) async throws -> Pair {
         let aliceKey = try key(1), bobKey = try key(2), aStore = JournalMemory(), bStore = JournalMemory()
-        let alice = try await engine(aStore, peer: bobKey, secret: Data(repeating: 1, count: 32)), bob = try await engine(bStore, peer: aliceKey, secret: Data(repeating: 2, count: 32))
+        let alice = try await engine(aStore, peer: bobKey, secret: Data(repeating: 1, count: 32), features: LightningFeatures(bits: LightningFeatures.channelOpening.bits.union(holdingPeer ? [153] : []))), bob = try await engine(bStore, peer: aliceKey, secret: Data(repeating: 2, count: 32))
         let temporary = try await alice.openChannel(peer: bobKey, capacitySat: 100_000, feePerKW: 1000)
         _ = try await bob.receive(peer: aliceKey, message: alice.pendingMessages(peer: bobKey)[0].message)
         let events = try await alice.receive(peer: bobKey, message: bob.pendingMessages(peer: aliceKey)[0].message)
@@ -186,6 +186,14 @@ final class ChannelEngineTests: XCTestCase, @unchecked Sendable {
         var invalid = LightningWire.Writer(); invalid.append(p.id); invalid.u64(0); invalid.append(Data(repeating: 42, count: 32))
         do { _ = try await p.alice.receive(peer: p.bobKey, message: .init(type: 130, payload: invalid.data)); XCTFail() } catch {}
         XCTAssertEqual(beforeInvalid, p.aliceStore.load())
+        // Optional attribution (odd TLV 1) is sent by the independent LDK.
+        // Its presence cannot invalidate a correctly authenticated preimage.
+        for outbound in try await p.bob.pendingMessages(peer: p.aliceKey) where outbound.message.type == 130 {
+            var extended = LightningWire.Writer(); extended.append(outbound.message.payload)
+            try extended.tlvs([.init(type: 1, value: Data(repeating: 3, count: 1040))])
+            _ = try await p.alice.receive(peer: p.bobKey, message: .init(type: 130, payload: extended.data))
+            bSent.insert(outbound.sequence)
+        }
         for _ in 0..<4 {
             try await pump(p.bob, peer: p.aliceKey, to: p.alice, from: p.bobKey, sent: &bSent)
             try await pump(p.alice, peer: p.bobKey, to: p.bob, from: p.aliceKey, sent: &aSent)
@@ -201,5 +209,111 @@ final class ChannelEngineTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(try b.view(localOwner: true, number: 2).localMsat, 5_000_000)
         XCTAssertTrue(try a.view(localOwner: true, number: 2).htlcs.isEmpty)
         XCTAssertEqual(a.learnedPreimages, [preimage])
+    }
+}
+
+extension ChannelEngineTests {
+    func testOnionRejectionDoesNotInterruptChannelButPersistenceFailureDoes() async throws {
+        let p = try await pair(holdingPeer: true), (request, invoice) = try offerPayment(p)
+        _ = try await p.alice.payOffer(request, now: 100)
+        let reply = try await p.alice.replyPath(purpose: 1, id: request.id, through: [])
+        let stored = p.aliceStore.load()
+        let unsupported = try OnionMessage.create(to: reply, content: .init(type: 68, value: Data()))
+        let ignored = try await p.alice.receiveOnionMessage(unsupported, now: 101)
+        XCTAssertTrue(ignored.isEmpty); XCTAssertEqual(stored, p.aliceStore.load())
+        let malformed = try await p.alice.receiveOnionMessage(.init(type: 513, payload: Data([0])), now: 101)
+        XCTAssertTrue(malformed.isEmpty); XCTAssertEqual(stored, p.aliceStore.load())
+        let valid = try OnionMessage.create(to: reply, content: .init(type: 70, value: invoice.bytes))
+        p.aliceStore.fail()
+        do { _ = try await p.alice.receiveOnionMessage(valid, now: 102); XCTFail("Storage failure must never become a dropped message") }
+        catch { XCTAssertEqual(error as? LightningError, .storageFailed) }
+        XCTAssertEqual(stored, p.aliceStore.load())
+        do { _ = try await p.alice.pendingMessages(peer: p.bobKey); XCTFail() }
+        catch { XCTAssertEqual(error as? LightningError, .storageFailed) }
+    }
+    func testReestablishmentAcceptsOnlyOriginalFundingIdentity() async throws {
+        let p = try await pair(), channel = try storedChannel(p.aliceStore)
+        let restored = try await engine(p.aliceStore, peer: p.bobKey)
+        var base = LightningWire.Writer(); base.append(p.id); base.u64(1); base.u64(0)
+        base.append(Data(repeating: 0, count: 32)); base.append(try key(2))
+        let stored = p.aliceStore.load()
+        for identity in [Data(repeating: 3, count: 32) + Data([0]), channel.fundingTxid! + Data([1]), channel.fundingTxid!] {
+            var bad = LightningWire.Writer(); bad.append(base.data); try bad.tlvs([.init(type: 5, value: identity)])
+            do { _ = try await restored.receive(peer: p.bobKey, message: .init(type: 136, payload: bad.data)); XCTFail() } catch {}
+            XCTAssertEqual(stored, p.aliceStore.load())
+        }
+        var valid = LightningWire.Writer(); valid.append(base.data)
+        try valid.tlvs([.init(type: 5, value: channel.fundingTxid! + Data([0]))])
+        _ = try await restored.receive(peer: p.bobKey, message: .init(type: 136, payload: valid.data))
+        let pending = try await restored.pendingMessages(peer: p.bobKey)
+        XCTAssertFalse(pending.contains { $0.message.type == 136 })
+    }
+    private func offerPayment(_ pair: Pair, amount: UInt64 = 5_000_000, fee: UInt64 = 1000) throws -> (LightningEngine.OfferPayment, StaticInvoice) {
+        let server = try OnionMessage.path(nodes: [key(9)], context: Data([1]), authenticationKey: Data(repeating: 22, count: 32))
+        let offer = try LightningOffer(bytes: Bolt12Encoding.serialize([.init(type: 2, value: chain),
+            .init(type: 16, value: server.encoded()), .init(type: 22, value: key(11))]))
+        let route = try AsyncPaymentRoute(holdingPeer: pair.bobKey, introduction: key(9), shortChannelID: 123,
+                                         baseMsat: 1000, proportionalMillionths: 0, expiryDelta: 48)
+        let invoice = try StaticInvoice(offer: offer, paymentPaths: [server],
+            payInfo: [.init(baseMsat: 0, proportionalMillionths: 0, expiryDelta: 18, minimumMsat: 1, maximumMsat: 50_000_000, features: .init(bytes: Data()))],
+            notificationPaths: [server], createdAt: 100, relativeExpiry: 3600, signingSecret: Data(repeating: 11, count: 32))
+        return (LightningEngine.OfferPayment(id: Data(repeating: 99, count: 32), channelID: pair.id, offer: offer,
+                    amountMsat: amount, feeLimitMsat: fee, maximumDelta: 144, route: route), invoice)
+    }
+    func testOfferPaymentIDAndRequestSurviveRestartWithoutAnotherHTLC() async throws {
+        let p = try await pair(holdingPeer: true), (request, invoice) = try offerPayment(p)
+        let initial = try await p.alice.payOffer(request, now: 100), stored = p.aliceStore.load()
+        XCTAssertEqual(initial.phase, .preparing)
+        let retry = try await p.alice.payOffer(request, now: 101)
+        XCTAssertEqual(retry, initial); XCTAssertEqual(stored, p.aliceStore.load())
+        let (different, _) = try offerPayment(p, amount: 6_000_000)
+        do { _ = try await p.alice.payOffer(different, now: 101); XCTFail() } catch {}
+        XCTAssertEqual(stored, p.aliceStore.load())
+        let outbound = try await p.alice.pendingOnionMessages(peer: p.bobKey, now: 101)
+        XCTAssertEqual(outbound.count, 1)
+        let response = LightningWire.TLV(type: 70, value: invoice.bytes)
+        _ = try await p.alice.acceptStaticInvoice(response, id: request.id, now: 102)
+        let afterInvoice = p.aliceStore.load()
+        _ = try await p.alice.acceptStaticInvoice(response, id: request.id, now: 103)
+        XCTAssertEqual(afterInvoice, p.aliceStore.load())
+        let state = try JSONDecoder().decode(LightningEngine.State.self, from: XCTUnwrap(afterInvoice))
+        XCTAssertEqual(state.channels[0].nextLocalHTLC, 1)
+        XCTAssertEqual(state.payments[0].payment.phase, .inFlight)
+        let update = try XCTUnwrap(state.outbox.first { $0.message.type == 128 })
+        var reader = LightningWire.Reader(update.message.payload)
+        _ = try reader.take(32 + 8 + 8 + 32 + 4 + 1366)
+        XCTAssertEqual(try reader.tlvs(known: [75537]), [.init(type: 75537, value: Data())])
+        let restored = try LightningEngine(chain: chain, journal: MemoryJournal(p.aliceStore))
+        let history = await restored.payments()
+        XCTAssertEqual(history.count, 1); XCTAssertEqual(history[0].hash, initial.hash)
+        do { _ = try await restored.payOffer(request, now: 104); XCTFail("No send before chain catch-up") } catch {}
+    }
+    func testExpiredInvoiceCannotSendAndFailedPersistenceFreezesAsyncOutbox() async throws {
+        let p = try await pair(holdingPeer: true), (request, invoice) = try offerPayment(p)
+        _ = try await p.alice.payOffer(request, now: 100)
+        let saved = p.aliceStore.load()
+        do { _ = try await p.alice.acceptStaticInvoice(.init(type: 70, value: invoice.bytes), id: request.id, now: 401); XCTFail() } catch {}
+        XCTAssertEqual(saved, p.aliceStore.load())
+        _ = try await p.alice.expireInvoiceRequests(now: 401)
+        let history = await p.alice.payments()
+        XCTAssertEqual(history.map(\.phase), [.failed])
+        let state = try JSONDecoder().decode(LightningEngine.State.self, from: XCTUnwrap(p.aliceStore.load()))
+        XCTAssertEqual(state.channels[0].nextLocalHTLC, 0)
+        XCTAssertTrue(state.async.outbox.isEmpty)
+        let q = try await pair(holdingPeer: true), (other, _) = try offerPayment(q)
+        q.aliceStore.fail()
+        do { _ = try await q.alice.payOffer(other, now: 100); XCTFail() } catch { XCTAssertEqual(error as? LightningError, .storageFailed) }
+        do { _ = try await q.alice.pendingOnionMessages(peer: q.bobKey, now: 100); XCTFail() } catch { XCTAssertEqual(error as? LightningError, .storageFailed) }
+    }
+    func testAsyncRequiresHoldingPeerAndFeeAuthorization() async throws {
+        let p = try await pair(), (request, _) = try offerPayment(p)
+        let before = p.aliceStore.load()
+        do { _ = try await p.alice.payOffer(request, now: 100); XCTFail() } catch {}
+        XCTAssertEqual(before, p.aliceStore.load())
+        let q = try await pair(holdingPeer: true), (underBudget, invoice) = try offerPayment(q, fee: 999)
+        _ = try await q.alice.payOffer(underBudget, now: 100)
+        let saved = q.aliceStore.load()
+        do { _ = try await q.alice.acceptStaticInvoice(.init(type: 70, value: invoice.bytes), id: underBudget.id, now: 101); XCTFail() } catch {}
+        XCTAssertEqual(saved, q.aliceStore.load())
     }
 }

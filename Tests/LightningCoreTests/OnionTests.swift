@@ -50,6 +50,10 @@ final class OnionTests: XCTestCase {
         XCTAssertEqual(try PaymentPayload(bytes: payload.bytes), payload)
         try payload.validate(expectedSecret: secret, expectedAmount: 12_000, receivedAmount: 12_000,
                              receivedExpiry: 200, height: 100, minimumDelta: 80)
+        try payload.validate(expectedSecret: secret, expectedAmount: 12_000, receivedAmount: 12_000,
+                             receivedExpiry: 218, height: 138, minimumDelta: 80)
+        XCTAssertThrowsError(try payload.validate(expectedSecret: secret, expectedAmount: 12_000,
+            receivedAmount: 12_000, receivedExpiry: 199, height: 100, minimumDelta: 80))
         XCTAssertThrowsError(try payload.validate(expectedSecret: Data(repeating: 4, count: 32), expectedAmount: 12_000,
             receivedAmount: 12_000, receivedExpiry: 200, height: 100, minimumDelta: 80))
         XCTAssertThrowsError(try payload.validate(expectedSecret: secret, expectedAmount: 12_000,

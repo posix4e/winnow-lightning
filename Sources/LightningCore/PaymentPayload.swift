@@ -33,8 +33,8 @@ public struct PaymentPayload: Sendable, Equatable {
     public func validate(expectedSecret: Data, expectedAmount: UInt64, receivedAmount: UInt64,
                          receivedExpiry: UInt32, height: UInt32, minimumDelta: UInt32) throws {
         guard secret == expectedSecret, amountMsat == expectedAmount, totalMsat == expectedAmount,
-              receivedAmount >= amountMsat, receivedExpiry == expiry,
-              UInt64(expiry) >= UInt64(height) + UInt64(minimumDelta) else { throw LightningError.invalidMessage }
+              receivedAmount >= amountMsat, receivedExpiry >= expiry,
+              UInt64(receivedExpiry) >= UInt64(height) + UInt64(minimumDelta) else { throw LightningError.invalidMessage }
     }
     static func truncated(_ integer: UInt64) -> Data {
         var writer = LightningWire.Writer(); writer.u64(integer)

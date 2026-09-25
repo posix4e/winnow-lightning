@@ -13,26 +13,33 @@ struct PeerFixture {
     }
     static func run() async throws {
         let args = Array(CommandLine.arguments.dropFirst())
-        guard args.count == 5, let port = UInt16(args[1]), let peer = Data(hex: args[2]), let chain = Data(hex: args[3])
+        guard [5, 7].contains(args.count), let port = UInt16(args[1]), let peer = Data(hex: args[2]), let chain = Data(hex: args[3])
         else { throw LightningError.invalidMessage }
-        let secret = Data(repeating: 1, count: 32)
+        let automatic = args.count == 7
+        let secret = Data(repeating: automatic ? (UInt8(args[5]) ?? 1) : 1, count: 32)
         let connection = try LightningConnection(host: args[0], port: port, secret: secret, peer: peer)
         let journal = try FileLightningJournal(directory: URL(fileURLWithPath: args[4]), key: Data(repeating: 42, count: 32))
         let engine = try LightningEngine(chain: chain, nodeSecret: secret, journal: journal)
-        try await engine.chainCaughtUp() // The test driver has synchronized its own regtest fixture.
+        try await engine.chainCaughtUp(height: automatic ? (UInt32(args[6]) ?? 0) : 0) // The test driver has synchronized its own regtest fixture.
         try await connection.start()
-        try await connection.send(LightningFeatures.channelOpening.initialization())
+        try await connection.send((automatic ? LightningFeatures.asyncClient : LightningFeatures.channelOpening).initialization())
         let initialization = try await connection.receive()
         let features = try LightningFeatures.readInitialization(initialization)
         FileHandle.standardError.write(Data("Reference init features: \(features.bits.sorted())\n".utf8))
         try await engine.peerInitialized(peer, features: features)
         try emit(["status": "initialized", "node_id": try ChannelKeys.publicKey(secret: secret).hex,
                   "peer_features": features.bytes.hex])
+        let pump = AutomaticPeer(engine: engine, connection: connection, peer: peer)
+        let loop = automatic ? Task.detached { await pump.run() } : nil
+        defer { loop?.cancel() }
         var sent = Set<UInt64>()
         while let line = readLine() {
             let input = try JSONDecoder().decode([String: String].self, from: Data(line.utf8))
-            let output = try await execute(input, engine: engine, connection: connection, peer: peer)
-            for pending in try await engine.pendingMessages(peer: peer) where !sent.contains(pending.sequence) {
+            let output: [String: String]
+            if automatic && input["command"] == "events" { output = ["events": try await pump.drain()] }
+            else { output = try await execute(input, engine: engine, connection: connection, peer: peer) }
+            if automatic { try await pump.flush() }
+            for pending in try await engine.pendingMessages(peer: peer) where !automatic && !sent.contains(pending.sequence) {
                 try await connection.send(pending.message); sent.insert(pending.sequence)
             }
             try emit(output)
@@ -43,7 +50,7 @@ struct PeerFixture {
                         connection: LightningConnection, peer: Data) async throws -> [String: String] {
         switch input["command"] {
         case "open":
-            let id = try await engine.openChannel(peer: peer, capacitySat: 100_000, feePerKW: 1000)
+            let id = try await engine.openChannel(peer: peer, capacitySat: UInt64(input["capacity"] ?? "") ?? 100_000, feePerKW: 1000)
             return ["temporary_id": id.hex]
         case "receive": return try await receive(engine: engine, connection: connection, peer: peer)
         case "fund":
@@ -78,7 +85,7 @@ struct PeerFixture {
             guard let id = Data(hex: input["id"] ?? ""), let payment = await engine.payments().first(where: { $0.id == id }) else {
                 return ["phase": "missing"]
             }
-            return ["phase": payment.phase.rawValue, "hash": payment.hash.hex, "preimage": payment.preimage?.hex ?? ""]
+            return ["phase": payment.phase.rawValue, "hash": payment.hash.hex, "preimage": payment.preimage?.hex ?? "", "fee": payment.feeMsat.map(String.init) ?? "0"]
         case "close":
             guard let id = Data(hex: input["id"] ?? ""), let destination = Data(hex: input["destination"] ?? "") else { throw LightningError.invalidMessage }
             try await engine.closeChannel(channelID: id, peer: peer, destination: destination, feeSat: 500, maximumFeeSat: 724)
@@ -90,11 +97,19 @@ struct PeerFixture {
         case "force_close":
             guard let id = Data(hex: input["id"] ?? "") else { throw LightningError.invalidMessage }
             return encode([try await engine.forceClose(channelID: id, peer: peer)])
-        default: throw LightningError.invalidMessage
+        default: return try await asyncCommand(input, engine: engine, peer: peer)
         }
     }
     static func receive(engine: LightningEngine, connection: LightningConnection, peer: Data) async throws -> [String: String] {
         let message = try await connection.receive()
+        do { return try await receiveMessage(message, engine: engine, connection: connection, peer: peer) }
+        catch {
+            FileHandle.standardError.write(Data("Rejected peer message type \(message.type): \(error)\n".utf8))
+            throw error
+        }
+    }
+    static func receiveMessage(_ message: LightningWire.Message, engine: LightningEngine,
+                               connection: LightningConnection, peer: Data) async throws -> [String: String] {
         if message.type == 18 {
             var reader = LightningWire.Reader(message.payload)
             let count = try reader.u16(), ignored = try reader.u16(); _ = try reader.take(Int(ignored)); try reader.requireEnd()
@@ -103,6 +118,10 @@ struct PeerFixture {
                 try await connection.send(.init(type: 19, payload: writer.data))
             }
             return ["type": "18"]
+        }
+        if message.type == 513 {
+            var output = encode(try await engine.receiveOnionMessage(message, now: UInt64(Date().timeIntervalSince1970)))
+            output["type"] = "513"; return output
         }
         guard (32...39).contains(message.type) || (128...136).contains(message.type) else { return ["type": String(message.type), "payload": message.payload.hex] }
         var output = encode(try await engine.receive(peer: peer, message: message))

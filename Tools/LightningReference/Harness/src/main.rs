@@ -16,7 +16,17 @@ use std::time::Duration;
 
 struct FixtureEntropy(AtomicU64);
 struct FixtureLogger;
-impl Logger for FixtureLogger { fn log(&self, record: Record) { eprintln!("{}", record.args); } }
+impl Logger for FixtureLogger {
+    fn log(&self, record: Record) {
+        if std::env::var_os("WINNOW_REFERENCE_TRACE").is_some() {
+            eprintln!("{}", record.args);
+        } else if matches!(record.level, lightning::util::logger::Level::Warn | lightning::util::logger::Level::Error) {
+            // CI artifacts contain locations, never raw onion payloads,
+            // channel secrets or preimages from the verbose reference logger.
+            eprintln!("{:?} {}:{}", record.level, record.module_path, record.line);
+        }
+    }
+}
 fn keys() -> KeysManager<FixtureLogger> { KeysManager::new(&[42;32], 1, 0, false, FixtureLogger) }
 impl EntropySource for FixtureEntropy {
     fn get_secure_random_bytes(&self) -> [u8; 32] {
@@ -96,7 +106,12 @@ fn execute(input: Value) -> Result<Value, String> {
         _ => Err("unknown command".into()),
     }
 }
+mod node;
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("node") {
+        tokio::runtime::Runtime::new().unwrap().block_on(node::run()).unwrap();
+        return;
+    }
     for line in io::stdin().lock().lines() {
         let response = line.map_err(|e| e.to_string()).and_then(|line| serde_json::from_str(&line).map_err(|e| e.to_string())).and_then(execute);
         println!("{}", match response { Ok(value) => json!({"ok": true, "result": value}), Err(error) => json!({"ok":false,"error":error}) });
