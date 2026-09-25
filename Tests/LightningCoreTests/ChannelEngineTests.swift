@@ -186,6 +186,43 @@ final class ChannelEngineTests: XCTestCase, @unchecked Sendable {
         }
     }
 
+    func testCloseFeeUsesWalletSizingAndEnforcesReviewedLimitAboveCommitmentFee() async throws {
+        let p = try await pair(anySegwit: true)
+        let destination = Data([0x51, 32]) + Data(repeating: 7, count: 32)
+        let fee = try await p.alice.estimatedClosingFee(channelID: p.id, peer: p.bobKey,
+            destination: destination, feeRateSatPerVByte: FeePolicy.resolve())
+        // 201 vB includes two maximum-size ECDSA signatures, our Taproot
+        // output, and the largest permitted peer witness program (40 bytes).
+        XCTAssertEqual(fee, 1005)
+        for invalid in [Double.nan, .infinity, 0, -1, 10_001] {
+            do {
+                _ = try await p.alice.estimatedClosingFee(channelID: p.id, peer: p.bobKey,
+                    destination: destination, feeRateSatPerVByte: invalid)
+                XCTFail("invalid feerate accepted")
+            } catch { XCTAssertEqual(error as? LightningError, .invalidAmount) }
+        }
+        try await p.alice.closeChannel(channelID: p.id, peer: p.bobKey, destination: destination,
+            feeSat: fee, maximumFeeSat: fee)
+        var channel = try storedChannel(p.aliceStore)
+        channel.remoteShutdown = destination
+        let transaction = try channel.closeTransaction(fee: fee)
+        XCTAssertEqual(UInt64(transaction.outputs.reduce(0) { $0 + $1.value }), channel.capacity - fee)
+        XCTAssertGreaterThan(fee, UInt64(channel.feePerKW) * 724 / 1000)
+        XCTAssertThrowsError(try channel.closeTransaction(fee: fee + 1))
+        var proposed = LightningWire.Writer()
+        proposed.append(p.id); proposed.u64(fee + 1)
+        let bob = try storedChannel(p.bobStore)
+        channel.closingFeeLimit = fee + 1
+        let digest = try channel.closeDigest(channel.closeTransaction(fee: fee + 1))
+        proposed.append(try ChannelKeys.compactSignature(ChannelKeys.sign(digest: digest, secret: bob.secrets.funding)))
+        let before = p.aliceStore.load()
+        do {
+            _ = try await p.alice.receive(peer: p.bobKey, message: .init(type: 39, payload: proposed.data))
+            XCTFail("peer exceeded reviewed close fee")
+        } catch { XCTAssertEqual(error as? LightningError, .invalidAmount) }
+        XCTAssertEqual(p.aliceStore.load(), before)
+    }
+
     private func pump(_ sender: LightningEngine, peer: Data, to receiver: LightningEngine, from: Data,
                       sent: inout Set<UInt64>) async throws {
         for message in try await sender.pendingMessages(peer: peer) where !sent.contains(message.sequence) {

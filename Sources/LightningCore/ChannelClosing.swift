@@ -92,7 +92,9 @@ extension ChannelState {
         guard let localShutdown, let remoteShutdown, let txid = fundingTxid, let output = fundingOutput else { throw LightningError.invalidState }
         let view = try view(localOwner: true, number: localNumber)
         var ours = view.localMsat / 1000, theirs = view.remoteMsat / 1000
-        guard fee <= (isFunder ? ours : theirs), fee <= UInt64(view.feePerKW) * 724 / 1000 else { throw LightningError.invalidAmount }
+        // A close can be larger than a commitment (e.g. two Taproot outputs).
+        // BOLT 2 bounds it by the negotiated range, not the commitment fee.
+        guard fee <= (isFunder ? ours : theirs), fee <= (closingFeeLimit ?? 0) else { throw LightningError.invalidAmount }
         if isFunder { ours -= fee } else { theirs -= fee }
         var outputs: [Transaction.Output] = []
         if ours > 0 { outputs.append(.init(value: Int64(ours), scriptPubKey: localShutdown)) }
