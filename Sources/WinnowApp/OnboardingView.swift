@@ -18,7 +18,9 @@ struct OnboardingView: View {
         NavigationStack {
             List {
                 Section {
-                    Text("Your bitcoin, on your phone. Winnow connects directly to Bitcoin and automatically backs up your wallet with iCloud when available.")
+                    Text(model.lightning == nil
+                        ? "Your bitcoin, on your phone. Winnow connects directly to Bitcoin and automatically backs up your wallet with iCloud when available."
+                        : "Swift Lightning regtest beta. Test coins only. Your wallet and channel recovery data stay on this device; iCloud backup is unavailable.")
                         .font(.subheadline).foregroundStyle(.secondary)
                 }
                 Section {
@@ -40,7 +42,9 @@ struct OnboardingView: View {
                             .accessibilityIdentifier("importWalletButton")
                     }
                 } footer: {
-                    Text("No iCloud? Your wallet still works. You can save a manual backup instead. Recovery words and backup controls are in Advanced.")
+                    Text(model.lightning == nil
+                        ? "No iCloud? Your wallet still works. You can save a manual backup instead. Recovery words and backup controls are in Advanced."
+                        : "Keep this device and its app data while channels or recovery are outstanding. A wallet backup alone cannot restore Lightning channels.")
                 }
                 if model.cloudBackups.busy { ProgressView("Checking iCloud…") }
                 if let message = model.cloudBackups.message {

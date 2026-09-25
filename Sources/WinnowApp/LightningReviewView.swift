@@ -65,7 +65,9 @@ struct LightningReviewView: View {
                 LabeledContent("Amount", value: "\(review.request.amountMsat / 1000) sats")
                 LabeledContent("Maximum fee", value: "\(review.request.feeLimitMsat / 1000) sats")
                 LabeledContent("Maximum expiry", value: "\(review.request.maximumDelta) blocks")
-                Text(review.offerText).font(.caption.monospaced()).textSelection(.enabled)
+                DisclosureGroup("Receive offer") {
+                    Text(review.offerText).font(.caption.monospaced()).textSelection(.enabled)
+                }
                 Text("Funds may remain committed while the recipient is offline. “Awaiting recipient” means pending; only “Settled” confirms payment.")
             }
         case .close(let review):

@@ -54,24 +54,24 @@ final class LightningAppUITests: XCTestCase {
         let funding = app.buttons["lightningFundingReview"]
         XCTAssertTrue(scrollUntilExists(app, funding))
         XCTAssertTrue(funding.appears(within: 60))
-        funding.tap()
-        XCTAssertTrue(app.buttons["lightningConfirm"].appears(within: 20))
+        tap(app, "lightningFundingReview")
+        XCTAssertTrue(app.navigationBars["Review Lightning"].appears(within: 20))
         Screenshots.capture(app, "lightning-03-funding-review", testCase: self)
         // Canceling review leaves no transaction in the independent node.
         app.buttons["lightningCancel"].tap()
         _ = try rpc("assert_no_funding")
-        funding.tap()
-        app.buttons["lightningConfirm"].tap()
+        tap(app, "lightningFundingReview")
+        tap(app, "lightningConfirm")
         _ = try rpc("confirm_funding")
         XCTAssertTrue(poll(timeout: 90, interval: 1, "app verifies channel funding") {
             app.staticTexts["lightningChannelPhase"].label.contains("ready")
         })
         try paste(offer)
         tap(app, "lightningSend")
-        app.buttons["lightningPasteOffer"].tap()
+        tap(app, "lightningPasteOffer")
         app.typeInto("lightningAmount", "5000")
-        app.buttons["lightningReviewPayment"].tap()
-        XCTAssertTrue(app.buttons["lightningConfirm"].appears(within: 15))
+        tap(app, "lightningReviewPayment")
+        XCTAssertTrue(app.navigationBars["Review Lightning"].appears(within: 15))
         XCTAssertTrue(app.staticTexts["Amount, 5000 sats"].exists)
         XCTAssertTrue(app.staticTexts["Maximum fee, 50 sats"].exists)
         XCTAssertTrue(app.staticTexts["Maximum expiry, 2016 blocks"].exists)
@@ -130,8 +130,7 @@ final class LightningAppUITests: XCTestCase {
         if fresh { app.launchEnvironment["WINNOW_E2E_RESET"] = "1" }
         app.launch()
         if fresh {
-            XCTAssertTrue(app.buttons["createWalletButton"].appears(within: 60))
-            app.buttons["createWalletButton"].tap()
+            tap(app, "createWalletButton")
         }
         selectTab(app, "Lightning")
         let node = app.staticTexts["lightningNodeID"]
