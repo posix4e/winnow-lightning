@@ -6,16 +6,24 @@ let package = Package(
     platforms: [.iOS(.v17), .macOS(.v14)],
     products: [
         .library(name: "WalletCore", targets: ["WalletCore"]),
+        .library(name: "LightningCore", targets: ["LightningCore"]),
         // Test fixtures shared by every test target, SwiftPM and Xcode alike.
         .library(name: "TestSupport", targets: ["TestSupport"]),
         .executable(name: "winnow-debug", targets: ["WinnowDebug"]),
         .executable(name: "WinnowFuzz", targets: ["WinnowFuzz"]),
         .executable(name: "winnow-fixture", targets: ["WinnowFixture"]),
+        .executable(name: "winnow-lightning-fixture", targets: ["LightningFixture"]),
     ],
     dependencies: [
         .package(url: "https://github.com/21-DOT-DEV/swift-secp256k1", exact: "0.23.2"),
     ],
     targets: [
+        .target(name: "LightningCore", dependencies: ["WalletCore",
+            .product(name: "P256K", package: "swift-secp256k1")], exclude: ["README.md"]),
+        .testTarget(name: "LightningCoreTests", dependencies: ["LightningCore", "TestSupport",
+            .product(name: "P256K", package: "swift-secp256k1")], resources: [.copy("Vectors")]),
+        .executableTarget(name: "LightningFixture", dependencies: ["LightningCore", "WalletCore"],
+            path: "Tools/LightningFixture"),
         .target(
             name: "WalletCore",
             dependencies: [.product(name: "P256K", package: "swift-secp256k1")],

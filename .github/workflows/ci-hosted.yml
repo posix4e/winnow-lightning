@@ -115,6 +115,12 @@ jobs:
           "$CI_RESULTS/production-build"
           "$CI_RESULTS/production-build.log"
 
+      - name: Validate Swift Lightning transactions with Bitcoin Core
+        if: steps.validate_media.outcome != 'success'
+        run: |
+          command -v bitcoind >/dev/null || brew install bitcoin
+          scripts/ci-lightning | tee "$CI_RESULTS/lightning-regtest.log"
+
       - name: Exercise release debugging commands
         if: steps.validate_media.outcome != 'success'
         run: |
