@@ -14,6 +14,13 @@ def verify(app, distribution=False, profile='winnow'):
     assert info['CFBundleShortVersionString'] == os.environ['TESTFLIGHT_MARKETING_VERSION'], 'app version mismatch'
     assert str(info['CFBundleVersion']) == os.environ['TESTFLIGHT_BUILD_NUMBER'], 'app build number mismatch'
     assert info['CFBundleIdentifier'] == bundle, 'app bundle mismatch'
+    if profile == 'lightning' and 2 in info.get('UIDeviceFamily', []):
+        ipad_orientations = set(info.get('UISupportedInterfaceOrientations~ipad',
+                                         info.get('UISupportedInterfaceOrientations', [])))
+        assert ipad_orientations == {'UIInterfaceOrientationPortrait',
+                                     'UIInterfaceOrientationPortraitUpsideDown',
+                                     'UIInterfaceOrientationLandscapeLeft',
+                                     'UIInterfaceOrientationLandscapeRight'}, 'iPad requires all four interface orientations'
     subprocess.run(['codesign', '--verify', '--deep', '--strict', str(app)], check=True)
     entitlements = plistlib.loads(subprocess.check_output(
         ['codesign', '-d', '--entitlements', ':-', str(app)], stderr=subprocess.DEVNULL))

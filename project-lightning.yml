@@ -51,6 +51,8 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
+        "INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad": "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
         INFOPLIST_KEY_NSFaceIDUsageDescription: "Unlock your regtest wallet and authorize channel funding or Lightning payments."
         INFOPLIST_KEY_NSLocalNetworkUsageDescription: "Connect to your regtest Bitcoin and Lightning peers."
         INFOPLIST_KEY_ITSAppUsesNonExemptEncryption: YES

@@ -78,6 +78,23 @@ class SignedAppTests(unittest.TestCase):
                         with self.assertRaises(AssertionError):
                             self.verify(True)
 
+    def test_lightning_ipad_metadata_catches_the_apple_upload_rejection(self):
+        self.info['CFBundleIdentifier'] = 'com.btcswift.lightning'
+        self.info['UIDeviceFamily'] = [1, 2]
+        self.entitlements = {'application-identifier': '2858MX5336.com.btcswift.lightning',
+                             'com.apple.developer.team-identifier': '2858MX5336',
+                             'get-task-allow': False}
+        for orientations in (None, [], ['UIInterfaceOrientationPortrait']):
+            with self.subTest(orientations=orientations):
+                if orientations is not None:
+                    self.info['UISupportedInterfaceOrientations~ipad'] = orientations
+                with self.assertRaisesRegex(AssertionError, 'iPad requires'):
+                    self.verify(True, profile='lightning')
+        self.info['UISupportedInterfaceOrientations~ipad'] = [
+            'UIInterfaceOrientationPortrait', 'UIInterfaceOrientationPortraitUpsideDown',
+            'UIInterfaceOrientationLandscapeLeft', 'UIInterfaceOrientationLandscapeRight']
+        self.verify(True, profile='lightning')
+
     def test_non_development_signature_never_gets_archive_exception(self):
         self.entitlements['get-task-allow'] = False
         with self.assertRaises(AssertionError):
