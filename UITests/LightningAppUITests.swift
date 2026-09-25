@@ -27,7 +27,7 @@ final class LightningAppUITests: XCTestCase {
         try configure(app, profile: XCTUnwrap(setup["recipient"] as? [String: Any]))
         try waitConnected(app)
         let recipientProfile = try rpc("recipient_channel")
-        try configure(app, profile: recipientProfile)
+        try configure(app, profile: recipientProfile, up: false)
         try waitConnected(app)
         tap(app, "lightningCreateOffer")
         let offerElement = app.staticTexts["lightningReceiveOffer"]
@@ -143,9 +143,9 @@ final class LightningAppUITests: XCTestCase {
         XCTAssertTrue(poll(timeout: 30, interval: 0.2, "durable node identity") { (node.value as? String)?.count == 66 })
         _ = try rpc("register", values: ["role": role, "node": XCTUnwrap(node.value as? String)])
     }
-    private func configure(_ app: XCUIApplication, profile: [String: Any]) throws {
+    private func configure(_ app: XCUIApplication, profile: [String: Any], up: Bool = true) throws {
         try paste(String(decoding: JSONSerialization.data(withJSONObject: profile, options: [.sortedKeys]), as: UTF8.self))
-        tap(app, "lightningSetup", up: true)
+        tap(app, "lightningSetup", up: up)
         tap(app, "lightningPasteProfile")
         tap(app, "lightningReviewProfile")
         XCTAssertTrue(app.navigationBars["Review Lightning"].appears(within: 15))
