@@ -11,6 +11,10 @@ import subprocess
 import tempfile
 import urllib.request
 
+# All validation below must run even if the caller inherited Python settings.
+if not __debug__:
+    raise RuntimeError('Release validation requires Python assertions; remove -O or PYTHONOPTIMIZE')
+
 ROOT = Path(__file__).resolve().parent.parent
 REPOSITORY = 'posix4e/winnow-lightning'
 BUNDLE = 'com.btcswift.lightning'

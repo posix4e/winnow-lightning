@@ -168,7 +168,10 @@ final class LightningAppUITests: XCTestCase {
     }
     private func fundWallet(_ app: XCUIApplication) throws {
         selectTab(app, "Wallet")
-        tap(app, "receiveButton")
+        // Receive is a navigation-bar action in the advanced wallet. Form
+        // scrolling deliberately excludes the navigation bar from its band.
+        XCTAssertTrue(app.buttons["receiveButton"].appears(within: 20))
+        app.buttons["receiveButton"].tap()
         tap(app, "skipReceiveAddressLabelButton")
         XCTAssertTrue(scroll(app, app.staticTexts["receiveAddress"]))
         let address = try XCTUnwrap(app.staticTexts["receiveAddress"].value as? String)

@@ -6,12 +6,20 @@ from pathlib import Path
 import json
 import tempfile
 import unittest
+import subprocess
+import sys
 
 RELEASE = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'release-lightning'))
 SOURCE = 'a' * 40
 
 
 class LightningReleaseTests(unittest.TestCase):
+    def test_optimized_python_cannot_disable_release_validation(self):
+        script = Path(__file__).resolve().parents[1] / 'release-lightning'
+        result = subprocess.run([sys.executable, '-O', str(script), '--help'], text=True, capture_output=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Release validation requires Python assertions', result.stderr)
+
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)

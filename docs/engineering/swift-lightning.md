@@ -126,7 +126,25 @@ returned 997,440 of 1,000,000 sats, with 2,560 sats of independently calculated
 transaction fees. Chain tests also revert confirmed payment outcomes to
 recovering after a reorg while retaining learned preimages.
 
-App integration and the recorded journey are under validation. Physical-device
-authentication/file protection, iPad/large text, final CI and the exact-source
-TestFlight release remain open gates. Host fixtures alone do not establish
-release readiness.
+The `WinnowLightning` research scheme now integrates the same engine with the
+wallet's funding reservations, fee policy, verified scanner and broadcaster.
+The recorded app journey checks exact Apple Share/Copy bytes, canceled funding
+review, actual host SIGKILLs, offline settlement, one restored payment entry,
+and cooperative close returning the independently calculated wallet balance.
+Its manifest identifies the clean source, executable, device/runtime, text
+size, video hash and independent receipt. Run it on iPhone, iPad and at maximum
+accessibility text size; the existing CI requires the iPhone journey alongside
+the ordinary signet recording.
+
+Research storage and device-only keys use a separate namespace. Deletion and
+replacement of its wallet are refused to preserve channel recovery keys;
+ordinary wallet behavior is unchanged. The welcome screen explains that this
+research wallet has no iCloud backup and that its channel journal must stay on
+the device. Payment review keeps amount, fee and expiry above an expandable
+exact receive offer.
+
+Physical-device authentication/file protection, exact-source green CI and
+reviewed export compliance are mandatory release evidence. The signed archive,
+export, upload, processing and existing internal-group readback are implemented
+in `scripts/release-lightning`; see `lightning-release.md`. A successful host or
+simulator run does not establish TestFlight availability.
