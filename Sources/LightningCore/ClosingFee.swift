@@ -8,7 +8,7 @@ extension LightningEngine {
     public func estimatedClosingFee(channelID: Data, peer: Data, destination: Data, feeRateSatPerVByte: Double) throws -> UInt64 {
         try operational(peer)
         let channel = state.channels[try channelIndex(channelID, peer: peer)]
-        let anySegwit = peers[peer]?.supports(38) == true
+        let anySegwit = peers[peer]?.supports(LightningFeatures.shutdownAnySegwit) == true
         guard ChannelTerms.validShutdown(destination, anySegwit: anySegwit),
               feeRateSatPerVByte.isFinite, feeRateSatPerVByte > 0, feeRateSatPerVByte <= 10_000 else { throw LightningError.invalidAmount }
         let remote = channel.remoteShutdown ?? channel.remote?.shutdownScript ?? Data()

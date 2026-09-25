@@ -1,6 +1,8 @@
 import Foundation
 
 public struct LightningFeatures: Sendable, Equatable, Codable {
+    /// BOLT 9: independent of onion messages (38/39).
+    public static let shutdownAnySegwit = 26
     public let bits: Set<Int>
     public init(bits: Set<Int>) throws {
         guard bits.allSatisfy({ (0..<65_528).contains($0) }) else { throw LightningError.invalidMessage }
@@ -27,7 +29,7 @@ public struct LightningFeatures: Sendable, Equatable, Codable {
     /// Baseline data-loss protection, TLV payloads/payment secrets, static remote
     /// keys, anysegwit shutdowns and explicit channel types. No MPP, anchors
     /// or async extensions.
-    public static var channelOpening: LightningFeatures { LightningFeatures(bytes: Data([0x20, 0x80, 0, 0, 0xa2, 2])) }
+    public static var channelOpening: LightningFeatures { LightningFeatures(bytes: Data([0x20, 0, 0x08, 0, 0xa2, 2])) }
 
     /// Client support for blinded receives and onion messages. The client does
     /// not advertise the holding-provider feature.

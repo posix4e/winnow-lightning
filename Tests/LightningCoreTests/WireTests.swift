@@ -41,7 +41,11 @@ final class WireTests: XCTestCase {
         XCTAssertEqual(try reader.tlvs(known: []), [.init(type: 1, value: Data()), .init(type: 3, value: try hex("abcd"))])
     }
     func testFeaturesAndSlicedMessages() throws {
-        XCTAssertEqual(LightningFeatures.channelOpening.bits, [1, 9, 13, 15, 39, 45])
+        XCTAssertEqual(LightningFeatures.channelOpening.bits, [1, 9, 13, 15, 27, 45])
+        XCTAssertEqual(LightningFeatures.asyncClient.bits, [1, 9, 13, 15, 25, 27, 39, 45])
+        XCTAssertTrue(LightningFeatures.asyncClient.supports(26))
+        XCTAssertTrue(LightningFeatures.asyncClient.supports(38))
+        XCTAssertFalse(LightningFeatures.channelOpening.supports(38))
         let message = try LightningFeatures.channelOpening.initialization()
         XCTAssertEqual(try LightningFeatures.readInitialization(message), .channelOpening)
         let required = try LightningFeatures(bits: [12, 44])

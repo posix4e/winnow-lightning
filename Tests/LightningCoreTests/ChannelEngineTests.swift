@@ -134,7 +134,7 @@ final class ChannelEngineTests: XCTestCase, @unchecked Sendable {
     }
     private func pair(holdingPeer: Bool = false, anySegwit: Bool = true) async throws -> Pair {
         let aliceKey = try key(1), bobKey = try key(2), aStore = JournalMemory(), bStore = JournalMemory()
-        let base = LightningFeatures.channelOpening.bits.subtracting(anySegwit ? [] : [39])
+        let base = LightningFeatures.channelOpening.bits.subtracting(anySegwit ? [] : [27])
         let alice = try await engine(aStore, peer: bobKey, secret: Data(repeating: 1, count: 32),
             features: LightningFeatures(bits: base.union(holdingPeer ? [153] : [])))
         let bob = try await engine(bStore, peer: aliceKey, secret: Data(repeating: 2, count: 32), features: LightningFeatures(bits: base))

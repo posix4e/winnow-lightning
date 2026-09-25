@@ -74,7 +74,7 @@ public actor LightningEngine {
     public func chainDisconnected() { chainIsCurrent = false }
     public func peerInitialized(_ peer: Data, features: LightningFeatures) throws {
         try healthy(); _ = try ChannelKeys.point(peer)
-        try features.validateRequired(supported: [0, 8, 12, 14, 24, 38, 44])
+        try features.validateRequired(supported: [0, 8, 12, 14, 24, LightningFeatures.shutdownAnySegwit, 38, 44])
         guard features.supports(12), features.supports(44) else { throw LightningError.invalidMessage }
         try prepareReestablishment(peer)
         peers[peer] = features

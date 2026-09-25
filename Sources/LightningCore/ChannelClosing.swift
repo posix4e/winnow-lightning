@@ -7,7 +7,7 @@ extension LightningEngine {
         let index = try channelIndex(channelID, peer: peer)
         var channel = state.channels[index]
         guard [.ready, .closing].contains(channel.phase), channel.fundingIsConfirmed, !reestablishing.contains(channelID),
-              ChannelTerms.validShutdown(destination, anySegwit: peers[peer]?.supports(38) == true), feeSat <= maximumFeeSat, maximumFeeSat < channel.capacity
+              ChannelTerms.validShutdown(destination, anySegwit: peers[peer]?.supports(LightningFeatures.shutdownAnySegwit) == true), feeSat <= maximumFeeSat, maximumFeeSat < channel.capacity
         else { throw LightningError.invalidState }
         try channel.requireQuiescent()
         guard channel.local.shutdownScript.isEmpty || channel.local.shutdownScript == destination else { throw LightningError.invalidMessage }
@@ -30,7 +30,7 @@ extension LightningEngine {
         var next = state
         if message.type == 38 {
             let length = try reader.u16(), script = try reader.take(Int(length)); _ = try reader.tlvs(known: [])
-            guard ChannelTerms.validShutdown(script, anySegwit: peers[peer]?.supports(38) == true), channel.remoteShutdown == nil || channel.remoteShutdown == script,
+            guard ChannelTerms.validShutdown(script, anySegwit: peers[peer]?.supports(LightningFeatures.shutdownAnySegwit) == true), channel.remoteShutdown == nil || channel.remoteShutdown == script,
                   channel.remote?.shutdownScript.isEmpty == true || channel.remote?.shutdownScript == script
             else { throw LightningError.invalidMessage }
             channel.remoteShutdown = script; channel.phase = .closing
