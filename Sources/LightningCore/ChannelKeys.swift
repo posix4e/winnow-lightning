@@ -61,6 +61,14 @@ public enum ChannelKeys {
         return try privateKey(secret).signature(for: HashDigest(Array(digest))).derRepresentation
     }
 
+    public static func compactSignature(_ der: Data) throws -> Data {
+        try P256K.Signing.ECDSASignature(derRepresentation: der).compactRepresentation
+    }
+    public static func derSignature(_ compact: Data) throws -> Data {
+        guard compact.count == 64 else { throw LightningError.invalidSignature }
+        return try P256K.Signing.ECDSASignature(compactRepresentation: compact).derRepresentation
+    }
+
     public static func verify(signature: Data, digest: Data, publicKey: Data) -> Bool {
         guard digest.count == 32, let key = try? point(publicKey),
               let parsed = try? P256K.Signing.ECDSASignature(derRepresentation: signature)

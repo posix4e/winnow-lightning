@@ -240,6 +240,7 @@ public actor FilterSync {
     /// (#127).
     public func sync(watchScripts: [Data],
                      maxBlocks: UInt32? = nil,
+                     observer: FilterScanObserver? = nil,
                      onReorg: (@Sendable (UInt32) async throws -> Void)? = nil,
                      onMatch: @Sendable (BlockMatch) async throws -> Void) async throws {
         try beginRequest()
@@ -321,7 +322,7 @@ public actor FilterSync {
             peers = try await approved(peers: approvedEndpoints)
             try await scanFilters(batchStart: batchStart, batchStop: batchStop,
                                   peer: peers[0], watchScripts: watchScripts,
-                                  filterHeaders: proposedHeaders,
+                                  filterHeaders: proposedHeaders, observer: observer,
                                   onMatch: onMatch)
             var candidate = progress
             candidate.nextScanHeight = batchStop + 1
@@ -814,6 +815,7 @@ public actor FilterSync {
     private func scanFilters(batchStart: UInt32, batchStop: UInt32, peer: PeerConnection,
                              watchScripts: [Data],
                              filterHeaders: [String: String],
+                             observer: FilterScanObserver?,
                              onMatch: @Sendable (BlockMatch) async throws -> Void) async throws {
         let count = Int(batchStop - batchStart + 1)
         var seen: Set<UInt32> = []
@@ -823,7 +825,7 @@ public actor FilterSync {
                                        UInt64(batchStop)))
             seen.formUnion(try await scanChunk(chunkStart: chunkStart, chunkStop: chunkStop,
                                                peer: peer, watchScripts: watchScripts,
-                                               filterHeaders: filterHeaders, onMatch: onMatch))
+                                               filterHeaders: filterHeaders, observer: observer, onMatch: onMatch))
             if chunkStop == batchStop { break }
             chunkStart = chunkStop + 1
         }
@@ -843,6 +845,7 @@ public actor FilterSync {
     private func scanChunk(chunkStart: UInt32, chunkStop: UInt32, peer: PeerConnection,
                            watchScripts: [Data],
                            filterHeaders: [String: String],
+                           observer: FilterScanObserver?,
                            onMatch: @Sendable (BlockMatch) async throws -> Void) async throws
         -> Set<UInt32>
     {
@@ -861,21 +864,58 @@ public actor FilterSync {
 
         var seen: Set<UInt32> = []
         var chunkBytes = 0
+        var orderedFilters: [(height: UInt32, message: CFilterMessage)] = []
         for response in responses {
             let (height, message) = try verifiedFilter(from: response, heightByHash: heightByHash,
                                                        seen: &seen, filterHeaders: filterHeaders)
             chunkBytes += message.filter.count
-            guard !watchScripts.isEmpty else { continue }
-            let parsed = try message.parsedFilter()
-            let filter = try GCSFilter(p: GCSFilter.defaultP, m: GCSFilter.defaultM,
-                                       key: Data(message.blockHash.prefix(16)),
-                                       n: parsed.n, encoded: parsed.encoded)
-            guard filter.containsAny(watchScripts) else { continue }
-            try await deliverMatchedBlock(from: peer, height: height,
-                                          blockHash: message.blockHash, onMatch: onMatch)
+            if observer != nil {
+                orderedFilters.append((height, message))
+                continue
+            }
+            try await matchWalletFilter(message, height: height, peer: peer, watchScripts: watchScripts, onMatch: onMatch)
+        }
+        if let observer {
+            try await deliverScannedFilters(orderedFilters, peer: peer, watchScripts: watchScripts,
+                                             observer: observer, onMatch: onMatch)
         }
         peakChunkFilterBytesForTest = max(peakChunkFilterBytesForTest, chunkBytes)
         return seen
+    }
+
+    private func matchWalletFilter(_ message: CFilterMessage, height: UInt32, peer: PeerConnection,
+                                   watchScripts: [Data], onMatch: @Sendable (BlockMatch) async throws -> Void) async throws {
+        guard !watchScripts.isEmpty else { return }
+        let filter = try parsedFilter(message)
+        guard filter.containsAny(watchScripts) else { return }
+        try await deliverMatchedBlock(from: peer, height: height, blockHash: message.blockHash, onMatch: onMatch)
+    }
+
+    private func parsedFilter(_ message: CFilterMessage) throws -> GCSFilter {
+        let parsed = try message.parsedFilter()
+        return try GCSFilter(p: GCSFilter.defaultP, m: GCSFilter.defaultM,
+                             key: Data(message.blockHash.prefix(16)), n: parsed.n, encoded: parsed.encoded)
+    }
+
+    private func deliverScannedFilters(_ filters: [(height: UInt32, message: CFilterMessage)],
+                                       peer: PeerConnection, watchScripts: [Data], observer: FilterScanObserver,
+                                       onMatch: @Sendable (BlockMatch) async throws -> Void) async throws {
+        // A channel must see parents before subsequent blocks, even when a
+        // peer returns filters out of order. Retain only this bounded chunk.
+        for (height, message) in filters.sorted(by: { $0.height < $1.height }) {
+            guard let header = await chain.header(at: height) else {
+                throw FilterSyncError.badPeerResponse("missing header at \(height)")
+            }
+            let watches = try await observer.watches()
+            let filter = try parsedFilter(message)
+            let block: Block?
+            if filter.containsAny(watchScripts + watches.scripts) {
+                block = try await verifiedBlock(from: peer, height: height, blockHash: message.blockHash)
+            } else { block = nil }
+            if let block { try await onMatch(BlockMatch(height: height, blockHash: message.blockHash, block: block)) }
+            try await observer.scanned(FilterScannedBlock(height: height, header: header, block: block,
+                                                          watchRevision: watches.revision))
+        }
     }
 
     /// A chunk's deadline, taken from the whole-batch ceiling it replaces:

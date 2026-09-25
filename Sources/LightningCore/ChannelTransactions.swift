@@ -4,7 +4,7 @@ import WalletCore
 /// Explicitly scoped to the BOLT 3 static_remotekey, non-anchor format. No
 /// second transaction model: every constructed transaction is WalletCore's.
 public enum ChannelTransactions {
-    public struct HTLC: Sendable, Equatable {
+    public struct HTLC: Sendable, Equatable, Codable {
         public let id: UInt64
         public let offered: Bool
         public let amountMsat: UInt64

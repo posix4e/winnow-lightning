@@ -2,8 +2,8 @@ import Foundation
 
 /// BOLT 3 bounded shachain storage. Receiving a later secret must prove all
 /// earlier secrets covered by its bucket. Invalid disclosures never mutate state.
-public struct RevocationSecrets: Sendable {
-    private struct Entry: Sendable { let index: UInt64; let secret: Data }
+public struct RevocationSecrets: Sendable, Codable {
+    private struct Entry: Sendable, Codable { let index: UInt64; let secret: Data }
     private var buckets: [Int: Entry] = [:]
     public private(set) var received: UInt64 = 0
     public init() {}

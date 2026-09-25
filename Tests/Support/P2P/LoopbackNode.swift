@@ -65,6 +65,7 @@ public actor LoopbackNode {
     /// Answer every getheaders with an empty list, whatever the chain holds:
     /// a peer that claims a tall tip and then withholds it.
     public let emptyHeaders: Bool
+    public let reverseFilters: Bool
     /// The node's mempool: transactions it serves over getdata (MSG_TX /
     /// MSG_WITNESS_TX) — unknown tx hashes get a notfound.
     public let transactions: [Data: Transaction] // keyed by txid (internal order)
@@ -95,7 +96,8 @@ public actor LoopbackNode {
          disconnectOnUnknownStopHash: Bool = false, claimedStartHeight: Int32? = nil,
          autoRequestDelay: Duration? = nil, transactions: [Transaction] = [],
          startSilent: Bool = false, versionDelay: Duration = .zero,
-         answersPings: Bool = true, emptyHeaders: Bool = false) {
+         answersPings: Bool = true, emptyHeaders: Bool = false, reverseFilters: Bool = false) {
+        self.reverseFilters = reverseFilters
         self.answersPings = answersPings
         self.emptyHeaders = emptyHeaders
         self.disconnectOnUnknownStopHash = disconnectOnUnknownStopHash
@@ -409,7 +411,8 @@ public actor LoopbackNode {
             guard let stop = height(ofHash: request.stopHash) else { return }
             let start = Int(request.startHeight)
             guard start <= stop else { return }
-            for height in start ... stop {
+            let heights = reverseFilters ? Array((start ... stop).reversed()) : Array(start ... stop)
+            for height in heights {
                 var filter = filters[height]
                 if height == corruptFilterAtHeight, !filter.isEmpty {
                     filter[filter.count - 1] ^= 0xFF // serve a lying filter
