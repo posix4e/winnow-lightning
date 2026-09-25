@@ -5,6 +5,10 @@ Install **Winnow Lightning**, bundle `com.btcswift.lightning`, from the existing
 and starts a separate regtest wallet; it does not migrate or delete older keys.
 Use valueless regtest coins. Keep the app open while monitoring channels. A seed
 cannot restore its channels, so retain each device and its app data.
+The initial beta excludes use in mainland China and France. Do not share the
+build or invitations into those destinations. This is an operator-managed
+invitation restriction, not an in-app location detector. See
+[EXPORT-COMPLIANCE.md](EXPORT-COMPLIANCE.md) for the release declaration.
 
 ## A provider you control
 

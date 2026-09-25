@@ -17,6 +17,14 @@ BUNDLE = 'com.btcswift.lightning'
 TEAM = '2858MX5336'
 GROUP = 'd13e3bf2-c7b1-4e4e-beb6-f592b0d7fdd0'
 VERSION = '0.1.0'
+EXCLUDED_TESTER_COUNTRIES = {'CN', 'FR'}
+
+
+def verify_tester_countries(tester_ids, countries):
+    assert tester_ids and set(countries) == set(tester_ids), 'Supply a confirmed country for every current group member'
+    for country in countries.values():
+        assert isinstance(country, str) and len(country) == 2 and country.isascii() and country.isalpha() and country.isupper(), 'Use two-letter uppercase country codes'
+        assert country not in EXCLUDED_TESTER_COUNTRIES, 'Initial beta excludes mainland China and France'
 
 
 def run(*args, **kwargs):
@@ -108,7 +116,7 @@ def archive(directory, number):
     subprocess.run(['scripts/verify-signed-archive', str(app), '--profile', 'lightning'], cwd=ROOT, env=env, check=True)
     subprocess.run(['scripts/check-dependencies', '--xcode', str(directory / 'DerivedData')], cwd=ROOT, check=True)
     info = plistlib.loads((app / 'Info.plist').read_bytes())
-    assert info['ITSAppUsesNonExemptEncryption'] is True, 'Do not silently change the encryption declaration'
+    assert info['ITSAppUsesNonExemptEncryption'] is False, 'Release must match Lightning/EXPORT-COMPLIANCE.md'
     options = directory / 'ExportOptions.plist'
     options.write_bytes(plistlib.dumps({'method': 'app-store-connect', 'destination': 'export',
         'signingStyle': 'automatic', 'teamID': TEAM, 'manageAppVersionAndBuildNumber': False}))
@@ -121,6 +129,10 @@ def archive(directory, number):
         'ipa': str(ipa), 'sha256': hashlib.sha256(ipa.read_bytes()).hexdigest(),
         'native_lock_sha256': hashlib.sha256((ROOT / 'Native/LightningBridge/Cargo.lock').read_bytes()).hexdigest(),
         'swift_lock_sha256': hashlib.sha256((ROOT / 'Package.resolved').read_bytes()).hexdigest(),
+        'encryption': {'uses_encryption': True, 'uses_non_exempt_encryption': False,
+            'contains_third_party_cryptography': True, 'contains_proprietary_cryptography': False,
+            'available_on_french_store': False,
+            'assessment_sha256': hashlib.sha256((ROOT / 'Lightning/EXPORT-COMPLIANCE.md').read_bytes()).hexdigest()},
         'rust': run('rustc', '+1.89.0', '--version'), 'xcode': run('xcodebuild', '-version')}
     (directory / 'release.json').write_text(json.dumps(manifest, indent=2) + '\n')
     print(json.dumps(manifest, indent=2))
@@ -131,6 +143,8 @@ def main():
     parser.add_argument('command', choices=['preflight', 'archive', 'upload', 'status', 'distribute'])
     parser.add_argument('--build')
     parser.add_argument('--directory', type=lambda p: Path(p).resolve())
+    parser.add_argument('--tester-countries', type=Path,
+        help='JSON object mapping every current internal tester ID to its operator-confirmed two-letter country code')
     args = parser.parse_args()
     identity()
     if args.command == 'preflight':
@@ -153,6 +167,12 @@ def main():
         archive(args.directory, args.build)
         return
     if args.command == 'distribute':
+        assert args.tester_countries, 'Confirm tester locations before assigning the build; see Lightning/EXPORT-COMPLIANCE.md'
+        group = api('GET', 'betaGroups/' + GROUP)['data']['attributes']
+        assert not group.get('publicLinkEnabled'), 'Initial beta must remain invite-only'
+        members = api('GET', f'betaGroups/{GROUP}/betaTesters', limit=200)
+        assert not members.get('links', {}).get('next'), 'Review every tester before distributing'
+        verify_tester_countries([r['id'] for r in members['data']], json.loads(args.tester_countries.read_text()))
         current = build(args.build)
         assert current['attributes']['processingState'] == 'VALID', 'Wait for processing first'
         bid = current['id']

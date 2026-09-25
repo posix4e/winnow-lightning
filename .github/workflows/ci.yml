@@ -77,6 +77,8 @@ jobs:
           swift test --package-path Lightning 2>&1 | tee "$LIGHTNING_RESULTS/core-tests.log"
           python3 -m unittest discover -s scripts/tests -p test_ui_test_run.py
           python3 -m unittest discover -s scripts/tests -p test_ci_secret_boundary.py
+          python3 -m unittest discover -s scripts/tests -p test_signed_distribution.py
+          python3 -m unittest discover -s scripts/tests -p test_lightning_release_scope.py
       - name: Build research app and its UI-test runner once
         run: |
           xcodegen generate --spec project-lightning.yml

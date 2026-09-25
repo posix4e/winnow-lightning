@@ -1,5 +1,7 @@
 Winnow Lightning — regtest research beta
 
+Invitation-only beta. This initial rollout excludes mainland China and France; do not use or redistribute the beta there.
+
 This update starts from Winnow's wallet and Bitcoin P2P stack. Older app data is preserved separately. Use valueless regtest coins and keep the app open to monitor channels; a seed backup cannot restore channels.
 
 Test funding a channel from Winnow, sending a direct payment, and reconnecting after restart. Then open Settings → Lightning → Send or receive by message. Review the amount plus the 100-sat provider fee, commit, and share the funded claim through the system Share sheet, Copy or a file. Stop the sender, claim from the recipient using a different channel provider, then reconnect the sender to see settlement. A copied claim can be redeemed by anyone holding it; first successful claim wins. Imported text is not a receipt. Expired holds remain pending until channel resolution.

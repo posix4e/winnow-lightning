@@ -55,7 +55,9 @@ targets:
         "INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad": "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
         INFOPLIST_KEY_NSFaceIDUsageDescription: "Unlock your regtest wallet and authorize channel funding or Lightning payments."
         INFOPLIST_KEY_NSLocalNetworkUsageDescription: "Connect to your regtest Bitcoin and Lightning peers."
-        INFOPLIST_KEY_ITSAppUsesNonExemptEncryption: YES
+        # Standard published algorithms; no French App Store distribution.
+        # See Lightning/EXPORT-COMPLIANCE.md before changing the release scope.
+        INFOPLIST_KEY_ITSAppUsesNonExemptEncryption: NO
         MARKETING_VERSION: "0.1.0"
         CURRENT_PROJECT_VERSION: "1"
         CODE_SIGN_STYLE: Automatic

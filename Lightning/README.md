@@ -52,6 +52,9 @@ older app data. Release updates `com.btcswift.lightning`; Debug uses the researc
 bundle. `scripts/lightning-testflight` archives only a clean commit with a green
 CI run, verifies identity and release exclusions, and distributes only to the
 existing internal group. It performs no App Store submission.
+The encryption declaration and initial destination limits are documented in
+[EXPORT-COMPLIANCE.md](EXPORT-COMPLIANCE.md). Distribution requires the operator
+to confirm the countries of every current tester; it does not infer location.
 
 ## Execution and recovery
 
