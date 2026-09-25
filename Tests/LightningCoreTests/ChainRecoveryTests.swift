@@ -95,6 +95,32 @@ final class ChainRecoveryTests: XCTestCase, @unchecked Sendable {
         }
         return (channel, funding, spend)
     }
+    func testCooperativeCloseFinalizesAtDepthAndReorgRestoresClosing() async throws {
+        var (channel, funding) = try fixture()
+        channel.localShutdown = Data([0x51, 32]) + Data(repeating: 7, count: 32)
+        channel.remoteShutdown = Data([0, 20]) + Data(repeating: 8, count: 20)
+        channel.closingFee = 500; channel.closingFeeLimit = 724
+        let close = try channel.closeTransaction(fee: 500)
+        channel.closingTransaction = close.serialized(includeWitness: true)
+        channel.phase = .closing
+        let store = RecoveryStore(), engine = try engine(channel: channel, store: store)
+        let first = try await scan(engine, height: 1, previous: genesis.hash, transaction: funding)
+        let second = try await scan(engine, height: 2, previous: first.hash, transaction: close)
+        var tip = second
+        for height in UInt32(3)...6 { tip = try await scan(engine, height: height, previous: tip.hash) }
+        let before = await engine.channels()
+        XCTAssertEqual(before.first?.phase, .closing)
+        _ = try await scan(engine, height: 7, previous: tip.hash)
+        let finalized = await engine.channels()
+        XCTAssertEqual(finalized.first?.phase, .closed)
+        try await engine.blocksDisconnected(to: 6, hash: tip.hash)
+        let reverted = await engine.channels()
+        XCTAssertEqual(reverted.first?.phase, .closing)
+        _ = try await scan(engine, height: 7, previous: tip.hash)
+        let reconfirmed = await engine.channels()
+        XCTAssertEqual(reconfirmed.first?.phase, .closed)
+    }
+
     func testOnChainSuccessAndTimeoutReconcileOnceAfterDepthAndUndoOnReorg() async throws {
         for success in [false, true] {
             let preimage = Data(repeating: 23, count: 32), store = RecoveryStore()

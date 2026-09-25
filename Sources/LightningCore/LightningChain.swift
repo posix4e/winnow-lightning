@@ -97,7 +97,9 @@ extension LightningEngine {
             if let spend = observed.first(where: { item in item.1.inputs.contains { $0.previousOutput == .init(txid: txid, vout: UInt32(output)) } }) {
                 channel.observedFundingSpend = spend.1.serialized(includeWitness: true)
                 channel.fundingSpendHeight = spend.0
-                channel.phase = channel.dataLossDetected ? .recovering : .closing
+                let cooperative = channel.closingFee.flatMap { try? channel.closeTransaction(fee: $0).txid } == spend.1.txid
+                let finalized = cooperative && UInt64(height) + 1 >= UInt64(spend.0) + 6
+                channel.phase = channel.dataLossDetected ? .recovering : (finalized ? .closed : .closing)
                 events += markPaymentsRecovering(channelID: channel.id, in: &next)
                 next.outbox.removeAll { $0.peer == channel.peer && $0.channelID == channel.id }
             } else if let funding = observed.first(where: { $0.1.txid == txid }) {
@@ -134,6 +136,7 @@ extension LightningEngine {
         next.scan.rescanRequired = false
         rollBackChainPayments(to: height, in: &next)
         for index in next.channels.indices {
+            if next.channels[index].phase == .closed { next.channels[index].phase = .closing }
             let funding = next.scan.transactions.first { (try? Transaction.decode($0.raw).txid) == next.channels[index].fundingTxid }
             next.channels[index].fundingIsConfirmed = funding.map {
                 UInt64(height) + 1 >= UInt64($0.height) + UInt64(next.channels[index].minimumDepth)
