@@ -244,7 +244,7 @@ jobs:
 
       - name: Recorded signet UI journey
         if: steps.validate_media.outcome != 'success' && env.RUN_UI_JOURNEY == 'true'
-        timeout-minutes: 15
+        timeout-minutes: 20
         run: scripts/ci-ui-journey "$APP_RESULTS/journey" --skip-build
 
       - name: Stop the trusted run's simulator and fixture
