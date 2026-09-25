@@ -99,7 +99,10 @@ extension XCTestCase {
             return nil
         }
         let top = max(frame.minY, navigationBarBottom(snapshot) ?? frame.minY)
-        var bottom = frame.maxY
+        // A tall accessibility row can use the entire drag band. Keep its
+        // starting point above the home indicator, where a swipe exits the
+        // app instead of scrolling a modal sheet.
+        var bottom = frame.maxY - 34
         // A sheet covers the underlying tab bar; that bar must not shrink
         // the sheet's usable area and cause repeated ineffective drags.
         for cover in [app.tabBars.firstMatch, app.keyboards.firstMatch] where cover.exists && cover.isHittable {
