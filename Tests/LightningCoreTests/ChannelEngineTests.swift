@@ -223,6 +223,28 @@ final class ChannelEngineTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(p.aliceStore.load(), before)
     }
 
+    func testClosingAgreementAndDuplicateDoNotEchoSignatures() async throws {
+        let p = try await pair(), destination = Data([0x51, 32]) + Data(repeating: 7, count: 32)
+        try await p.alice.closeChannel(channelID: p.id, peer: p.bobKey, destination: destination, feeSat: 905, maximumFeeSat: 905)
+        try await p.bob.closeChannel(channelID: p.id, peer: p.aliceKey, destination: destination, feeSat: 905, maximumFeeSat: 905)
+        let aShutdown = try await p.alice.pendingMessages(peer: p.bobKey).first { $0.message.type == 38 }!.message
+        let bShutdown = try await p.bob.pendingMessages(peer: p.aliceKey).first { $0.message.type == 38 }!.message
+        _ = try await p.alice.receive(peer: p.bobKey, message: bShutdown)
+        _ = try await p.bob.receive(peer: p.aliceKey, message: aShutdown)
+        let proposal = try await p.alice.pendingMessages(peer: p.bobKey).first { $0.message.type == 39 }!.message
+        _ = try await p.bob.receive(peer: p.aliceKey, message: proposal)
+        let agreement = try await p.bob.pendingMessages(peer: p.aliceKey).first { $0.message.type == 39 }!.message
+        _ = try await p.alice.receive(peer: p.bobKey, message: agreement)
+        _ = try await p.alice.receive(peer: p.bobKey, message: agreement)
+        let aPending = try await p.alice.pendingMessages(peer: p.bobKey)
+        XCTAssertFalse(aPending.contains { [38, 39].contains($0.message.type) })
+        let bBefore = try await p.bob.pendingMessages(peer: p.aliceKey).map(\.sequence)
+        _ = try await p.bob.receive(peer: p.aliceKey, message: proposal)
+        let bAfter = try await p.bob.pendingMessages(peer: p.aliceKey).map(\.sequence)
+        XCTAssertEqual(bBefore, bAfter)
+        XCTAssertEqual(try storedChannel(p.aliceStore).closingTransaction, try storedChannel(p.bobStore).closingTransaction)
+    }
+
     private func pump(_ sender: LightningEngine, peer: Data, to receiver: LightningEngine, from: Data,
                       sent: inout Set<UInt64>) async throws {
         for message in try await sender.pendingMessages(peer: peer) where !sent.contains(message.sequence) {

@@ -64,12 +64,19 @@ extension LightningEngine {
         var transaction = try channel.closeTransaction(fee: fee)
         let digest = try channel.closeDigest(transaction)
         guard ChannelKeys.verify(signature: signature, digest: digest, publicKey: remote.funding) else { throw LightningError.invalidSignature }
+        if channel.closingTransaction != nil {
+            guard channel.closingFee == fee else { throw LightningError.invalidState }
+            return // Duplicate agreement cannot enqueue another signature.
+        }
+        let needsReply = !channel.isFunder || channel.closingFee != fee
         let ours = try ChannelKeys.sign(digest: digest, secret: channel.secrets.funding)
         let ordered = channel.local.funding.lexicographicallyPrecedes(remote.funding) ? [ours, signature] : [signature, ours]
         transaction.inputs[0].witness = [Data()] + ordered.map { $0 + Data([1]) } + [try ChannelScripts.funding(channel.local.funding, remote.funding).bytes]
         channel.closingFee = fee; channel.closingTransaction = transaction.serialized(includeWitness: true)
-        Self.acknowledge([39], channel: channel, in: &next)
-        try proposeClose(channel: channel, in: &next)
+        Self.acknowledge([38, 39], channel: channel, in: &next)
+        // The fundee's signature at our proposed fee completes negotiation.
+        // An extra reply can reach a peer that has already removed the channel.
+        if needsReply { try proposeClose(channel: channel, in: &next) }
     }
     public func pendingCloseBroadcasts() throws -> [Event] {
         try healthy()
