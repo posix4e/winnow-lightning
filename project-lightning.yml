@@ -1,0 +1,107 @@
+name: WinnowLightningResearch
+options:
+  deploymentTarget:
+    iOS: "17.0"
+packages:
+  Winnow:
+    path: .
+  WinnowLightning:
+    path: Lightning
+targets:
+  WinnowLightningResearch:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources/WinnowApp
+        excludes: [README.md]
+      - path: docs/site.css
+        buildPhase: resources
+      - path: docs/mobile.html
+        buildPhase: resources
+      - path: docs/read-side.html
+        buildPhase: resources
+      - path: docs/write-side.html
+        buildPhase: resources
+      - path: docs/vaults.html
+        buildPhase: resources
+      - path: docs/import.html
+        buildPhase: resources
+    dependencies:
+      - package: Winnow
+        product: WalletCore
+      - package: WinnowLightning
+        product: LightningCore
+    info:
+      path: build/lightning/WinnowLightning-Info.plist
+      properties:
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.btcswift.lightning.research
+        PRODUCT_NAME: WinnowLightningResearch
+        INFOPLIST_KEY_CFBundleDisplayName: Winnow Lightning
+        ARCHS: arm64
+        SWIFT_VERSION: "6.0"
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) WINNOW_LIGHTNING_RESEARCH"
+        IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: YES
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
+        "INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad": "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
+        INFOPLIST_KEY_NSFaceIDUsageDescription: "Unlock your regtest wallet and authorize channel funding or Lightning payments."
+        INFOPLIST_KEY_NSLocalNetworkUsageDescription: "Connect to your regtest Bitcoin and Lightning peers."
+        # Standard published algorithms; no French App Store distribution.
+        # See Lightning/EXPORT-COMPLIANCE.md before changing the release scope.
+        INFOPLIST_KEY_ITSAppUsesNonExemptEncryption: NO
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: 2858MX5336
+      configs:
+        Release:
+          PRODUCT_BUNDLE_IDENTIFIER: com.btcswift.lightning
+
+  WinnowLightningUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: Lightning/UITests
+      - path: UITests/TestHelpers.swift
+    dependencies:
+      - target: WinnowLightningResearch
+      - package: Winnow
+        product: TestSupport
+      - package: Winnow
+        product: WalletCore
+      - package: WinnowLightning
+        product: LightningCore
+      - package: WinnowLightning
+        product: LightningLab
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.btcswift.lightning.research.uitests
+        TEST_TARGET_NAME: WinnowLightningResearch
+        SWIFT_VERSION: "6.0"
+        ARCHS: arm64
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: 2858MX5336
+schemes:
+  WinnowLightningResearch:
+    build:
+      targets:
+        WinnowLightningResearch: all
+        WinnowLightningUITests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      captureScreenshotsAutomatically: false
+      preferredScreenCaptureFormat: screenshots
+      targets:
+        - WinnowLightningUITests

@@ -1,0 +1,72 @@
+#!/usr/bin/env python3
+"""A fresh local regtest bank for the recorded Lightning simulator journey."""
+import json
+import os
+from pathlib import Path
+import shutil
+import socket
+import subprocess
+import sys
+import time
+
+
+def unused_port():
+    with socket.socket() as sock:
+        sock.bind(('127.0.0.1', 0))
+        return sock.getsockname()[1]
+
+
+def run(command, *args):
+    return subprocess.check_output([str(command), *map(str, args)], text=True).strip()
+
+
+def main():
+    if len(sys.argv) != 2 or sys.argv[1] not in ('prepare-bank', 'down'):
+        raise SystemExit('usage: lightning-fixture prepare-bank|down (WINNOW_DATADIR required)')
+    directory = Path(os.environ['WINNOW_DATADIR']).resolve()
+    marker = directory / 'winnow-lightning-fixture.json'
+    if sys.argv[1] == 'down':
+        if marker.is_file():
+            config = json.loads(marker.read_text())
+            subprocess.run([config['cli'], f'-datadir={directory}', 'stop'], check=False)
+        return
+    if directory.exists():
+        raise SystemExit(f'Refusing to reuse fixture state: {directory}')
+    binary_dir = os.environ.get('WINNOW_BITCOIN_DIR')
+    daemon = str(Path(binary_dir) / 'bitcoind') if binary_dir else shutil.which('bitcoind')
+    cli = str(Path(binary_dir) / 'bitcoin-cli') if binary_dir else shutil.which('bitcoin-cli')
+    if not daemon or not cli:
+        raise SystemExit('Install Bitcoin Core or set WINNOW_BITCOIN_DIR')
+    p2p, rpc = unused_port(), unused_port()
+    while rpc == p2p:
+        rpc = unused_port()
+    directory.mkdir(parents=True, mode=0o700)
+    (directory / 'bitcoin.conf').write_text(
+        'regtest=1\nserver=1\nblockfilterindex=1\npeerblockfilters=1\ndebug=net\n'
+        'fallbackfee=0.00002\nlistenonion=0\ndnsseed=0\nfixedseeds=0\n'
+        f'discover=0\n[regtest]\nconnect=0\nbind=127.0.0.1:{p2p}\nport={p2p}\nrpcport={rpc}\n')
+    marker.write_text(json.dumps({'cli': cli}))
+    run(daemon, f'-datadir={directory}', '-daemonwait')
+    def bitcoin(*args):
+        return run(cli, f'-datadir={directory}', *args)
+    bitcoin('createwallet', 'lightning-bank')
+    address = bitcoin('-rpcwallet=lightning-bank', 'getnewaddress')
+    bitcoin('generatetoaddress', '101', address)
+    for _ in range(300):
+        index = json.loads(bitcoin('getindexinfo')).get('basic block filter index', {})
+        if index.get('synced') and index.get('best_block_height') == 101:
+            break
+        time.sleep(0.1)
+    else:
+        raise SystemExit('Regtest compact-filter index did not reach height 101')
+    values = {
+        'WINNOW_NODE_HOST': '127.0.0.1', 'WINNOW_P2P_PORT': str(p2p),
+        'WINNOW_RPC_PORT': str(rpc), 'WINNOW_DATADIR': str(directory),
+        'WINNOW_BITCOIN_CLI': cli, 'WINNOW_SCREENSHOT_DIR': os.environ['WINNOW_SCREENSHOT_DIR'],
+    }
+    (directory / 'test-environment.json').write_text(json.dumps(values, indent=2) + '\n')
+    print(f'Disposable regtest ready at height 101; Bitcoin P2P port {p2p}')
+
+
+if __name__ == '__main__':
+    main()

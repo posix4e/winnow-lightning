@@ -1,0 +1,199 @@
+#!/usr/bin/env python3
+"""Explicit, isolated rollout to the existing Winnow Lightning internal beta."""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import plistlib
+import subprocess
+import urllib.error
+import urllib.parse
+import urllib.request
+
+ROOT = Path(__file__).resolve().parents[1]
+APP = '6815392502'
+BUNDLE = 'com.btcswift.lightning'
+TEAM = '2858MX5336'
+GROUP = 'd13e3bf2-c7b1-4e4e-beb6-f592b0d7fdd0'
+VERSION = '0.1.0'
+EXCLUDED_TESTER_COUNTRIES = {'CN', 'FR'}
+
+
+def verify_tester_countries(tester_ids, countries):
+    assert tester_ids and set(countries) == set(tester_ids), 'Supply a confirmed country for every current group member'
+    for country in countries.values():
+        assert isinstance(country, str) and len(country) == 2 and country.isascii() and country.isalpha() and country.isupper(), 'Use two-letter uppercase country codes'
+        assert country not in EXCLUDED_TESTER_COUNTRIES, 'Initial beta excludes mainland China and France'
+
+
+def run(*args, **kwargs):
+    return subprocess.check_output(list(map(str, args)), cwd=ROOT, text=True, **kwargs).strip()
+
+
+def credentials():
+    values = dict(os.environ)
+    path = Path.home() / '.appstoreconnect/mailvault.env'
+    if path.exists():
+        for line in path.read_text().splitlines():
+            if '=' in line and not line.lstrip().startswith('#'):
+                key, value = line.removeprefix('export ').split('=', 1)
+                values.setdefault(key.strip(), value.strip().strip('"\''))
+    key, issuer = values['ASC_KEY_ID'], values['ASC_ISSUER_ID']
+    private = values.get('ASC_KEY_PATH', str(Path.home() / f'.appstoreconnect/private_keys/AuthKey_{key}.p8'))
+    return key, issuer, private
+
+
+def api(method, path, body=None, **query):
+    key, issuer, private = credentials()
+    token = run('swift', 'scripts/asc-jwt.swift', private, key, issuer)
+    url = 'https://api.appstoreconnect.apple.com/v1/' + path
+    if query:
+        url += '?' + urllib.parse.urlencode(query)
+    request = urllib.request.Request(url, method=method,
+        headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'},
+        data=json.dumps(body).encode() if body is not None else None)
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            data = response.read()
+            return json.loads(data) if data else {}
+    except urllib.error.HTTPError as error:
+        raise SystemExit(f'App Store Connect {error.code}: {error.read().decode()}')
+
+
+def identity():
+    app = api('GET', 'apps/' + APP)['data']
+    assert app['attributes']['bundleId'] == BUNDLE
+    group = api('GET', 'betaGroups/' + GROUP)['data']
+    assert group['attributes']['name'] == 'PQLN Regtest Internal' and group['attributes']['isInternalGroup']
+    assert api('GET', f'betaGroups/{GROUP}/app')['data']['id'] == APP
+
+
+def build(number):
+    rows = api('GET', 'builds', **{'filter[app]': APP, 'filter[version]': number,
+        'filter[preReleaseVersion.version]': VERSION, 'limit': 2})['data']
+    assert len(rows) == 1, f'Expected one {VERSION} ({number}) build; found {len(rows)}'
+    return rows[0]
+
+
+def status(number):
+    current = build(number)
+    bid = current['id']
+    detail = api('GET', f'builds/{bid}/buildBetaDetail')['data']['attributes']
+    grouped = bool(api('GET', 'builds', **{'filter[app]': APP, 'filter[betaGroups]': GROUP,
+        'filter[id]': bid, 'limit': 1})['data'])
+    result = {'app_id': APP, 'bundle_id': BUNDLE, 'version': VERSION, 'build': number,
+        'build_id': bid, 'processing': current['attributes']['processingState'],
+        'internal_state': detail['internalBuildState'], 'group_id': GROUP, 'grouped': grouped}
+    result['testable'] = result['processing'] == 'VALID' and result['internal_state'] in {'READY_FOR_BETA_TESTING', 'IN_BETA_TESTING'} and grouped
+    return result
+
+
+def archive(directory, number):
+    assert not run('git', 'status', '--porcelain'), 'Archive requires a clean source revision'
+    sha = run('git', 'rev-parse', 'HEAD')
+    runs = json.loads(run('gh', 'api', f'repos/posix4e/winnow-lightning/actions/workflows/ci.yml/runs?head_sha={sha}&status=success'))['workflow_runs']
+    assert any(r['head_sha'] == sha and r['conclusion'] == 'success' for r in runs), 'This revision needs a successful complete CI run'
+    assert not directory.exists(), 'Use a fresh archive directory'
+    directory.mkdir(parents=True)
+    key, issuer, private = credentials()
+    auth = ['-allowProvisioningUpdates', '-authenticationKeyPath', private,
+        '-authenticationKeyID', key, '-authenticationKeyIssuerID', issuer]
+    env = {**os.environ, 'TESTFLIGHT_MARKETING_VERSION': VERSION, 'TESTFLIGHT_BUILD_NUMBER': number}
+    # Artifacts are generated and gitignored. Rebuild them at this exact clean
+    # revision instead of trusting whichever XCFramework was left on disk.
+    subprocess.run(['scripts/build-lightning.sh', '--all'], cwd=ROOT,
+        env={**env, 'RUSTUP_TOOLCHAIN': '1.89.0'}, check=True)
+    # Generated project only; the committed project specification is unchanged.
+    subprocess.run(['xcodegen', 'generate', '--spec', 'project-lightning.yml'], cwd=ROOT, check=True)
+    archive_path = directory / 'WinnowLightning.xcarchive'
+    subprocess.run(['xcodebuild', '-project', 'WinnowLightningResearch.xcodeproj', '-scheme', 'WinnowLightningResearch',
+        '-configuration', 'Release', '-destination', 'generic/platform=iOS', '-archivePath', str(archive_path),
+        '-derivedDataPath', str(directory / 'DerivedData'), '-skipPackagePluginValidation', '-skipMacroValidation',
+        'MARKETING_VERSION=' + VERSION, 'CURRENT_PROJECT_VERSION=' + number, *auth, 'archive'], cwd=ROOT, env=env, check=True)
+    app = archive_path / 'Products/Applications/WinnowLightningResearch.app'
+    subprocess.run(['scripts/verify-release-e2e-exclusion', str(app)], cwd=ROOT, check=True)
+    subprocess.run(['scripts/verify-signed-archive', str(app), '--profile', 'lightning'], cwd=ROOT, env=env, check=True)
+    subprocess.run(['scripts/check-dependencies', '--xcode', str(directory / 'DerivedData')], cwd=ROOT, check=True)
+    info = plistlib.loads((app / 'Info.plist').read_bytes())
+    assert info['ITSAppUsesNonExemptEncryption'] is False, 'Release must match Lightning/EXPORT-COMPLIANCE.md'
+    options = directory / 'ExportOptions.plist'
+    options.write_bytes(plistlib.dumps({'method': 'app-store-connect', 'destination': 'export',
+        'signingStyle': 'automatic', 'teamID': TEAM, 'manageAppVersionAndBuildNumber': False}))
+    subprocess.run(['xcodebuild', '-exportArchive', '-archivePath', str(archive_path),
+        '-exportOptionsPlist', str(options), '-exportPath', str(directory / 'export'), *auth], cwd=ROOT, check=True)
+    ipa, = list((directory / 'export').glob('*.ipa'))
+    subprocess.run(['scripts/verify-exported-ipa', str(ipa), '--profile', 'lightning'], cwd=ROOT, env=env, check=True)
+    manifest = {'app_id': APP, 'bundle_id': BUNDLE, 'team': TEAM, 'version': VERSION, 'build': number,
+        'source_revision': sha, 'ci_run': next(r['html_url'] for r in runs if r['conclusion'] == 'success'),
+        'ipa': str(ipa), 'sha256': hashlib.sha256(ipa.read_bytes()).hexdigest(),
+        'native_lock_sha256': hashlib.sha256((ROOT / 'Native/LightningBridge/Cargo.lock').read_bytes()).hexdigest(),
+        'swift_lock_sha256': hashlib.sha256((ROOT / 'Package.resolved').read_bytes()).hexdigest(),
+        'encryption': {'uses_encryption': True, 'uses_non_exempt_encryption': False,
+            'contains_third_party_cryptography': True, 'contains_proprietary_cryptography': False,
+            'available_on_french_store': False,
+            'assessment_sha256': hashlib.sha256((ROOT / 'Lightning/EXPORT-COMPLIANCE.md').read_bytes()).hexdigest()},
+        'rust': run('rustc', '+1.89.0', '--version'), 'xcode': run('xcodebuild', '-version')}
+    (directory / 'release.json').write_text(json.dumps(manifest, indent=2) + '\n')
+    print(json.dumps(manifest, indent=2))
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('command', choices=['preflight', 'archive', 'upload', 'status', 'distribute'])
+    parser.add_argument('--build')
+    parser.add_argument('--directory', type=lambda p: Path(p).resolve())
+    parser.add_argument('--tester-countries', type=Path,
+        help='JSON object mapping every current internal tester ID to its operator-confirmed two-letter country code')
+    args = parser.parse_args()
+    identity()
+    if args.command == 'preflight':
+        rows = api('GET', 'builds', **{'filter[app]': APP, 'sort': '-uploadedDate', 'limit': 10})['data']
+        print(json.dumps({'app': APP, 'bundle': BUNDLE, 'group': GROUP,
+            'builds': [{'id': b['id'], 'number': b['attributes']['version'], 'processing': b['attributes']['processingState']} for b in rows]}, indent=2))
+        return
+    if args.command == 'upload':
+        assert args.directory
+        manifest = json.loads((args.directory / 'release.json').read_text())
+        ipa = Path(manifest['ipa'])
+        assert manifest['app_id'] == APP and manifest['bundle_id'] == BUNDLE
+        assert hashlib.sha256(ipa.read_bytes()).hexdigest() == manifest['sha256']
+        key, issuer, _ = credentials()
+        subprocess.run(['xcrun', 'altool', '--upload-app', '-f', str(ipa), '-t', 'ios', '--apiKey', key, '--apiIssuer', issuer], check=True)
+        return
+    assert args.build and args.build.isdigit()
+    if args.command == 'archive':
+        assert args.directory
+        archive(args.directory, args.build)
+        return
+    if args.command == 'distribute':
+        assert args.tester_countries, 'Confirm tester locations before assigning the build; see Lightning/EXPORT-COMPLIANCE.md'
+        group = api('GET', 'betaGroups/' + GROUP)['data']['attributes']
+        assert not group.get('publicLinkEnabled'), 'Initial beta must remain invite-only'
+        members = api('GET', f'betaGroups/{GROUP}/betaTesters', limit=200)
+        assert not members.get('links', {}).get('next'), 'Review every tester before distributing'
+        verify_tester_countries([r['id'] for r in members['data']], json.loads(args.tester_countries.read_text()))
+        current = build(args.build)
+        assert current['attributes']['processingState'] == 'VALID', 'Wait for processing first'
+        bid = current['id']
+        notes = (ROOT / 'Lightning/testflight-what-to-test.txt').read_text().strip()
+        rows = api('GET', f'builds/{bid}/betaBuildLocalizations', limit=200)['data']
+        existing = [r for r in rows if r['attributes']['locale'] == 'en-US']
+        if existing:
+            row = existing[0]
+            api('PATCH', 'betaBuildLocalizations/' + row['id'], {'data': {'type': 'betaBuildLocalizations',
+                'id': row['id'], 'attributes': {'whatsNew': notes}}})
+        else:
+            api('POST', 'betaBuildLocalizations', {'data': {'type': 'betaBuildLocalizations',
+                'attributes': {'locale': 'en-US', 'whatsNew': notes},
+                'relationships': {'build': {'data': {'type': 'builds', 'id': bid}}}}})
+        if not status(args.build)['grouped']:
+            api('POST', f'betaGroups/{GROUP}/relationships/builds', {'data': [{'type': 'builds', 'id': bid}]})
+    result = status(args.build)
+    print(json.dumps(result, indent=2))
+    if args.command == 'distribute' and not result['testable']:
+        raise SystemExit('Apple has not made this build testable; inspect its reported state')
+
+
+if __name__ == '__main__':
+    main()

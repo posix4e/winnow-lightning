@@ -1,0 +1,24 @@
+#!/bin/bash
+# Use the same recorder as ordinary Winnow, with an isolated regtest fixture.
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+cd "$root"
+results="${1:?usage: ci-lightning-journey <fresh-results-directory> [--skip-build]}"
+[[ $# -le 2 && ( ${2:-} == '' || ${2:-} == --skip-build ) ]] || exit 2
+mkdir -p "$results"
+results=$(cd "$results" && pwd)
+export WINNOW_DATADIR="$results/fixture"
+[[ ! -e "$WINNOW_DATADIR" ]] || { echo 'Use a fresh results directory.' >&2; exit 1; }
+export WINNOW_SCREENSHOT_DIR="$results/journey/node-screenshots"
+export UI_TEST_ENVIRONMENT_FILE="$WINNOW_DATADIR/test-environment.json"
+export UI_PROJECT=WinnowLightningResearch.xcodeproj UI_SCHEME=WinnowLightningResearch
+export UI_TEST_TARGET=WinnowLightningUITests UI_BUNDLE_ID=com.btcswift.lightning.research
+export UI_E2E_RUN="${UI_E2E_RUN:-lightning}" UI_NODE_NETWORK=regtest UI_FIXTURE_EXECUTABLE=scripts/lightning-fixture
+export UI_TEST_SELECTION="${UI_TEST_SELECTION:-WinnowLightningUITests/WinnowLightningUITests/testFundingPaymentRestartAndClose}"
+export SIMULATOR_ID="${SIMULATOR_ID:-$(scripts/ios-simulator iPhone)}"
+export DERIVED_DATA="${DERIVED_DATA:-$results/build}"
+cleanup() { scripts/lightning-fixture down || true; }
+trap cleanup EXIT
+scripts/ci-ui-journey "$results/journey" "${@:2}"
+
+scripts/lightning-evidence "$results/journey" "$UI_TEST_SELECTION"

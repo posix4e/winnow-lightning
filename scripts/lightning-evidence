@@ -1,0 +1,35 @@
+#!/usr/bin/env python3
+"""Digest public journey evidence without copying fixture wallets or claim files."""
+import hashlib
+import json
+import os
+import pathlib
+import subprocess
+import sys
+
+root = pathlib.Path(sys.argv[1]).resolve()
+repo = pathlib.Path(__file__).resolve().parents[1]
+files = []
+for path in sorted(root.rglob('*')):
+    if path.is_file() and path.suffix in {'.mp4', '.png', '.log', '.jsonl'}:
+        digest = hashlib.sha256()
+        with path.open('rb') as source:
+            for chunk in iter(lambda: source.read(1024 * 1024), b''):
+                digest.update(chunk)
+        files.append({'path': str(path.relative_to(root)), 'bytes': path.stat().st_size, 'sha256': digest.hexdigest()})
+manifest = {
+    'source_revision': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=repo, text=True).strip(),
+    'source_dirty': bool(subprocess.check_output(['git', 'status', '--porcelain'], cwd=repo)),
+    'pqln_revision': '1d7dda453dd385f3ede84c39eed5d20afe34e02a',
+    'network': 'regtest', 'scenario': sys.argv[2],
+    'bitcoin_services': 'Winnow Wallet, FilterSync, HeaderChain, PeerPool, TxBroadcaster',
+    'claim_authentication': 'pinned ML-DSA-44 BOLT11 description hash',
+    'native_lock_sha256': hashlib.sha256((repo / 'Native/LightningBridge/Cargo.lock').read_bytes()).hexdigest(),
+    'swift_lock_sha256': hashlib.sha256((repo / 'Package.resolved').read_bytes()).hexdigest(),
+    'xcode': subprocess.check_output(['xcodebuild', '-version'], text=True).strip(),
+    'rust': subprocess.check_output(['rustc', '--version'], text=True).strip(),
+    'bitcoin_core': subprocess.check_output([str(pathlib.Path(os.environ['WINNOW_BITCOIN_DIR']) / 'bitcoind'), '--version'], text=True).splitlines()[0],
+    'files': files,
+}
+(root / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+print('Recorded', len(files), 'public evidence files')
