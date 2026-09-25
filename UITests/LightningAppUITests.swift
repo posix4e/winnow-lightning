@@ -31,7 +31,7 @@ final class LightningAppUITests: XCTestCase {
         try waitConnected(app)
         tap(app, "lightningCreateOffer")
         let offerElement = app.staticTexts["lightningReceiveOffer"]
-        XCTAssertTrue(scrollUntilExists(app, offerElement))
+        XCTAssertTrue(scroll(app, offerElement))
         XCTAssertTrue(offerElement.appears(within: 60))
         let offer = try XCTUnwrap(offerElement.value as? String)
         XCTAssertTrue(offer.hasPrefix("lno1"))
@@ -52,7 +52,7 @@ final class LightningAppUITests: XCTestCase {
         try waitConnected(app)
         tap(app, "lightningOpen")
         let funding = app.buttons["lightningFundingReview"]
-        XCTAssertTrue(scrollUntilExists(app, funding))
+        XCTAssertTrue(scroll(app, funding))
         XCTAssertTrue(funding.appears(within: 60))
         tap(app, "lightningFundingReview")
         XCTAssertTrue(app.navigationBars["Review Lightning"].appears(within: 20))
@@ -69,25 +69,25 @@ final class LightningAppUITests: XCTestCase {
         try paste(offer)
         tap(app, "lightningSend")
         tap(app, "lightningPasteOffer")
-        XCTAssertTrue(scrollUntilExists(app, app.textFields["lightningAmount"], fullyVisible: true))
+        XCTAssertTrue(scroll(app, app.textFields["lightningAmount"], fullyVisible: true))
         app.typeInto("lightningAmount", "5000")
         tap(app, "lightningReviewPayment")
         XCTAssertTrue(app.navigationBars["Review Lightning"].appears(within: 15))
         for row in ["Amount, 5000 sats", "Maximum fee, 50 sats", "Maximum expiry, 2016 blocks"] {
-            XCTAssertTrue(scrollUntilExists(app, app.staticTexts[row], fullyVisible: true))
+            XCTAssertTrue(scroll(app, app.staticTexts[row], fullyVisible: true))
         }
         Screenshots.capture(app, "lightning-04-payment-review", testCase: self)
         tap(app, "lightningConfirm")
         XCTAssertTrue(app.navigationBars["Review Lightning"].disappears(within: 30), app.debugDescription)
         XCTAssertTrue(app.buttons["lightningSendDone"].disappears(within: 15), app.debugDescription)
-        XCTAssertTrue(scrollUntilExists(app, app.staticTexts["Awaiting recipient"]))
+        XCTAssertTrue(scroll(app, app.staticTexts["Awaiting recipient"]))
         XCTAssertTrue(app.staticTexts["Awaiting recipient"].appears(within: 60))
         XCTAssertFalse(app.staticTexts["Settled"].exists)
         Screenshots.capture(app, "lightning-05-awaiting-offline-recipient", testCase: self)
         try killed(app, response: rpc("hold_and_kill"))
 
         try launch(app, role: "recipient", fresh: false)
-        XCTAssertTrue(scrollUntilExists(app, app.staticTexts["Settled"]))
+        XCTAssertTrue(scroll(app, app.staticTexts["Settled"]))
         XCTAssertTrue(app.staticTexts["Settled"].appears(within: 90))
         let settled = try rpc("recipient_settled")
         let hash = try XCTUnwrap(settled["hash"] as? String)
@@ -96,14 +96,14 @@ final class LightningAppUITests: XCTestCase {
         try killed(app, response: rpc("kill", values: ["role": "recipient"]))
 
         try launch(app, role: "sender", fresh: false)
-        XCTAssertTrue(scrollUntilExists(app, app.staticTexts["Settled"]))
+        XCTAssertTrue(scroll(app, app.staticTexts["Settled"]))
         XCTAssertTrue(app.staticTexts["Settled"].appears(within: 90))
         try verifyHash(app, hash: hash)
         XCTAssertEqual(app.staticTexts.matching(identifier: "lightningPaymentHash." + hash).count, 1, "settlement duplicated on sender restart")
         Screenshots.capture(app, "lightning-07-sender-reconciled-once", testCase: self)
         _ = try rpc("finish")
         tap(app, "lightningClose", up: true)
-        XCTAssertTrue(scrollUntilExists(app, app.staticTexts["Maximum negotiated fee, 905 sats"], fullyVisible: true))
+        XCTAssertTrue(scroll(app, app.staticTexts["Maximum negotiated fee, 905 sats"], fullyVisible: true))
         Screenshots.capture(app, "lightning-08-close-review", testCase: self)
         tap(app, "lightningConfirm")
         XCTAssertTrue(app.navigationBars["Review Lightning"].disappears(within: 30), app.debugDescription)
@@ -135,7 +135,7 @@ final class LightningAppUITests: XCTestCase {
         }
         selectTab(app, "Lightning")
         let node = app.staticTexts["lightningNodeID"]
-        XCTAssertTrue(scrollUntilExists(app, node))
+        XCTAssertTrue(scroll(app, node))
         XCTAssertTrue(poll(timeout: 30, interval: 0.2, "durable node identity") { (node.value as? String)?.count == 66 })
         _ = try rpc("register", values: ["role": role, "node": XCTUnwrap(node.value as? String)])
     }
@@ -157,7 +157,7 @@ final class LightningAppUITests: XCTestCase {
     }
     private func waitConnected(_ app: XCUIApplication) throws {
         let connection = app.descendants(matching: .any)["lightningConnection"].firstMatch
-        XCTAssertTrue(scrollUntilExists(app, connection, up: true))
+        XCTAssertTrue(scroll(app, connection, up: true))
         XCTAssertTrue(poll(timeout: 90, interval: 0.5, "authenticated provider connection") {
             connection.value as? String == "Connected"
         }, connection.debugDescription)
@@ -166,7 +166,7 @@ final class LightningAppUITests: XCTestCase {
         selectTab(app, "Wallet")
         tap(app, "receiveButton")
         tap(app, "skipReceiveAddressLabelButton")
-        XCTAssertTrue(scrollUntilExists(app, app.staticTexts["receiveAddress"]))
+        XCTAssertTrue(scroll(app, app.staticTexts["receiveAddress"]))
         let address = try XCTUnwrap(app.staticTexts["receiveAddress"].value as? String)
         _ = try AddressDecoder.scriptPubKey(for: address, network: .regtest)
         app.buttons["Done"].tap()
@@ -176,15 +176,21 @@ final class LightningAppUITests: XCTestCase {
         })
         selectTab(app, "Lightning")
     }
+    private func scroll(_ app: XCUIApplication, _ element: XCUIElement,
+                        up: Bool = false, fullyVisible: Bool = false) -> Bool {
+        // At accessibility sizes a centered drag can land in a TextEditor and
+        // scroll its contents. The form gutter moves the surrounding controls.
+        scrollUntilExists(app, element, up: up, fullyVisible: fullyVisible, dragX: 0.03)
+    }
     private func tap(_ app: XCUIApplication, _ identifier: String, up: Bool = false) {
         let button = app.buttons[identifier]
-        XCTAssertTrue(scrollUntilExists(app, button, up: up, fullyVisible: true))
+        XCTAssertTrue(scroll(app, button, up: up, fullyVisible: true))
         XCTAssertTrue(button.isEnabled)
         XCTAssertTrue(tapVisibleCenter(app, button))
     }
     private func verifyHash(_ app: XCUIApplication, hash: String) throws {
         let value = app.staticTexts["lightningPaymentHash." + hash]
-        XCTAssertTrue(scrollUntilExists(app, value, fullyVisible: true), app.debugDescription)
+        XCTAssertTrue(scroll(app, value, fullyVisible: true), app.debugDescription)
         XCTAssertEqual(value.value as? String, hash)
     }
     private func paste(_ text: String) throws {

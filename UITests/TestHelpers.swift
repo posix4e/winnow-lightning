@@ -68,22 +68,23 @@ extension XCTestCase {
     @MainActor
     @discardableResult
     func scrollUntilExists(_ app: XCUIApplication, _ element: XCUIElement,
-                           maxSwipes: Int = 16, up: Bool = false, fullyVisible: Bool = false) -> Bool {
+                           maxSwipes: Int = 16, up: Bool = false, fullyVisible: Bool = false,
+                           dragX: CGFloat = 0.5) -> Bool {
         for _ in 0 ..< maxSwipes {
             // Long enough for a row to materialise after a drag animates on
             // a slow CI VM, short enough that a row several drags down does
             // not cost many seconds of waiting per drag.
             if element.appears(within: 1.5) {
                 guard fullyVisible else { return true }
-                return reveal(app, element, fullyVisible: fullyVisible)
+                return reveal(app, element, fullyVisible: fullyVisible, dragX: dragX)
             }
-            let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: up ? 0.25 : 0.75))
-            let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: up ? 0.75 : 0.25))
+            let start = app.coordinate(withNormalizedOffset: CGVector(dx: dragX, dy: up ? 0.25 : 0.75))
+            let end = app.coordinate(withNormalizedOffset: CGVector(dx: dragX, dy: up ? 0.75 : 0.25))
             start.press(forDuration: 0.05, thenDragTo: end, withVelocity: .default, thenHoldForDuration: 0.25)
         }
         guard element.appears(within: 1.5) else { return false }
         guard fullyVisible else { return true }
-        return reveal(app, element, fullyVisible: fullyVisible)
+        return reveal(app, element, fullyVisible: fullyVisible, dragX: dragX)
     }
 
     /// The vertical band a row is tappable in: below the lowest navigation
@@ -119,7 +120,7 @@ extension XCTestCase {
     /// Wait for lazy-row geometry before another gesture. An extra downward
     /// drag at the top of a form can dismiss its sheet and abandon signing.
     @MainActor
-    private func reveal(_ app: XCUIApplication, _ element: XCUIElement, fullyVisible: Bool) -> Bool {
+    private func reveal(_ app: XCUIApplication, _ element: XCUIElement, fullyVisible: Bool, dragX: CGFloat) -> Bool {
         let margin: CGFloat = 8
         guard let appFrame = usableFrame(app) else { return false }
         // Each AX frame read resolves the element again. Reuse this geometry
@@ -139,7 +140,7 @@ extension XCTestCase {
             guard attempt < 3 else { return false }
             let midY = (band.lowerBound + band.upperBound) / 2
             let start = app.coordinate(withNormalizedOffset: .zero)
-                .withOffset(CGVector(dx: appFrame.width / 2, dy: midY - shift / 2 - appFrame.minY))
+                .withOffset(CGVector(dx: appFrame.width * dragX, dy: midY - shift / 2 - appFrame.minY))
             start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 0, dy: shift)),
                         withVelocity: .default, thenHoldForDuration: 0.25)
         }
