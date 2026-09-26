@@ -14,6 +14,7 @@ import selectors
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -145,10 +146,29 @@ class SwiftPeer:
         self.selector.close()
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--close', choices=('force', 'cooperative'), default='force')
-    close_mode = parser.parse_args().close
+class ReferenceStartupFailure(RuntimeError):
+    """Stock CLN lost its channel subdaemon before funding_signed."""
+
+
+def funding_signature(swift, log):
+    try:
+        return swift.receive(35)
+    except TimeoutError as error:
+        transcript = log.read_text()
+        # CLN has already checked our commitment and handed opening to channeld.
+        # Matches the macOS startup failures reported upstream (#5808/#9323).
+        # Classify only this exact pre-broadcast reference-process failure.
+        if (sys.platform == 'darwin'
+                and 'Got opening_fundee_finish_response' in transcript
+                and 'Peer transient failure in CHANNELD_AWAITING_LOCKIN: channeld: Owning subdaemon channeld died (0)' in transcript
+                and 'peer_out WIRE_FUNDING_SIGNED' not in transcript
+                and 'peer_out WIRE_ERROR' not in transcript
+                and '**BROKEN**' not in transcript):
+            raise ReferenceStartupFailure(f'Stock CLN exited before funding_signed; see {log}') from error
+        raise
+
+
+def run_peer(close_mode, evidence):
     cln = Path(os.environ['WINNOW_CLN_DIR']).resolve()
     bitcoin = Path(os.environ['WINNOW_BITCOIN_DIR']).resolve()
     commit = subprocess.check_output(['git', '-C', str(cln), 'rev-parse', 'HEAD'], text=True).strip()
@@ -161,7 +181,6 @@ def main():
     subprocess.run(['swift', 'build', '--product', 'winnow-lightning-peer-fixture'], cwd=ROOT, check=True)
     products = subprocess.check_output(['swift', 'build', '--show-bin-path'], cwd=ROOT, text=True).strip()
     executable = str(Path(products) / 'winnow-lightning-peer-fixture')
-    evidence = Path(os.environ.get('WINNOW_LIGHTNING_RESULTS', str(ROOT / '.build/lightning-peer-results'))).resolve() / close_mode
     evidence.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='winnow-peer-') as temporary:
         root = Path(temporary)
@@ -211,7 +230,7 @@ def main():
                 decoded = rpc('decoderawtransaction', raw)
                 output = next(out['n'] for out in decoded['vout'] if out['scriptPubKey']['hex'] == accepted['script'])
                 swift.call('fund', id=accepted['id'], transaction=raw, output=str(output))
-                authorized = swift.receive(35)
+                authorized = funding_signature(swift, evidence / 'cln.log')
                 assert authorized['event'] == 'broadcast_funding' and authorized['transaction'] == raw
                 rpc('sendrawtransaction', raw)
                 rpc('generatetoaddress', 6, address)
@@ -273,6 +292,38 @@ def main():
                 if swift:
                     swift.close()
                 stop(daemon); stop(node)
+
+
+def check_peer(close_mode, evidence):
+    evidence.mkdir(parents=True, exist_ok=False)
+    attempts = []
+    for number in (1, 2):
+        attempt = evidence / f'attempt-{number}'
+        # Retain every failed fixture; never retry inside an existing channel.
+        attempt.mkdir(exist_ok=False)
+        try:
+            run_peer(close_mode, attempt)
+        except ReferenceStartupFailure as error:
+            attempts.append(dict(attempt=number, result='reference-startup-failure', error=str(error)))
+            (evidence / 'attempts.json').write_text(json.dumps(attempts, indent=2) + '\n')
+            if number == 2:
+                raise
+            print(f'{error}. Retrying once with fresh, unfunded test nodes.', flush=True)
+        else:
+            attempts.append(dict(attempt=number, result='passed'))
+            (evidence / 'attempts.json').write_text(json.dumps(attempts, indent=2) + '\n')
+            receipt = json.loads((attempt / 'opening-receipt.json').read_text())
+            receipt['attempts'] = attempts
+            (evidence / 'opening-receipt.json').write_text(json.dumps(receipt, indent=2) + '\n')
+            return
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--close', choices=('force', 'cooperative'), default='force')
+    close_mode = parser.parse_args().close
+    evidence = Path(os.environ.get('WINNOW_LIGHTNING_RESULTS', str(ROOT / '.build/lightning-peer-results'))).resolve() / close_mode
+    check_peer(close_mode, evidence)
 
 
 if __name__ == '__main__':

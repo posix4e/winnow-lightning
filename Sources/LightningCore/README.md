@@ -92,6 +92,16 @@ transaction. `--close force` and `--close cooperative` use fresh fixtures.
 Receipts record source identity (including whether it is dirty), peer commit,
 amounts, hashes and balances.
 
+On macOS, the fixture permits one fresh attempt only when stock CLN's
+`channeld` exits with status zero during opening, after accepting the commitment
+but before sending `funding_signed`. This matches the startup failures discussed
+in upstream [#5808](https://github.com/ElementsProject/lightning/issues/5808) and
+[#9323](https://github.com/ElementsProject/lightning/issues/9323). No funding has
+been broadcast at that point. Every attempt retains its logs, and the final
+receipt lists any retry. Protocol rejections, other timeouts, payment/close
+failures and a second startup crash fail the check; peer source and assertions
+are unchanged.
+
 `ci-lightning-async` separately checks the pinned LDK async protocol against
 Swift in both directions, including reusable BOLT12 offers, static invoices,
 blinded payment/onion paths, committed held HTLCs and recipient-triggered

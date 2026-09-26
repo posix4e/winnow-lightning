@@ -45,6 +45,7 @@ jobs:
           python3 -m unittest discover -s scripts/tests -p test_lightning_release.py
           python3 -m unittest discover -s scripts/tests -p test_signed_distribution.py
           python3 -m unittest discover -s scripts/tests -p test_lightning_references.py
+          python3 -m unittest discover -s scripts/tests -p test_lightning_peer.py
       - name: Prepare host-only reference tools
         run: |
           brew install autoconf automake libtool gnu-sed gettext libsodium lowdown pkgconf openssl@3 make sqlite uv bitcoin
