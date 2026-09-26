@@ -101,6 +101,11 @@ the clients are offline. Receipts check actual channel amounts, forwarding fees,
 payment hashes/preimages and process ordering. Rust runs only in the independent
 host reference; these tests do not establish app behavior or release readiness.
 
+The Rust reference harness and its Cargo lockfiles are maintained separately in
+[lightning-reference](https://github.com/posix4e/lightning-reference).
+`scripts/ci-lightning-references` downloads its pinned commit into the disposable
+reference build directory. The app has no dependency on that repository.
+
 `ci-lightning-timeout` verifies automatic commitment, HTLC timeout and delayed
 recovery after the recipient and both providers disappear. Core validates the
 transactions and returned balance. `ci-lightning-ui` builds the research app,

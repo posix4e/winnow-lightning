@@ -23,6 +23,14 @@ Use these independent references without changing their protocol code:
 - BOLT vectors at `1aadb719b4007c4cea0ba6e36b08c4fb53788dee` and Bitcoin Core
   regtest consensus checks.
 
+The Rust host harness, Cargo lockfiles and reference builder live in
+[lightning-reference](https://github.com/posix4e/lightning-reference).
+`scripts/ci-lightning-references` fetches the exact repository commit recorded
+in that script and rejects a mismatched or modified checkout before executing
+its builder. `reference-manifest.json` records the external harness revision
+alongside the upstream peer revisions. Swift fixtures and Winnow-specific
+scenario drivers stay here; all existing interoperability gates still run.
+
 Interoperability evidence is not blanket standards certification. Do not
 advertise unsupported features or skip tests when a peer lacks a required
 capability.
