@@ -8,6 +8,10 @@ import XCTest
 /// app PID, while stock LDK providers persist and settle the held payment.
 @MainActor
 final class LightningAppUITests: XCTestCase {
+    // The single Bitcoin peer can time out a request, cool down and redial
+    // before verified scanning resumes. Include that recovery within the wait;
+    // the channel state and exact wallet balances still have to be verified.
+    private let verifiedChainTimeout: TimeInterval = 120
     private var config: [String: String] = [:]
     private var control: URL!
     private var setup: [String: Any] = [:]
@@ -67,7 +71,7 @@ final class LightningAppUITests: XCTestCase {
         tap(app, "lightningFundingReview")
         tap(app, "lightningConfirm")
         _ = try rpc("confirm_funding")
-        XCTAssertTrue(poll(timeout: 90, interval: 1, "app verifies channel funding") {
+        XCTAssertTrue(poll(timeout: verifiedChainTimeout, interval: 1, "app verifies channel funding") {
             app.staticTexts["lightningChannelPhase"].label.contains("ready")
         })
         try paste(offer)
@@ -115,7 +119,7 @@ final class LightningAppUITests: XCTestCase {
         let closed = try rpc("mine_close")
         let expectedBalance = try XCTUnwrap(closed["expected_balance"] as? Int64)
         selectTab(app, "Wallet")
-        XCTAssertTrue(poll(timeout: 90, interval: 1, "wallet discovers returned channel funds") {
+        XCTAssertTrue(poll(timeout: verifiedChainTimeout, interval: 1, "wallet discovers returned channel funds") {
             Int64(self.balanceText(app).filter(\.isNumber)) == expectedBalance
         })
         Screenshots.capture(app, "lightning-09-returned-wallet-funds", testCase: self)
@@ -179,7 +183,7 @@ final class LightningAppUITests: XCTestCase {
         _ = try AddressDecoder.scriptPubKey(for: address, network: .regtest)
         app.buttons["Done"].tap()
         _ = try rpc("fund_wallet", values: ["address": address])
-        XCTAssertTrue(poll(timeout: 90, interval: 1, "Winnow discovers regtest funding") {
+        XCTAssertTrue(poll(timeout: verifiedChainTimeout, interval: 1, "Winnow discovers regtest funding") {
             Int64(self.balanceText(app).filter(\.isNumber)) == 2_000_000
         })
         selectTab(app, "Lightning")
