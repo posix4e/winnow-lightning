@@ -28,7 +28,7 @@ public actor LightningEngine {
         case broadcastRecovery(channelID: Data, transaction: Data)
     }
     struct State: Codable {
-        var version = 2
+        var version = 3
         var revision: UInt64 = 0
         var nextSequence: UInt64 = 0
         var chain: Data
@@ -52,8 +52,9 @@ public actor LightningEngine {
         guard chain.count == 32 else { throw LightningError.invalidHash }
         self.journal = journal
         if let bytes = try journal.load() {
-            let loaded = try JSONDecoder().decode(State.self, from: bytes)
-            guard loaded.version == 2, loaded.chain == chain else { throw LightningError.storageFailed }
+            var loaded = try JSONDecoder().decode(State.self, from: bytes)
+            guard [2, 3].contains(loaded.version), loaded.chain == chain else { throw LightningError.storageFailed }
+            loaded.version = 3
             guard nodeSecret == nil || nodeSecret == loaded.nodeSecret else { throw LightningError.storageFailed }
             try Self.validateLoaded(loaded)
             state = loaded
@@ -67,6 +68,7 @@ public actor LightningEngine {
         state.channels.map { Channel(id: $0.id, peer: $0.peer, capacitySat: $0.capacity, phase: $0.phase,
                                      signedCommitment: $0.dataLossDetected ? nil : $0.signedCommitment) }
     }
+    public func chainHash() -> Data { state.chain }
     /// The adapter calls this only after its verified header/filter scan has
     /// caught up. Every restart starts paused, including fresh network sessions.
     public func chainCaughtUp(height: UInt32 = 0) throws { try healthy(); chainHeight = height; chainIsCurrent = true }
@@ -173,6 +175,11 @@ public actor LightningEngine {
         }
     }
     private static func validateLoaded(_ state: State) throws {
+        let origin = state.scan.origin
+        guard state.scan.nextHeight > (origin?.height ?? 0),
+              origin == nil || (origin!.hash.count == 32 && (origin!.height != 0 || origin!.hash == state.chain)),
+              state.scan.positions.allSatisfy({ $0.height > (origin?.height ?? 0) && $0.height < state.scan.nextHeight && $0.hash.count == 32 })
+        else { throw LightningError.storageFailed }
         let sequences = state.outbox.map(\.sequence) + state.async.outbox.map(\.sequence)
         guard state.channels.count <= 64, state.outbox.count <= 1024, state.async.outbox.count <= 1024,
               state.payments.count <= 4096, state.async.outgoing.count <= 4096, state.async.receives.count <= 128,

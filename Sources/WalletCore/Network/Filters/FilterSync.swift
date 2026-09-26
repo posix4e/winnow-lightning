@@ -224,6 +224,19 @@ public actor FilterSync {
         throw lastError
     }
 
+    /// Refresh the same verified chain and rollback provenance before another
+    /// durable consumer reconciles its saved cursor (for example Lightning).
+    public func syncHeaders(onReorg: (@Sendable (UInt32) async throws -> Void)? = nil) async throws {
+        try beginRequest()
+        defer { requesting = false }
+        try await refreshHeaders(onReorg: onReorg)
+    }
+
+    private func refreshHeaders(onReorg: (@Sendable (UInt32) async throws -> Void)?) async throws {
+        let outcome = try await pool.syncHeaders(chain)
+        try await rollBackIfForked(outcome, onReorg: onReorg)
+    }
+
     /// `maxBlocks` bounds one run: at most that many blocks are scanned before
     /// it returns, and the next call resumes from the persisted frontier. Nil
     /// scans to the tip, which is what every caller had before. A bounded run
@@ -257,13 +270,11 @@ public actor FilterSync {
 
         // 1. Headers to tip. A stale or broken peer is evicted and the pool
         // retries another peer without discarding already-persisted progress.
-        let headerOutcome = try await pool.syncHeaders(chain)
-
         // 1a. A branch was replaced, so everything derived from the old one is
         // wrong. Roll back to the lowest fork the sync saw before reading a
         // single filter: the frontier below is the thing that would otherwise
         // carry the orphaned branch forward.
-        try await rollBackIfForked(headerOutcome, onReorg: onReorg)
+        try await refreshHeaders(onReorg: onReorg)
         peers = await pool.connectedPeers()
         guard !peers.isEmpty else { throw FilterSyncError.noPeers }
         let tip = await chain.height

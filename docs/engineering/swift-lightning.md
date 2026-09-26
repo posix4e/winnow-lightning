@@ -86,7 +86,38 @@ checks recorded explicitly rather than reported as passed.
 Keep the PR draft until these gates pass. Release the exact green commit to the
 existing `com.btcswift.lightning` TestFlight app through the existing signing,
 export/compliance and release gates. Verify processing and tester availability.
-This remains a regtest research beta, not unattended mainnet protection.
+This remains a foreground research beta; it does not provide unattended channel
+protection. The app now supports mainnet, public signet and regtest (see below).
+
+## Public networks
+
+Fresh research-app installs default to mainnet and use Winnow's normal public
+peer discovery. Settings can switch mainnet, signet and regtest. An upgrade with
+an existing regtest wallet or journal keeps that selection until the user
+switches. Wallet files, channel identities, journal keys and provider profiles
+remain separate per network; the existing regtest key account is retained.
+
+Lightning uses the selected network's chain hash, addresses, sealed profile and
+offer checks. Funding commitment rates use Winnow's fee policy. Compatible
+provider configuration is still required for channels, and async receive offers
+require an async-capable provider and configured route. This change does not
+implement provider discovery, general graph routing or background monitoring.
+
+Before the first channel, the ordinary wallet scanner runs without journaling
+every historical block. The Lightning monitor saves a verified starting point
+144 blocks behind the tip, bounded by the available checkpoint. Once a channel
+exists that starting point is fixed. Newly learned funding replays from it;
+normal reorgs use the monitor's retained ancestry. Header caches are caught up
+before comparing persisted monitor positions. A fork below the starting point
+stops for recovery rather than discarding channel history.
+
+The journal is schema 3. Schema-2 regtest journals retain their genesis-based
+scan history and identity when upgraded; older binaries refuse schema 3.
+Network switching drains the old scanner and stops its Lightning session before
+loading another wallet. Pending reviews and late events are rejected after the
+session generation changes. Mainnet connectivity tests must be distinguished
+from funded-channel and payment evidence; controlled CLN/LDK interop remains on
+regtest.
 
 ## Evidence tracking
 
@@ -113,7 +144,7 @@ forwarding fees, and record process order plus source/reference identities.
 LDK can insert dummy hops: distinguish the actual incoming channel amount from
 the post-dummy-hop amount in its claim event, while checking the exact total debit.
 
-The shared journal payload is schema 2; pre-release schema 1 is refused rather
+The shared journal payload is schema 3 (schema 2 is upgraded); pre-release schema 1 is refused rather
 than silently discarding channel state. The app integration must use its own new
 Swift namespace and preserve the prior PQLN application's files. Optional onion
 messages are discarded according to BOLT4 without interrupting channel messages;

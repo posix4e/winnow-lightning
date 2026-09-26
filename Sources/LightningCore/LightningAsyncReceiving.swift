@@ -84,7 +84,7 @@ extension LightningEngine {
         let expires = min(try AsyncPaymentRoute.add(now, 86_400), pathExpiry ?? UInt64.max)
         guard UInt64(chainHeight) + 2016 < 500_000_000, expires > now else { throw LightningError.invalidState }
         let offer = try LightningOffer(bytes: Bolt12Encoding.serialize([
-            .init(type: 2, value: state.chain), .init(type: 10, value: Data("Winnow regtest receive offer".utf8)),
+            .init(type: 2, value: state.chain), .init(type: 10, value: Data("Winnow receive offer".utf8)),
             .init(type: 14, value: Bolt12Encoding.integer(expires)),
             .init(type: 16, value: paths.map { try $0.encoded() }.reduce(Data(), +)),
             .init(type: 22, value: ChannelKeys.publicKey(secret: receive.signingSecret))]))

@@ -115,12 +115,13 @@ Its Debug authentication fixture is not physical-device authentication evidence.
 
 ## Research scope and release gates
 
-This is a configured-route, foreground-only regtest beta. Keep the channel
+This is a configured-route, foreground-only beta supporting the wallet's
+mainnet, signet and regtest selections. Keep the channel
 journal on the device; seed recovery alone does not restore current channel
 state. Device authentication, file protection, iPad/large text, final CI and an
 exact-source signed TestFlight release have separate required gates in the
 [release procedure](../../docs/engineering/lightning-release.md).
 
 Anchors, zero-fee commitments, splicing and post-quantum protocol extensions are
-not implemented or advertised. Unattended protection and general mainnet routing
+not implemented or advertised. Unattended protection and general graph routing
 are outside this research release.

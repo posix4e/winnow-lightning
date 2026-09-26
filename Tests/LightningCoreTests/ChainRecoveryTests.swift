@@ -244,6 +244,79 @@ final class ChainRecoveryTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(try state(store).channels.first?.resolutions.first?.transaction, saved)
         XCTAssertEqual(try state(store).channels.first?.phase, .closing)
     }
+    func testScanBirthdaySurvivesRestartAndCannotSkipExistingChannels() async throws {
+        let store = RecoveryStore(), engine = try engine(store: store)
+        let birthday = minedHeader(previousHash: genesis.hash, merkleRoot: Data(repeating: 4, count: 32), time: genesis.time + 600)
+        try await engine.startChainScan(height: 900_000, hash: birthday.hash)
+        var saved = try state(store)
+        saved.channels = [try fixture().0]
+        try store.store(JSONEncoder().encode(saved))
+        let restored = try LightningEngine(chain: genesis.hash, journal: RecoveryJournal(store))
+        let status = await restored.chainStatus()
+        XCTAssertEqual(status.origin.height, 900_000)
+        XCTAssertEqual(status.origin.hash, birthday.hash)
+        XCTAssertEqual(status.nextHeight, 900_001)
+        do { try await restored.startChainScan(height: 900_100, hash: birthday.hash); XCTFail("skipped live channel history") }
+        catch { XCTAssertEqual(error as? LightningError, .invalidState) }
+        let first = try await scan(restored, height: 900_001, previous: birthday.hash)
+        _ = try await scan(restored, height: 900_002, previous: first.hash)
+        try await restored.blocksDisconnected(to: 900_000, hash: birthday.hash)
+        _ = try await scan(restored, height: 900_001, previous: birthday.hash)
+        do { try await restored.blocksDisconnected(to: 0, hash: genesis.hash); XCTFail("rewound below verified birthday") }
+        catch { XCTAssertEqual(error as? LightningChainError, .recoveryRequired) }
+    }
+
+    func testLegacyJournalRetainsGenesisAndUpgradesWithoutLosingIdentity() async throws {
+        let store = RecoveryStore()
+        var legacy = LightningEngine.State(chain: genesis.hash, nodeSecret: Data(repeating: 1, count: 32))
+        legacy.version = 2
+        legacy.channels = [try fixture().0]
+        try store.store(JSONEncoder().encode(legacy))
+        let restored = try LightningEngine(chain: genesis.hash, journal: RecoveryJournal(store))
+        try await restored.persistIdentity()
+        let status = await restored.chainStatus()
+        XCTAssertEqual(status.origin.height, 0)
+        XCTAssertEqual(status.origin.hash, genesis.hash)
+        XCTAssertEqual(try state(store).version, 3)
+        XCTAssertEqual(try state(store).channels.first?.id, legacy.channels.first?.id)
+        XCTAssertEqual(try state(store).nodeSecret, legacy.nodeSecret)
+    }
+
+    func testCheckpointWalletAndLightningScanWithoutGenesisHeaders() async throws {
+        let fixture = makeSyntheticChain(length: 6), p = fixture.params
+        let params = NetworkParams(network: p.network, magic: p.magic, defaultPort: p.defaultPort,
+            genesisTime: p.genesisTime, genesisBits: p.genesisBits, genesisNonce: p.genesisNonce,
+            genesisMerkleRoot: p.genesisMerkleRoot, genesisHash: p.genesisHash, powLimit: p.powLimit, dnsSeeds: [],
+            checkpoint: .init(height: 4, header: fixture.blocks[4].header.serialized, chainwork: UInt256(10).bigEndianData))
+        let node = LoopbackNode(params: params, chain: fixture.blocks)
+        try await node.start()
+        let pool = PeerPool(params: params, peerCount: 1, manualPeers: [await node.endpoint])
+        defer { Task { await pool.stop(); await node.stop() } }
+        await pool.start()
+        let headers = try HeaderChain(params: params, start: .checkpoint)
+        let filters = try FilterSync(pool: pool, chain: headers, startHeight: 5, requiredCheckpointPeers: 1)
+        let store = RecoveryStore(), engine = try engine(store: store)
+        let driver = LightningChainDriver(engine: engine, headers: headers)
+        let complete = try await driver.sync(using: filters, walletScripts: [], onEvent: { _ in }, onMatch: { _ in })
+        XCTAssertTrue(complete)
+        let missing = await headers.blockHash(at: 0), origin = await engine.chainStatus().origin
+        XCTAssertNil(missing)
+        XCTAssertEqual(origin.height, 4)
+        XCTAssertEqual(origin.hash, fixture.blocks[4].hash)
+        var saved = try state(store)
+        saved.channels = [try self.fixture().0]
+        saved.scan.rescanRequired = true
+        try store.store(JSONEncoder().encode(saved))
+        let reopened = try LightningEngine(chain: p.genesisHash, journal: RecoveryJournal(store))
+        let rebuiltHeaders = try HeaderChain(params: params, start: .checkpoint)
+        let rebuiltFilters = try FilterSync(pool: pool, chain: rebuiltHeaders, startHeight: 5, requiredCheckpointPeers: 1)
+        let replay = LightningChainDriver(engine: reopened, headers: rebuiltHeaders)
+        let replayed = try await replay.sync(using: rebuiltFilters, walletScripts: [], onEvent: { _ in }, onMatch: { _ in })
+        XCTAssertTrue(replayed, "funding replay must use the saved birthday, not request absent genesis headers")
+        let floor = await reopened.chainStatus().origin.height
+        XCTAssertEqual(floor, 4)
+    }
+
     func testDriverSharesVerifiedFilterScannerAndRestoresItsOwnFrontier() async throws {
         let fixture = makeSyntheticChain(length: 6)
         let node = LoopbackNode(params: fixture.params, chain: fixture.blocks, reverseFilters: true)
@@ -253,7 +326,7 @@ final class ChainRecoveryTests: XCTestCase, @unchecked Sendable {
         await pool.start()
         let headers = try HeaderChain(params: fixture.params)
         let filters = try FilterSync(pool: pool, chain: headers, startHeight: 1, requiredCheckpointPeers: 1)
-        let store = RecoveryStore(), engine = try engine(store: store)
+        let store = RecoveryStore(), engine = try engine(channel: self.fixture().0, store: store)
         let driver = LightningChainDriver(engine: engine, headers: headers)
         let complete = try await driver.sync(using: filters, walletScripts: [], onEvent: { _ in }, onMatch: { _ in })
         XCTAssertTrue(complete)

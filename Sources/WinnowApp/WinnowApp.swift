@@ -187,6 +187,7 @@ struct MainTabView: View {
         TabView(selection: $selection) {
             if let lightning = model.lightning {
                 LightningView(controller: lightning)
+                    .id(model.network)
                     .tabItem { Label("Lightning", systemImage: "bolt.circle") }
                     .tag(Tab.lightning)
             }

@@ -12,7 +12,7 @@ struct LightningSetupView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Text("Paste the regtest provider profile supplied by your test coordinator. Verify its node ID and endpoint before connecting.")
+                Text("Paste a \(controller.network.rawValue) provider profile. Verify its node ID and endpoint before connecting. Receive offers and offline payments require a provider supporting the async Lightning protocol.")
                 TextEditor(text: $text).frame(height: 160).autocorrectionDisabled().textInputAutocapitalization(.never)
                     .focused($editing)
                     .accessibilityIdentifier("lightningProfileInput")
@@ -20,7 +20,7 @@ struct LightningSetupView: View {
                 if let error { Text(error).foregroundStyle(.red) }
                 Button("Review provider") {
                     editing = false
-                    do { review = .profile(try LightningProfile.parse(text)); error = nil }
+                    do { review = .profile(try LightningProfile.parse(text, network: controller.network)); error = nil }
                     catch { self.error = error.localizedDescription }
                 }.accessibilityIdentifier("lightningReviewProfile")
             }

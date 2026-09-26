@@ -42,7 +42,7 @@ public struct LightningOffer: Sendable, Equatable {
             guard currency.utf8.count == 3, currency.utf8.allSatisfy({ (65...90).contains($0) }), amount != nil else { throw LightningError.invalidMessage }
         }
     }
-    /// Regtest payment policy is separate from syntax: other-chain, currency
+    /// Network payment policy is separate from syntax: other-chain, currency
     /// and quantity offers may be decoded but must not reach a payment review.
     public func validatePayment(chain: Data, now: UInt64, amountMsat: UInt64) throws {
         guard chains.contains(chain), expiry.map({ now < $0 }) ?? true, currency == nil, maximumQuantity == nil,

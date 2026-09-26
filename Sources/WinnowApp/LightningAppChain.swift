@@ -12,11 +12,14 @@ extension AppModel {
             try await filters.sync(watchScripts: scripts, onReorg: onReorg, onMatch: onMatch)
             return
         }
+        let generation = lightning.generation
         guard let driver = lightning.driver else { throw AppError.noStack }
         let complete = try await driver.sync(using: filters, walletScripts: scripts, onEvent: { [weak self] events in
             guard let self else { throw CancellationError() }
+            try await lightning.requireNetwork(self, generation: generation)
             try await lightning.handle(events, model: self)
         }, onReorg: onReorg, onMatch: onMatch)
+        try lightning.requireNetwork(self, generation: generation)
         if complete { await lightning.resume(model: self) }
     }
 }

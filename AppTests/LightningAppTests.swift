@@ -30,7 +30,7 @@ final class LightningAppTests: XCTestCase {
         return dir
     }
     private func prepared(_ dir: URL, keys: InMemoryStoreKeyVault = .init()) async throws -> LightningAppController {
-        let controller = LightningAppController(keys: keys)
+        let controller = LightningAppController(network: .regtest, keys: keys)
         try await controller.prepare(directory: dir, headers: HeaderChain(params: .regtest))
         return controller
     }
@@ -44,7 +44,7 @@ final class LightningAppTests: XCTestCase {
     func testCancelledProviderReviewLeavesNoProfileOrJournalMutation() async throws {
         let dir = directory(), controller = try await prepared(dir), auth = Denied()
         let before = try Data(contentsOf: dir.appending(path: "lightning/journal.v1"))
-        do { try await controller.saveProfile(profile(), model: makeModel(deviceAuthenticator: auth)); XCTFail("canceled review saved a provider") }
+        do { try await controller.saveProfile(profile(), model: makeModel(network: .regtest, deviceAuthenticator: auth)); XCTFail("canceled review saved a provider") }
         catch is CancellationError {}
         XCTAssertEqual(auth.attempts, 1)
         XCTAssertNil(controller.profile)
@@ -53,8 +53,8 @@ final class LightningAppTests: XCTestCase {
     }
     func testCancelledPaymentDoesNotCreatePaymentOrPublishIntent() async throws {
         let dir = directory(), controller = try await prepared(dir), profile = try profile(), auth = Denied()
-        try await controller.saveProfile(profile, model: makeModel())
-        let model = makeModel(deviceAuthenticator: auth)
+        try await controller.saveProfile(profile, model: makeModel(network: .regtest))
+        let model = makeModel(network: .regtest, deviceAuthenticator: auth)
         let before = try Data(contentsOf: dir.appending(path: "lightning/journal.v1"))
         do { try await controller.pay(review(profile), model: model); XCTFail("canceled authentication created payment") }
         catch is CancellationError {}
@@ -63,10 +63,26 @@ final class LightningAppTests: XCTestCase {
         XCTAssertTrue(controller.payments.isEmpty)
         XCTAssertEqual(try Data(contentsOf: dir.appending(path: "lightning/journal.v1")), before)
     }
+    func testProviderAuthenticationCannotCompleteAfterTheControllerStops() async throws {
+        let dir = directory(), controller = try await prepared(dir), auth = Pending()
+        let model = makeModel(network: .regtest, deviceAuthenticator: auth)
+        let entered = expectation(description: "provider authentication pending")
+        auth.entered = { entered.fulfill() }
+        let proposed = try profile()
+        let operation = Task { try await controller.saveProfile(proposed, model: model) }
+        await fulfillment(of: [entered], timeout: 5)
+        await controller.stop()
+        auth.continuation?.resume(); auth.continuation = nil
+        do { try await operation.value; XCTFail("stale review saved after network/lifecycle change") }
+        catch is CancellationError {}
+        XCTAssertNil(controller.profile)
+        XCTAssertFalse(model.keychainAuthentication.isGranted)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dir.appending(path: "lightning/profile.json").path))
+    }
     func testDuplicatePaymentTapSharesWalletSpendingExclusion() async throws {
         let controller = try await prepared(directory()), profile = try profile()
-        try await controller.saveProfile(profile, model: makeModel())
-        let auth = Pending(), model = makeModel(deviceAuthenticator: auth), request = try review(profile)
+        try await controller.saveProfile(profile, model: makeModel(network: .regtest))
+        let auth = Pending(), model = makeModel(network: .regtest, deviceAuthenticator: auth), request = try review(profile)
         let entered = expectation(description: "authentication pending")
         auth.entered = { entered.fulfill() }
         let first = Task { try await controller.pay(request, model: model) }
@@ -113,13 +129,13 @@ final class LightningAppTests: XCTestCase {
     }
     func testInvalidOffersAndReviewBoundsFailBeforePayment() throws {
         for text in ["", "lnbc123", "lno1notanoffer", String(repeating: "x", count: 70_000)] {
-            XCTAssertThrowsError(try LightningAppController.validateOffer(text, amountSat: 5000, maximumFeeSat: 50, now: 1))
+            XCTAssertThrowsError(try LightningAppController.validateOffer(text, network: .regtest, amountSat: 5000, maximumFeeSat: 50, now: 1))
         }
-        XCTAssertThrowsError(try LightningAppController.validateOffer("", amountSat: .max, maximumFeeSat: 0, now: 1))
+        XCTAssertThrowsError(try LightningAppController.validateOffer("", network: .regtest, amountSat: .max, maximumFeeSat: 0, now: 1))
         var value = try JSONEncoder().encode(profile())
         let string = String(decoding: value, as: UTF8.self).replacingOccurrences(of: "regtest", with: "mainnet")
         value = Data(string.utf8)
-        XCTAssertThrowsError(try LightningProfile.parse(String(decoding: value, as: UTF8.self)))
+        XCTAssertThrowsError(try LightningProfile.parse(String(decoding: value, as: UTF8.self), network: .regtest))
     }
     func testJournalKeyRequestsDeviceOnlyWhenUnlockedProtection() throws {
         let service = "winnow-lightning-key-test-\(UUID().uuidString)", account = "journal"

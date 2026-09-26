@@ -9,6 +9,9 @@ struct LightningChainState: Codable {
     struct Position: Codable { let height: UInt32; let hash: Data }
     struct Observed: Codable { let height: UInt32; let blockHash: Data; let raw: Data }
     var nextHeight: UInt32 = 1
+    // Nil in existing journals means genesis. Once a channel exists this
+    // birthday never advances: newly learned funding may already be mined.
+    var origin: Position?
     var positions: [Position] = []
     var transactions: [Observed] = []
     var rescanRequired = false
@@ -22,19 +25,34 @@ extension LightningEngine {
     }
     func rewindForNewFunding(in next: inout State) {
         // A fundee may learn the outpoint after it has already confirmed.
-        // This bounded regtest implementation rescans from genesis whenever
-        // funding is installed, including all existing monitor watches.
+        // Replay from the durable monitor birthday, including all existing
+        // watches, without requiring headers below Winnow's checkpoint.
         next.scan.rescanRequired = true
+    }
+    public func hasChannels() -> Bool { !state.channels.isEmpty }
+
+    /// Only the verified-chain adapter sets this, before the first channel.
+    /// With no channel history there is nothing to monitor in older blocks.
+    public func startChainScan(height: UInt32, hash: Data) throws {
+        try healthy()
+        guard state.channels.isEmpty, height < UInt32.max, hash.count == 32,
+              height != 0 || hash == state.chain else { throw LightningError.invalidState }
+        var next = state
+        next.scan = LightningChainState(nextHeight: height + 1, origin: .init(height: height, hash: hash))
+        try persist(next)
+        chainHeight = height
     }
     public struct ChainStatus: Sendable {
         public struct Position: Sendable { public let height: UInt32; public let hash: Data }
         public let nextHeight: UInt32, revision: UInt64
         public let rescanRequired: Bool
+        public let origin: Position
         public let positions: [Position]
     }
     public func chainStatus() -> ChainStatus {
         ChainStatus(nextHeight: state.scan.nextHeight, revision: state.revision,
                     rescanRequired: state.scan.rescanRequired,
+                    origin: .init(height: state.scan.origin?.height ?? 0, hash: state.scan.origin?.hash ?? state.chain),
                     positions: state.scan.positions.map { .init(height: $0.height, hash: $0.hash) })
     }
     public func chainWatches() throws -> FilterWatchSet {
@@ -58,7 +76,7 @@ extension LightningEngine {
         guard block.watchRevision == state.revision else { throw LightningChainError.changedWatches }
         if block.height < state.scan.nextHeight { return [] }
         guard block.height == state.scan.nextHeight, block.height < UInt32.max else { throw LightningChainError.restartScan }
-        let previous = state.scan.positions.last?.hash ?? state.chain
+        let previous = state.scan.positions.last?.hash ?? state.scan.origin?.hash ?? state.chain
         guard block.header.previousHash == previous else { throw LightningChainError.recoveryRequired }
         if let body = block.block {
             guard body.header == block.header, body.hasValidMerkleRoot else { throw LightningError.invalidCommitment }
@@ -126,8 +144,10 @@ extension LightningEngine {
     }
     public func blocksDisconnected(to height: UInt32, hash: Data) throws {
         try healthy(); chainIsCurrent = false
+        let origin = chainStatus().origin
         guard height < UInt32.max,
-              height == 0 ? hash == state.chain : state.scan.positions.contains(where: { $0.height == height && $0.hash == hash })
+              height >= origin.height,
+              height == origin.height ? hash == origin.hash : state.scan.positions.contains(where: { $0.height == height && $0.hash == hash })
         else { throw LightningChainError.recoveryRequired }
         var next = state
         next.scan.positions.removeAll { $0.height > height }

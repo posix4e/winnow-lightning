@@ -30,7 +30,7 @@ struct LightningReviewView: View {
             Form {
                 details
                 Section {
-                    Text("Regtest only · test coins have no value").font(.footnote)
+                    Text(controller.networkNotice).font(.footnote)
                     if let error { Text(error).foregroundStyle(.red).accessibilityIdentifier("lightningReviewError") }
                     Button(busy ? "Confirming…" : "Confirm") { confirm() }
                         .disabled(busy).accessibilityIdentifier("lightningConfirm")

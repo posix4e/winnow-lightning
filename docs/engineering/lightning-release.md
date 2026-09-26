@@ -1,10 +1,15 @@
-# Releasing the Swift regtest research app
+# Releasing the Swift Lightning research app
 
 Use `WinnowLightning` / `ResearchRelease` for the existing
 `com.btcswift.lightning` app (App Store Connect app `6815392502`). It uses the
 `Winnow-Lightning-SwiftV2` storage namespace, device-only keys and no iCloud
 entitlement. Keep the older application's files intact. Never import a legacy
 PQLN journal into this engine.
+
+Fresh installations now default to mainnet; existing regtest state is preserved
+and the network picker is enabled. Mainnet uses real bitcoin. Record public-peer
+and monitor-startup evidence separately from funded-channel/payment evidence.
+Do not describe regtest interoperability runs as funded mainnet validation.
 
 ## Evidence before distribution
 
@@ -24,7 +29,7 @@ Keep the screenshots, video, xcresult, manifest and independent receipts.
 
 Physical-device checks may be performed after installation through the existing
 internal TestFlight group. A connected development device is not required before
-uploading this regtest-only beta. Record `device_checks_deferred_to_testflight:
+uploading this internal beta. Record `device_checks_deferred_to_testflight:
 true`, `physical_device: false`, and leave all four physical checks `pending`;
 do not relabel simulator results as physical verification. iPad and large-text
 simulator evidence remain required.

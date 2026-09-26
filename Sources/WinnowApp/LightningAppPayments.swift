@@ -10,15 +10,15 @@ extension LightningAppController {
         let offerText: String
     }
     static func freshID() -> Data { SymmetricKey(size: .bits256).withUnsafeBytes { Data($0) } }
-    static func validateOffer(_ text: String, amountSat: UInt64, maximumFeeSat: UInt64, now: UInt64) throws -> LightningOffer {
+    static func validateOffer(_ text: String, network: BitcoinNetwork, amountSat: UInt64, maximumFeeSat: UInt64, now: UInt64) throws -> LightningOffer {
         guard amountSat > 0, amountSat <= 16_777_215, maximumFeeSat <= 100_000 else { throw LightningError.invalidAmount }
         let offer = try LightningOffer(string: text)
-        try offer.validatePayment(chain: NetworkParams.params(for: .regtest).genesisHash, now: now, amountMsat: amountSat * 1000)
+        try offer.validatePayment(chain: NetworkParams.params(for: network).genesisHash, now: now, amountMsat: amountSat * 1000)
         guard !offer.paths.isEmpty else { throw LightningError.invalidMessage }
         return offer
     }
     func reviewPayment(offer text: String, amountSat: UInt64, maximumFeeSat: UInt64) throws -> PaymentReview {
-        let offer = try Self.validateOffer(text, amountSat: amountSat, maximumFeeSat: maximumFeeSat, now: Self.now)
+        let offer = try Self.validateOffer(text, network: network, amountSat: amountSat, maximumFeeSat: maximumFeeSat, now: Self.now)
         guard let profile, let route = try profile.paymentRoute(),
               let channel = channels.first(where: { $0.peer == profile.peerKey && $0.phase == .ready }) else { throw LightningError.invalidState }
         let request = LightningEngine.OfferPayment(id: Self.freshID(), channelID: channel.id, offer: offer,
@@ -27,10 +27,13 @@ extension LightningAppController {
     }
     func pay(_ review: PaymentReview, model: AppModel) async throws {
         try await model.exclusively(.spending) {
+            try requireNetwork(model)
+            let epoch = generation
             guard let engine, profile == review.profile else { throw AppModel.AppError.sendReviewChanged }
-            try await model.authenticateSensitiveAction(reason: "Approve this regtest Lightning payment and maximum fee")
+            try await model.authenticateSensitiveAction(reason: "Approve this \(network.rawValue) Lightning payment and maximum fee")
             defer { model.keychainAuthentication.revoke() }
             try Task.checkCancellation()
+            try requireNetwork(model, generation: epoch)
             guard profile == review.profile else { throw AppModel.AppError.sendReviewChanged }
             do { _ = try await engine.payOffer(review.request, now: Self.now) }
             catch {
@@ -44,10 +47,13 @@ extension LightningAppController {
     }
     func registerOffer(model: AppModel) async throws {
         try await model.exclusively(.spending) {
+            try requireNetwork(model)
+            let epoch = generation
             guard let engine, let profile, let receive = profile.receive else { throw LightningError.invalidState }
-            try await model.authenticateSensitiveAction(reason: "Create a reusable regtest receive offer")
+            try await model.authenticateSensitiveAction(reason: "Create a reusable \(network.rawValue) receive offer")
             defer { model.keychainAuthentication.revoke() }
             try Task.checkCancellation()
+            try requireNetwork(model, generation: epoch)
             // A stable configuration-derived id survives duplicate taps and
             // relaunches before the server's persistence acknowledgement.
             let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
@@ -64,12 +70,13 @@ extension LightningAppController {
         let feeSat: UInt64
     }
     func reviewClose(_ channel: LightningEngine.Channel, force: Bool, model: AppModel) async throws -> CloseReview {
+        try requireNetwork(model)
         guard let engine, let wallet = model.wallet else { throw LightningError.invalidState }
         if force { return CloseReview(channel: channel, force: true, address: "", destination: Data(), feeSat: 0) }
         model.e2e?.journal("lightning.closeReviewStarted")
         let address = try await wallet.freshReceiveAddress()
         model.e2e?.journal("lightning.closeDestinationPersisted")
-        let destination = try AddressDecoder.scriptPubKey(for: address, network: .regtest)
+        let destination = try AddressDecoder.scriptPubKey(for: address, network: network)
         let rate = await model.resolvedFeeRate(priority: .medium, override: nil)
         let fee = try await engine.estimatedClosingFee(channelID: channel.id, peer: channel.peer,
             destination: destination, feeRateSatPerVByte: rate)
@@ -78,10 +85,13 @@ extension LightningAppController {
     }
     func close(_ review: CloseReview, model: AppModel) async throws {
         try await model.exclusively(.spending) {
+            try requireNetwork(model)
+            let epoch = generation
             guard let engine else { throw LightningError.invalidState }
-            try await model.authenticateSensitiveAction(reason: review.force ? "Force close this regtest channel" : "Close this regtest channel")
+            try await model.authenticateSensitiveAction(reason: review.force ? "Force close this \(network.rawValue) channel" : "Close this \(network.rawValue) channel")
             defer { model.keychainAuthentication.revoke() }
             try Task.checkCancellation()
+            try requireNetwork(model, generation: epoch)
             let channel = review.channel
             if review.force { try await handle([engine.forceClose(channelID: channel.id, peer: channel.peer)], model: model) }
             else {

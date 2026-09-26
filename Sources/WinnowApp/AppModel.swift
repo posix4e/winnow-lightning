@@ -312,7 +312,9 @@ final class AppModel {
     let vaultStore: VaultStore
     let peopleStore: PeopleStore
     let cloudBackups: CloudBackupController
-    let lightning: LightningAppController?
+    private let lightningControllers: [BitcoinNetwork: LightningAppController]
+    var lightning: LightningAppController? { lightningControllers[network] }
+    var supportsLightning: Bool { !lightningControllers.isEmpty }
     private let allowsCloudBackup: Bool
     private var cloudPreparationTask: Task<Void, Never>?
     private var cloudPreparationEpoch = UUID()
@@ -332,7 +334,7 @@ final class AppModel {
     /// an installation that had Tor on: it is about to connect directly for
     /// the first time and is told so. Cleared when the notice is dismissed.
     var torRemovedNotice = false
-    private var changingNetwork = false
+    private(set) var changingNetwork = false
     private var peersToAvoid: Set<PeerEndpoint> = []
     private(set) var refreshingCatalog = false
     private var automaticCatalogTask: Task<Void, Never>?
@@ -417,11 +419,14 @@ final class AppModel {
         self.e2e = e2e
         e2e?.wipeIfRequested()
         let keychainService = e2e?.keychainService ?? (LightningResearch.isResearchApp ? LightningResearch.keychainService : KeychainStore.defaultService)
-        lightning = LightningResearch.enabled(e2e: e2e)
-            ? LightningAppController(keys: storeKeys ?? KeychainStoreKeyVault(service: keychainService, protection: .whenUnlocked)) : nil
+        let lightningKeys = storeKeys ?? KeychainStoreKeyVault(service: keychainService, protection: .whenUnlocked)
+        lightningControllers = LightningResearch.enabled(e2e: e2e)
+            ? Dictionary(uniqueKeysWithValues: BitcoinNetwork.allCases.map {
+                ($0, LightningAppController(network: $0, keys: lightningKeys))
+            }) : [:]
         #if DEBUG
         if e2e?.forcedNetwork == .regtest, let entropy = e2e?.entropy {
-            lightning?.fixtureNodeSecret = Data(CryptoKit.SHA256.hash(data: Data("winnow-lightning-ui".utf8) + entropy))
+            lightningControllers[.regtest]?.fixtureNodeSecret = Data(CryptoKit.SHA256.hash(data: Data("winnow-lightning-ui".utf8) + entropy))
         }
         #endif
         self.keyStore = keyStore ?? KeychainStore(
@@ -445,11 +450,14 @@ final class AppModel {
         }
         // Mainnet is the default (#9). The E2E harness is a custom-signet
         // fixture, so a test launch that names no network still gets signet.
-        let selectedNetwork = (LightningResearch.isResearchApp ? BitcoinNetwork.regtest : e2e?.forcedNetwork)
+        let researchRoot = (try? FileManager.default.url(for: .applicationSupportDirectory,
+            in: .userDomainMask, appropriateFor: nil, create: false))?.appending(path: LightningResearch.storageName)
+        let selectedNetwork = e2e?.forcedNetwork
             ?? BitcoinNetwork(rawValue: defaults.string(forKey: DefaultsKey.network) ?? "")
-            ?? (e2e != nil ? .signet : Self.defaultNetwork)
+            ?? (e2e != nil ? .signet : LightningResearch.isResearchApp
+                ? LightningResearch.initialNetwork(root: researchRoot) : Self.defaultNetwork)
         network = selectedNetwork
-        if e2e?.forcedNetwork != nil {
+        if e2e?.forcedNetwork != nil || LightningResearch.isResearchApp {
             defaults.set(selectedNetwork.rawValue, forKey: DefaultsKey.network)
         }
         Self.migrateLegacyNetworkSettings(defaults: defaults, into: selectedNetwork)
@@ -1828,7 +1836,7 @@ final class AppModel {
     /// both observe an idle gate.
     func exclusively<T>(_ operation: ExclusiveOperation,
                         _ body: () async throws -> T) async throws -> T {
-        guard !operationsInFlight.contains(operation) else {
+        guard !changingNetwork, !operationsInFlight.contains(operation) else {
             throw AppError.spendAlreadyInFlight
         }
         operationsInFlight.insert(operation)
@@ -2542,18 +2550,13 @@ final class AppModel {
     }
 
     func switchNetwork(to newNetwork: BitcoinNetwork) async {
-        cloudBackups.suspend()
         guard e2e?.forcedNetwork == nil || e2e?.forcedNetwork == newNetwork else { return }
-        guard lightning == nil || newNetwork == .regtest else { return }
-        guard newNetwork != network else { return }
+        guard newNetwork != network, !changingNetwork, operationsInFlight.isEmpty else { return }
+        changingNetwork = true
+        defer { changingNetwork = false }
+        cloudBackups.suspend()
         suspendNetworking()
-        syncTask?.cancel()
-        syncTask = nil
-        await stack?.pool.stop()
-        await stack?.broadcaster.shutdown()
-        broadcasterEventTask?.cancel()
-        broadcasterEventTask = nil
-        stack = nil
+        await stopNetworking()
         wallet = nil
         walletID = nil
         walletDescriptor = nil
@@ -2587,6 +2590,7 @@ final class AppModel {
             return
         }
         await refresh()
+        changingNetwork = false
         if isActive { await activate() }
     }
 
@@ -2611,6 +2615,8 @@ final class AppModel {
     }
 
     private func stopNetworking() async {
+        let previousSync = syncTask
+        previousSync?.cancel()
         await lightning?.stop()
         syncTask?.cancel(); syncTask = nil
         phaseTask?.cancel(); phaseTask = nil
@@ -2619,6 +2625,8 @@ final class AppModel {
         stack = nil
         await previous?.pool.stop()
         await previous?.broadcaster.shutdown()
+        await previousSync?.value
+        await lightning?.stop()
     }
 
     /// Rebuilds the stack so changed peer settings take effect.

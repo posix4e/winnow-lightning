@@ -3,7 +3,7 @@ import LightningCore
 import P256K
 import WalletCore
 
-/// Explicit configuration for the research beta's single regtest path.
+/// Explicit configuration for the wallet's selected Lightning network/path.
 /// Imported values are validated before review and sealed when accepted.
 struct LightningProfile: Codable, Equatable, Sendable {
     struct Route: Codable, Equatable, Sendable {
@@ -32,14 +32,15 @@ struct LightningProfile: Codable, Equatable, Sendable {
     var peerKey: Data { Data(hex: peer)! } // validated on every import and load
     var endpoint: String { "\(host):\(port)" }
 
-    static func parse(_ text: String) throws -> Self {
+    static func parse(_ text: String, network: BitcoinNetwork? = nil) throws -> Self {
         guard text.utf8.count <= 32_768 else { throw LightningError.invalidMessage }
         let value = try JSONDecoder().decode(Self.self, from: Data(text.utf8))
-        try value.validate()
+        try value.validate(network: network)
         return value
     }
-    func validate() throws {
-        guard network == "regtest", !name.isEmpty, name.utf8.count <= 80,
+    func validate(network expected: BitcoinNetwork? = nil) throws {
+        guard BitcoinNetwork(rawValue: network) != nil, expected == nil || expected?.rawValue == network,
+              !name.isEmpty, name.utf8.count <= 80,
               !host.isEmpty, host.utf8.count <= 253, port > 0,
               host.unicodeScalars.allSatisfy({ CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-:").contains($0) }),
               let key = Data(hex: peer), key.count == 33 else { throw LightningError.invalidMessage }

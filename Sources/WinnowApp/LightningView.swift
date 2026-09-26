@@ -16,10 +16,10 @@ struct LightningView: View {
         NavigationStack {
             Form {
                 Section {
-                    Text("Regtest research beta").font(.headline)
-                    Text("Test coins only. Keep the app open to verify the chain and recover funds. This beta does not protect channels while the app is stopped.")
+                    Text(controller.networkNotice).font(.headline)
+                    Text("Experimental Lightning. Keep the app open to verify the chain and recover funds. This beta does not protect channels while the app is stopped.")
                         .font(.footnote).foregroundStyle(.secondary)
-                    Text("Older wallet data stays on this device. This version uses a separate Swift regtest wallet.")
+                    Text("Each network has its own wallet and channels. Wallet and channel recovery data stay on this device.")
                         .font(.footnote).foregroundStyle(.secondary)
                     LabeledContent("Connection", value: controller.connection)
                         .accessibilityElement(children: .ignore)
@@ -80,7 +80,7 @@ struct LightningView: View {
                 TextField("Capacity in sats", text: $capacity).keyboardType(.numberPad).accessibilityIdentifier("lightningCapacity")
                 Button("Request a channel") { run {
                     guard let amount = UInt64(capacity) else { throw LightningError.invalidAmount }
-                    try await controller.openChannel(capacitySat: amount)
+                    try await controller.openChannel(capacitySat: amount, model: model)
                 } }.disabled(controller.profile == nil).accessibilityIdentifier("lightningOpen")
             }
             ForEach(controller.channels, id: \.id) { channel in

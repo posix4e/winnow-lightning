@@ -17,6 +17,27 @@ public actor LightningChainDriver {
         guard !syncing else { throw LightningChainError.busy }
         syncing = true
         defer { syncing = false }
+        await engine.chainDisconnected()
+        guard await engine.chainHash() == headers.params.genesisHash else { throw LightningChainError.recoveryRequired }
+        if !(await engine.hasChannels()) {
+            // Use Winnow's ordinary scanner until the first channel exists.
+            // Do not journal every historical block of a newly imported wallet.
+            try await filters.sync(watchScripts: walletScripts, maxBlocks: maxBlocks,
+                                   onReorg: onReorg, onMatch: onMatch)
+            let height = await headers.height
+            // Do not anchor channels to an unconfirmed tip: an ordinary short
+            // reorg must remain replayable. Once channels exist this floor is
+            // durable; the bounded ancestry window handles subsequent forks.
+            let floor = max(await headers.startHeight, height > 144 ? height - 144 : 0)
+            guard let hash = await headers.blockHash(at: floor) else { throw LightningChainError.missingHeader }
+            try await engine.startChainScan(height: floor, hash: hash)
+            let complete = await filters.nextScanHeight > height
+            if complete { try await engine.chainCaughtUp(height: height) }
+            return complete
+        }
+        // A cleared/rebuilt header cache may start below our journal cursor.
+        // Winnow must catch it up before missing ancestry can mean a reorg.
+        try await filters.syncHeaders(onReorg: onReorg)
         try await prepare(onReorg: onReorg)
         let observer = FilterScanObserver(watches: { try await self.engine.chainWatches() }, scanned: { scanned in
             guard await self.headers.blockHash(at: scanned.height) == scanned.header.hash else { throw LightningChainError.restartScan }
@@ -31,9 +52,10 @@ public actor LightningChainDriver {
     private func prepare(onReorg: (@Sendable (UInt32) async throws -> Void)?) async throws {
         await engine.chainDisconnected()
         if await engine.chainStatus().rescanRequired {
-            guard let genesis = await headers.blockHash(at: 0) else { throw LightningChainError.missingHeader }
-            try await onReorg?(0)
-            try await engine.blocksDisconnected(to: 0, hash: genesis)
+            let origin = await engine.chainStatus().origin
+            guard await headers.blockHash(at: origin.height) == origin.hash else { throw LightningChainError.recoveryRequired }
+            try await onReorg?(origin.height)
+            try await engine.blocksDisconnected(to: origin.height, hash: origin.hash)
         }
         try await reconcileAncestry(onReorg: onReorg)
     }
@@ -62,16 +84,17 @@ public actor LightningChainDriver {
         throw LightningChainError.catchUpDidNotConverge
     }
     private func reconcileAncestry(onReorg: (@Sendable (UInt32) async throws -> Void)?) async throws {
-        let positions = await engine.chainStatus().positions
+        let status = await engine.chainStatus(), positions = status.positions
+        guard await headers.blockHash(at: status.origin.height) == status.origin.hash else { throw LightningChainError.recoveryRequired }
         guard let last = positions.last, await headers.blockHash(at: last.height) != last.hash else { return }
         for position in positions.reversed() where await headers.blockHash(at: position.height) == position.hash {
             try await onReorg?(position.height)
             try await engine.blocksDisconnected(to: position.height, hash: position.hash)
             return
         }
-        if positions.first?.height == 1, let genesis = await headers.blockHash(at: 0) {
-            try await onReorg?(0)
-            try await engine.blocksDisconnected(to: 0, hash: genesis)
+        if positions.first?.height == status.origin.height + 1 {
+            try await onReorg?(status.origin.height)
+            try await engine.blocksDisconnected(to: status.origin.height, hash: status.origin.hash)
             return
         }
         throw LightningChainError.recoveryRequired

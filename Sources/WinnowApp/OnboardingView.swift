@@ -20,7 +20,7 @@ struct OnboardingView: View {
                 Section {
                     Text(model.lightning == nil
                         ? "Your bitcoin, on your phone. Winnow connects directly to Bitcoin and automatically backs up your wallet with iCloud when available."
-                        : "Swift Lightning regtest beta. Test coins only. Your wallet and channel recovery data stay on this device; iCloud backup is unavailable.")
+                        : "Winnow connects directly to Bitcoin. Mainnet uses real bitcoin; signet and regtest use test coins. This Lightning beta keeps wallet and channel recovery data on this device; iCloud backup is unavailable.")
                         .font(.subheadline).foregroundStyle(.secondary)
                 }
                 Section {
@@ -58,8 +58,11 @@ struct OnboardingView: View {
                         )) {
                             Text("Mainnet").tag(BitcoinNetwork.mainnet)
                             Text("Signet").tag(BitcoinNetwork.signet)
+                            if model.supportsLightning || model.network == .regtest {
+                                Text("Regtest").tag(BitcoinNetwork.regtest)
+                            }
                         }
-                        .disabled(model.e2e?.forcedNetwork != nil || busy)
+                        .disabled(model.e2e?.forcedNetwork != nil || busy || model.changingNetwork)
                         .accessibilityIdentifier("onboardingNetworkPicker")
                     } footer: {
                         Text("Each network has its own wallet. Signet uses test coins with no value.")
