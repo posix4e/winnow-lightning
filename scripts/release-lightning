@@ -117,7 +117,7 @@ def main():
         assert approved['attributes']['appEncryptionDeclarationState'] == 'APPROVED'
         owner = asc('GET', '/appEncryptionDeclarations/' + declaration + '/app')['data']
         assert owner['id'] == APP_ID, 'encryption declaration belongs to another app'
-        declaration_code = approved['attributes']['code']
+        declaration_code = approved['attributes']['codeValue']
         assert isinstance(declaration_code, str) and declaration_code.strip(), 'approved declaration has no export code'
         environment['LIGHTNING_ENCRYPTION_COMPLIANCE_CODE'] = declaration_code
     destination = args.output.resolve()
