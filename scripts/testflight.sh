@@ -195,7 +195,7 @@ step_internal() {
     local group payload
     group=$(asc GET "/apps/$(app_id)/betaGroups?limit=200" | python3 -c '
 import json, sys
-groups = [g for g in json.load(sys.stdin)["data"] if g["attributes"]["name"] == "PQLNRegtestInternal" and g["attributes"]["isInternalGroup"]]
+groups = [g for g in json.load(sys.stdin)["data"] if g["attributes"]["name"] == "PQLN Regtest Internal" and g["attributes"]["isInternalGroup"]]
 assert len(groups) == 1, "expected the existing research internal group"
 print(groups[0]["id"])
 ')

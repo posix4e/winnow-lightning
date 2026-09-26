@@ -148,8 +148,8 @@ exact receive offer.
 Exact-source green CI and reviewed export compliance remain required before
 internal tester distribution. Physical-device authentication/file protection may
 remain explicitly pending for testing through TestFlight. Upload-only mode
-keeps the conservative encryption plist value while review is pending and stops
-before assigning testers. The signed archive,
+omits the encryption declaration keys to trigger Apple’s questionnaire while
+review is pending and stops before assigning testers. The signed archive,
 export, upload, processing and existing internal-group readback are implemented
 in `scripts/release-lightning`; see `lightning-release.md`. A successful host or
 simulator run does not establish TestFlight availability.

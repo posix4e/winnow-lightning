@@ -23,8 +23,15 @@ def verify(app, distribution=False):
     if research:
         assert not any('icloud' in key.lower() or 'ubiquity' in key.lower() for key in entitlements), 'research journal must not use iCloud'
         reviewed = os.environ.get('LIGHTNING_NONEXEMPT_ENCRYPTION')
-        assert reviewed in {'YES', 'NO'}, 'research encryption determination is missing'
-        assert info.get('ITSAppUsesNonExemptEncryption') is (reviewed == 'YES'), 'research encryption differs from its reviewed determination'
+        assert reviewed in {'YES', 'NO', 'PENDING'}, 'research encryption determination is missing'
+        if reviewed == 'PENDING':
+            assert 'ITSAppUsesNonExemptEncryption' not in info, 'pending encryption must use the Apple questionnaire'
+            assert 'ITSEncryptionExportComplianceCode' not in info, 'pending encryption must not claim an approved code'
+        else:
+            assert info.get('ITSAppUsesNonExemptEncryption') is (reviewed == 'YES'), 'research encryption differs from its reviewed determination'
+            if reviewed == 'YES':
+                code = os.environ.get('LIGHTNING_ENCRYPTION_COMPLIANCE_CODE')
+                assert code and info.get('ITSEncryptionExportComplianceCode') == code, 'research export code must match the approved declaration'
     else:
         assert entitlements['com.apple.developer.icloud-container-identifiers'] == ['iCloud.com.btcswift.app']
         assert 'CloudKit' in entitlements['com.apple.developer.icloud-services']

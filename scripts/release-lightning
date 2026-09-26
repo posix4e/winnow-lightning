@@ -56,6 +56,15 @@ def check_evidence(path, source, *, allow_pending_encryption=False):
     return evidence
 
 
+def defer_encryption_questionnaire(project):
+    """Leave declaration keys absent so Apple asks its upload questionnaire."""
+    original = project.read_text()
+    updated, count = re.subn(r'^\s*INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = [^;]+;\n', '', original, flags=re.MULTILINE)
+    assert count, 'generated project has no encryption setting to defer'
+    assert 'INFOPLIST_KEY_ITSEncryptionExportComplianceCode' not in updated, 'pending review must not supply a declaration code'
+    project.write_text(updated)
+
+
 def main():
     global ROOT
     parser = argparse.ArgumentParser()
@@ -85,8 +94,7 @@ def main():
                        TESTFLIGHT_BUILD_NUMBER=args.build, TESTFLIGHT_WHATS_NEW_FILE=str(DRIVER_ROOT / 'docs/lightning-what-to-test.txt'))
     environment.pop('TESTFLIGHT_BUILD_ID', None)
     encryption = evidence['encryption']
-    nonexempt = encryption['mode'] != 'exempt'
-    environment['LIGHTNING_NONEXEMPT_ENCRYPTION'] = 'YES' if nonexempt else 'NO'
+    environment['LIGHTNING_NONEXEMPT_ENCRYPTION'] = {'pending': 'PENDING', 'declaration': 'YES', 'exempt': 'NO'}[encryption['mode']]
     key_id, issuer = environment['ASC_KEY_ID'], environment['ASC_ISSUER_ID']
     key = Path(environment.get('ASC_KEY_PATH', str(Path.home() / f'.appstoreconnect/private_keys/AuthKey_{key_id}.p8'))).resolve()
     environment['ASC_KEY_PATH'] = str(key)
@@ -103,11 +111,15 @@ def main():
     app = asc('GET', '/apps/' + APP_ID)['data']
     assert app['attributes']['bundleId'] == BUNDLE
     declaration = encryption.get('declaration_id')
+    declaration_code = None
     if encryption['mode'] == 'declaration':
         approved = asc('GET', '/appEncryptionDeclarations/' + declaration)['data']
         assert approved['attributes']['appEncryptionDeclarationState'] == 'APPROVED'
         owner = asc('GET', '/appEncryptionDeclarations/' + declaration + '/app')['data']
         assert owner['id'] == APP_ID, 'encryption declaration belongs to another app'
+        declaration_code = approved['attributes']['code']
+        assert isinstance(declaration_code, str) and declaration_code.strip(), 'approved declaration has no export code'
+        environment['LIGHTNING_ENCRYPTION_COMPLIANCE_CODE'] = declaration_code
     destination = args.output.resolve()
     assert not any(destination.is_relative_to(path) for path in (ROOT, DRIVER_ROOT)), 'release output must be outside both clean checkouts'
     destination.mkdir(parents=True, exist_ok=False)
@@ -117,6 +129,13 @@ def main():
             subprocess.run(command, cwd=ROOT, env=environment, stdout=log, stderr=subprocess.STDOUT, check=True)
 
     run('project', ['xcodegen', 'generate'])
+    encryption_settings = []
+    if encryption['mode'] == 'pending':
+        defer_encryption_questionnaire(ROOT / 'WinnowApp.xcodeproj/project.pbxproj')
+    else:
+        encryption_settings.append('INFOPLIST_KEY_ITSAppUsesNonExemptEncryption=' + environment['LIGHTNING_NONEXEMPT_ENCRYPTION'])
+    if declaration_code:
+        encryption_settings.append('INFOPLIST_KEY_ITSEncryptionExportComplianceCode=' + declaration_code)
     archive = destination / 'WinnowLightning.xcarchive'
     derived = destination / 'derived-data'
     signing = ['-allowProvisioningUpdates', '-authenticationKeyPath', str(key), '-authenticationKeyID', key_id,
@@ -124,9 +143,9 @@ def main():
     run('archive', ['xcodebuild', '-project', 'WinnowApp.xcodeproj', '-scheme', 'WinnowLightning', '-configuration', 'ResearchRelease',
         '-destination', 'generic/platform=iOS', '-archivePath', str(archive), '-derivedDataPath', str(derived),
         'MARKETING_VERSION=' + args.version, 'CURRENT_PROJECT_VERSION=' + args.build,
-        'INFOPLIST_KEY_ITSAppUsesNonExemptEncryption=' + environment['LIGHTNING_NONEXEMPT_ENCRYPTION'], *signing, 'archive'])
+        *encryption_settings, *signing, 'archive'])
     application = archive / 'Products/Applications/WinnowApp.app'
-    run('archive-policy', ['scripts/verify-signed-archive', str(application)])
+    run('archive-policy', [str(DRIVER_ROOT / 'scripts/verify-signed-archive'), str(application)])
     run('release-exclusion', ['scripts/verify-release-e2e-exclusion', str(application)])
     run('dependencies', ['scripts/check-dependencies', '--xcode', str(derived)])
     options = destination / 'ExportOptions.plist'
@@ -136,7 +155,7 @@ def main():
     run('export', ['xcodebuild', '-exportArchive', '-archivePath', str(archive), '-exportOptionsPlist', str(options),
                    '-exportPath', str(exported), *signing])
     ipa = exported / 'WinnowApp.ipa'
-    run('ipa-policy', ['scripts/verify-exported-ipa', str(ipa)])
+    run('ipa-policy', [str(DRIVER_ROOT / 'scripts/verify-exported-ipa'), str(ipa)])
     run('provenance', ['scripts/generate-supply-chain-metadata', '--output-dir', str(destination / 'supply-chain'),
                       '--subject', str(ipa), '--subject-name', ipa.name,
                       '--builder-id', f'https://github.com/{REPOSITORY}/blob/{driver_source}/scripts/release-lightning'])
@@ -178,8 +197,8 @@ def main():
         asc('PATCH', '/builds/' + build + '/relationships/appEncryptionDeclaration',
             {'data': {'type': 'appEncryptionDeclarations', 'id': declaration}})
         assert asc('GET', '/builds/' + build + '/appEncryptionDeclaration')['data']['id'] == declaration
-    run('internal', ['scripts/testflight.sh', 'internal'])
-    receipt.update(available_to_internal_testers=True, internal_group='PQLNRegtestInternal')
+    run('internal', [str(DRIVER_ROOT / 'scripts/testflight.sh'), 'internal'])
+    receipt.update(available_to_internal_testers=True, internal_group='PQLN Regtest Internal')
     (destination / 'release.json').write_text(json.dumps(receipt, indent=2) + '\n')
     print('Verified build processed and available to the existing Winnow Lightning internal testers.')
 

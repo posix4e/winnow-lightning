@@ -55,8 +55,11 @@ to this app. Review applicable reporting and destination requirements as part
 of that determination. This script does not change country availability or
 create declarations from assumptions about particular countries. An upload may
 precede the determination: `--upload-only` accepts `encryption.mode: pending`
-with a retained, hashed inventory, keeps the encryption plist value YES, verifies
-upload and processing, and stops before tester assignment. It never claims an
+with a retained, hashed inventory, omits the encryption declaration keys from
+the generated release project to trigger Apple’s questionnaire, verifies upload
+and processing, and stops before tester assignment. The tracked app source and
+its default remain unchanged. Setting YES without an approved export code is
+rejected by Apple with error 90592. It never claims an
 exemption or that a processed build is available to testers. Distribution still
 requires the reviewed determination or approved declaration.
 
@@ -94,7 +97,8 @@ to that file, contained in its directory, and SHA-256 verified. For example
 For a reviewed exemption, use `mode: exempt` and omit `declaration_id`. The
 release script sets and verifies the archive's encryption value accordingly.
 For non-exempt encryption it verifies Apple's APPROVED state and app ownership,
-then links and reads back the declaration on the exact processed build.
+includes its approved export code in the signed app, then links and reads back
+the declaration on the exact processed build.
 
 Set `ASC_KEY_ID`, `ASC_ISSUER_ID`, and optionally `ASC_KEY_PATH` using existing
 release credentials. Do not commit or include private keys in evidence. Choose a
@@ -115,7 +119,7 @@ the inventory in the hashed artifact list.
 It verifies bundle/team/version/build, ARM64, no iCloud or Debug hooks, dependency
 policy and supply-chain metadata; uploads the inspected package; waits for VALID
 processing; updates What to Test; and verifies membership and tester availability
-in the existing `PQLNRegtestInternal` group. It never creates a replacement app or
+in the existing `PQLN Regtest Internal` group. It never creates a replacement app or
 public beta group. `release.json` records upload, processing and verified internal
 tester availability separately. Distribution is complete only when
 `available_to_internal_testers` is true after the final readbacks.

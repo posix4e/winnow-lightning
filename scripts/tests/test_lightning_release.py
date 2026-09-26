@@ -60,6 +60,18 @@ class LightningReleaseTests(unittest.TestCase):
         with self.assertRaises(AssertionError):
             self.verify(self.evidence, allow_pending_encryption=True)
 
+    def test_pending_upload_omits_both_declaration_keys_from_generated_project(self):
+        project = self.root / 'project.pbxproj'
+        project.write_text('settings = {\n\tINFOPLIST_KEY_ITSAppUsesNonExemptEncryption = YES;\n\tOTHER_SETTING = YES;\n};\n')
+        RELEASE['defer_encryption_questionnaire'](project)
+        self.assertNotIn('ITSAppUsesNonExemptEncryption', project.read_text())
+        self.assertIn('OTHER_SETTING = YES;', project.read_text())
+        with self.assertRaises(AssertionError):
+            RELEASE['defer_encryption_questionnaire'](project)
+        project.write_text('INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = YES;\nINFOPLIST_KEY_ITSEncryptionExportComplianceCode = unreviewed;\n')
+        with self.assertRaises(AssertionError):
+            RELEASE['defer_encryption_questionnaire'](project)
+
     def test_reviewed_exemption_and_declaration_are_distinct(self):
         self.verify(self.evidence)
         self.evidence['encryption'].update(mode='declaration', declaration_id='approved-id')
