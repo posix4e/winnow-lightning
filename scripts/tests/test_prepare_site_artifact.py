@@ -37,7 +37,7 @@ class SiteArtifactTests(unittest.TestCase):
         calls = "\n".join(f'        Screenshots.capture(app, "{Path(name).stem}", testCase: self)'
                           for name in self.names)
         (self.root / "UITests/WinnowAppUITests.swift").write_text(
-            f"    func {site.TEST}() {{\n{calls}\n    }}\n")
+            f"final class WinnowAppUITests: XCTestCase {{\n    func {site.TEST}() {{\n{calls}\n    }}\n}}\n")
         (self.docs / "journeys.json").write_text(json.dumps([
             {"id": "setup", "section": "everyday", "title": "Start", "description": "Create a wallet.",
              "tests": [site.TEST], "journey": ["Create a wallet."]}]))
@@ -96,6 +96,13 @@ class SiteArtifactTests(unittest.TestCase):
         source.write_text(source.read_text().replace(CHECKPOINTS[0], "changed-capture"))
         with self.assertRaisesRegex(SystemExit, "does not describe this focused journey"):
             self.validate_cli()
+
+    def test_separate_lightning_journey_does_not_change_website_checkpoints(self):
+        (self.root / "UITests/LightningAppUITests.swift").write_text(
+            'final class LightningAppUITests: XCTestCase {\n'
+            '    Screenshots.capture(app, "lightning-01-reusable-offer", testCase: self)\n}\n')
+        self.assertEqual(site.captures(self.root), self.names)
+        self.assertIn("Validated cached journey media", self.validate_cli())
 
     def test_validate_media_cli_rejects_missing_page_fields(self):
         fields = [("source_sha",), ("run_url",), ("test_seconds",), ("video",), ("screenshots",),

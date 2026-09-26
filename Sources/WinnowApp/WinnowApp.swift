@@ -18,7 +18,7 @@ struct WinnowApp: App {
                 case .ready:
                     // Beginner mode is one screen; Advanced mode is the
                     // three tabs. The switch lives in each one's toolbar.
-                    if model.advancedMode {
+                    if model.advancedMode || model.lightning != nil {
                         MainTabView()
                     } else {
                         BeginnerHomeView()
@@ -169,8 +169,9 @@ final class PrivacyShield {
 
 /// Advanced mode: Wallet, Send, and Settings.
 struct MainTabView: View {
+    @Environment(AppModel.self) private var model
     private enum Tab: String, Hashable {
-        case wallet, send, settings
+        case wallet, send, settings, lightning
     }
 
     @State private var selection: Tab
@@ -184,6 +185,12 @@ struct MainTabView: View {
 
     var body: some View {
         TabView(selection: $selection) {
+            if let lightning = model.lightning {
+                LightningView(controller: lightning)
+                    .id(model.network)
+                    .tabItem { Label("Lightning", systemImage: "bolt.circle") }
+                    .tag(Tab.lightning)
+            }
             HomeView(
                 sendFrom: { accountID in
                     sendAccountID = accountID

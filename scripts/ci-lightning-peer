@@ -1,0 +1,330 @@
+#!/usr/bin/env python3
+"""Independent stock Core Lightning opening and enforceability check.
+
+The reference daemon is unmodified v26.06.8. The Swift executable talks real
+BOLT 8 TCP and persists its own state. Bitcoin Core signs only wallet funding;
+Core Lightning supplies the other channel party's signatures.
+"""
+import json
+import hashlib
+import argparse
+import os
+from pathlib import Path
+import selectors
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+
+ROOT = Path(__file__).resolve().parent.parent
+CLN_COMMIT = '6f741afc395c66d200429ea477d29df4d974748d'
+
+
+def port():
+    with socket.socket() as sock:
+        sock.bind(('127.0.0.1', 0))
+        return sock.getsockname()[1]
+
+
+def bigsize(number):
+    if number < 253:
+        return bytes([number])
+    if number <= 65535:
+        return b'\xfd' + number.to_bytes(2, 'big')
+    raise ValueError('Fixture payload too large')
+
+
+def check_onions(ln, swift, evidence):
+    payloads = [bytes.fromhex('0100'), bytes.fromhex('03022a2b'), b'\x05' + bigsize(256) + b'\x2d' * 256]
+    hops = [{'pubkey': swift.initialization['node_id'], 'payload': (bigsize(len(payload)) + payload).hex()} for payload in payloads]
+    payment_hash = '63' * 32
+    reference = ln('createonion', json.dumps(hops), payment_hash, '41' * 32)
+    onion = reference['onion']
+    for index, payload in enumerate(payloads):
+        peeled = swift.call('peel', onion=onion, hash=payment_hash)
+        assert peeled['payload'] == payload.hex()
+        assert peeled['shared_secret'] == reference['shared_secrets'][index]
+        onion = peeled['next']
+    assert onion == ''
+    (evidence / 'cln-onion-vector.json').write_text(json.dumps({
+        'source': 'Core Lightning v26.06.8 createonion RPC', 'commit': CLN_COMMIT,
+        'private_key': '01' * 32, 'associated_data': payment_hash,
+        'payloads': [payload.hex() for payload in payloads], **reference}, indent=2) + '\n')
+
+
+def settle(swift, payment_id):
+    for _ in range(30):
+        status = swift.call('payment', id=payment_id)
+        if status['phase'] == 'settled':
+            assert hashlib.sha256(bytes.fromhex(status['preimage'])).hexdigest() == status['hash']
+            return status
+        assert status['phase'] != 'failed', status
+        message = swift.call('receive')
+        if message.get('type') in ('1', '17'):
+            raise AssertionError(f'Peer rejected payment: {message}')
+    raise AssertionError('Payment did not irrevocably settle')
+
+
+def check_payments(ln, swift, channel, height):
+    invoice = ln('invoice', '5000000msat', 'swift-outbound', 'Swift independent interop')
+    decoded = ln('decode', invoice['bolt11'])
+    request = dict(id='51' * 32, channel=channel['channel_id'], hash=decoded['payment_hash'],
+                   secret=decoded['payment_secret'], amount='5000000', expiry=str(height + 144))
+    first = swift.call('pay', **request)
+    assert swift.call('pay', **request) == first
+    outgoing = settle(swift, request['id'])
+    paid = ln('listinvoices', 'swift-outbound')['invoices'][0]
+    assert paid['status'] == 'paid' and paid['amount_received_msat'] == 5_000_000
+    assert paid['payment_hash'] == outgoing['hash']
+    incoming = swift.call('invoice', id='52' * 32, amount='2000000', expiry=str(height + 288))
+    route = [{'id': swift.initialization['node_id'], 'channel': channel['short_channel_id'], 'amount_msat': 2_000_000, 'delay': 144}]
+    ln('-k', 'sendpay', 'route=' + json.dumps(route), 'payment_hash=' + incoming['hash'], 'payment_secret=' + incoming['secret'])
+    received = settle(swift, incoming['id'])
+    completed = ln('waitsendpay', incoming['hash'])
+    assert completed['status'] == 'complete' and completed['amount_msat'] == 2_000_000
+    assert completed['amount_sent_msat'] == 2_000_000 and completed['payment_preimage'] == received['preimage']
+    return {'swift_to_cln': outgoing, 'cln_to_swift': received}
+
+
+def wait_for(check, timeout=45):
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            value = check()
+            if value:
+                return value
+        except (subprocess.CalledProcessError, FileNotFoundError, ConnectionRefusedError):
+            pass
+        if time.monotonic() > deadline:
+            raise TimeoutError('Independent peer did not reach the expected state')
+        time.sleep(0.2)
+
+
+def stop(process):
+    if process and process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+
+
+class SwiftPeer:
+    def __init__(self, arguments, log):
+        self.process = subprocess.Popen(arguments, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log)
+        self.selector = selectors.DefaultSelector()
+        self.selector.register(self.process.stdout, selectors.EVENT_READ)
+        self.initialization = self.read()
+
+    def read(self):
+        if not self.selector.select(timeout=60):
+            raise TimeoutError('Swift peer did not complete a protocol operation')
+        line = self.process.stdout.readline()
+        if not line:
+            raise RuntimeError('Swift peer exited; inspect swift-peer.log')
+        return json.loads(line)
+
+    def call(self, command, **kwargs):
+        self.process.stdin.write(json.dumps(dict(command=command, **kwargs)).encode() + b'\n')
+        self.process.stdin.flush()
+        return self.read()
+
+    def receive(self, expected):
+        for _ in range(30):
+            message = self.call('receive')
+            if message.get('type') in ('1', '17'):
+                raise AssertionError(f'Core Lightning rejected the protocol: {message}')
+            if message.get('type') == str(expected):
+                return message
+        raise AssertionError(f'No message {expected} from independent peer')
+
+    def close(self):
+        stop(self.process)
+        self.selector.close()
+
+
+class ReferenceStartupFailure(RuntimeError):
+    """Stock CLN lost its channel subdaemon before funding_signed."""
+
+
+def funding_signature(swift, log):
+    try:
+        return swift.receive(35)
+    except TimeoutError as error:
+        transcript = log.read_text()
+        # CLN has already checked our commitment and handed opening to channeld.
+        # Matches the macOS startup failures reported upstream (#5808/#9323).
+        # Classify only this exact pre-broadcast reference-process failure.
+        if (sys.platform == 'darwin'
+                and 'Got opening_fundee_finish_response' in transcript
+                and 'Peer transient failure in CHANNELD_AWAITING_LOCKIN: channeld: Owning subdaemon channeld died (0)' in transcript
+                and 'peer_out WIRE_FUNDING_SIGNED' not in transcript
+                and 'peer_out WIRE_ERROR' not in transcript
+                and '**BROKEN**' not in transcript):
+            raise ReferenceStartupFailure(f'Stock CLN exited before funding_signed; see {log}') from error
+        raise
+
+
+def run_peer(close_mode, evidence):
+    cln = Path(os.environ['WINNOW_CLN_DIR']).resolve()
+    bitcoin = Path(os.environ['WINNOW_BITCOIN_DIR']).resolve()
+    commit = subprocess.check_output(['git', '-C', str(cln), 'rev-parse', 'HEAD'], text=True).strip()
+    if commit != CLN_COMMIT:
+        raise AssertionError(f'Expected Core Lightning {CLN_COMMIT}, got {commit}')
+    subprocess.run(['git', '-C', str(cln), 'diff', '--exit-code', 'HEAD', '--'], check=True)
+    version = subprocess.check_output([str(cln / 'lightningd/lightningd'), '--version'], text=True).strip()
+    if version != 'v26.06.8':
+        raise AssertionError(f'Unexpected reference peer version: {version}')
+    subprocess.run(['swift', 'build', '--product', 'winnow-lightning-peer-fixture'], cwd=ROOT, check=True)
+    products = subprocess.check_output(['swift', 'build', '--show-bin-path'], cwd=ROOT, text=True).strip()
+    executable = str(Path(products) / 'winnow-lightning-peer-fixture')
+    evidence.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='winnow-peer-') as temporary:
+        root = Path(temporary)
+        core_dir, cln_dir = root / 'bitcoin', root / 'cln'
+        core_dir.mkdir(); cln_dir.mkdir()
+        rpc_port, peer_port = port(), port()
+        base = ['-regtest', f'-datadir={core_dir}', f'-rpcport={rpc_port}']
+
+        def rpc(method, *args):
+            value = subprocess.check_output([str(bitcoin / 'bitcoin-cli'), *base, method, *map(str, args)], text=True, stderr=subprocess.PIPE, timeout=20).strip()
+            try:
+                return json.loads(value)
+            except json.JSONDecodeError:
+                return value
+
+        def ln(method, *args):
+            value = subprocess.check_output([str(cln / 'cli/lightning-cli'), f'--lightning-dir={cln_dir}', '--network=regtest',
+                                             method, *map(str, args)], text=True, stderr=subprocess.PIPE, timeout=20)
+            return json.loads(value)
+
+        node = daemon = swift = None
+        with open(evidence / 'bitcoin.log', 'w') as core_log, open(evidence / 'cln.log', 'w') as cln_log, open(evidence / 'swift-peer.log', 'w') as swift_log:
+            try:
+                node = subprocess.Popen([str(bitcoin / 'bitcoind'), *base, '-server=1', '-listen=0', '-connect=0',
+                    '-dnsseed=0', '-discover=0', '-fallbackfee=0.00002', '-rpcbind=127.0.0.1', '-rpcallowip=127.0.0.1'], stdout=core_log, stderr=core_log)
+                wait_for(lambda: rpc('getblockchaininfo'))
+                rpc('createwallet', 'fixture')
+                address = rpc('getnewaddress')
+                rpc('generatetoaddress', 101, address)
+                daemon = subprocess.Popen([str(cln / 'lightningd/lightningd'), f'--lightning-dir={cln_dir}', '--network=regtest',
+                    f'--addr=127.0.0.1:{peer_port}', '--autolisten=false', '--announce-addr-discovered=false',
+                    f'--bitcoin-cli={bitcoin / "bitcoin-cli"}', f'--bitcoin-datadir={core_dir}', f'--bitcoin-rpcport={rpc_port}',
+                    '--log-level=debug'], stdout=cln_log, stderr=cln_log)
+                info = wait_for(lambda: (value if value.get('blockheight') == rpc('getblockcount') else None) if (value := ln('getinfo')) else None)
+                chain = bytes.fromhex(rpc('getblockhash', 0))[::-1].hex()
+                swift = SwiftPeer([executable, '127.0.0.1', str(peer_port), info['id'], chain, str(root / 'swift-journal')], swift_log)
+                check_onions(ln, swift, evidence)
+                opened = swift.call('open')
+                accepted = swift.receive(33)
+                assert accepted['id'] == opened['temporary_id']
+                destination = rpc('decodescript', accepted['script'])['address']
+                unsigned = rpc('createrawtransaction', '[]', json.dumps({destination: 0.001}))
+                funded = rpc('fundrawtransaction', unsigned, json.dumps({'fee_rate': 2}))['hex']
+                signed = rpc('signrawtransactionwithwallet', funded)
+                assert signed['complete']
+                raw = signed['hex']
+                decoded = rpc('decoderawtransaction', raw)
+                output = next(out['n'] for out in decoded['vout'] if out['scriptPubKey']['hex'] == accepted['script'])
+                swift.call('fund', id=accepted['id'], transaction=raw, output=str(output))
+                authorized = funding_signature(swift, evidence / 'cln.log')
+                assert authorized['event'] == 'broadcast_funding' and authorized['transaction'] == raw
+                rpc('sendrawtransaction', raw)
+                rpc('generatetoaddress', 6, address)
+                swift.call('confirm', id=authorized['id'], transaction=raw)
+                swift.receive(36)
+                snapshot = swift.call('snapshot')
+                assert snapshot['phase'] == 'ready'
+                recovery_destination = rpc('getaddressinfo', address)['scriptPubKey']
+                swift.call('recovery', id=snapshot['id'], destination=recovery_destination)
+                channels = wait_for(lambda: [channel for channel in ln('listpeerchannels')['channels'] if channel['state'] == 'CHANNELD_NORMAL'])
+                assert len(channels) == 1
+                remote = channels[0]
+                assert remote['peer_id'] == swift.initialization['node_id']
+                assert remote['total_msat'] == 100_000_000 and remote['to_us_msat'] == 0
+                assert remote['channel_type']['bits'] == [12]
+                payments = check_payments(ln, swift, remote, rpc('getblockcount'))
+                remote = ln('listpeerchannels')['channels'][0]
+                assert remote['to_us_msat'] == 3_000_000
+                snapshot = swift.call('snapshot')
+                previous_commitment = snapshot['commitment']
+                swift.close()
+                wait_for(lambda: not ln('listpeers')['peers'][0]['connected'])
+                swift = SwiftPeer([executable, '127.0.0.1', str(peer_port), info['id'], chain, str(root / 'swift-journal')], swift_log)
+                swift.call('snapshot')  # Flush only channel_reestablish first.
+                swift.receive(136)
+                snapshot = swift.call('snapshot')
+                assert snapshot['commitment'] == previous_commitment
+                assert swift.call('payment', id='51' * 32) == payments['swift_to_cln']
+                assert swift.call('payment', id='52' * 32) == payments['cln_to_swift']
+                closing = None
+                if close_mode == 'force':
+                    closing = swift.call('force_close', id=snapshot['id'])['transaction']
+                if close_mode == 'cooperative':
+                    destination = rpc('getaddressinfo', address)['scriptPubKey']
+                    swift.call('close', id=snapshot['id'], destination=destination)
+                    swift.receive(38)
+                    closing = swift.receive(39)['transaction']
+                    outputs = rpc('decoderawtransaction', closing)['vout']
+                    returned = next(output for output in outputs if output['scriptPubKey']['hex'] == destination)
+                    assert 0.00096276 <= returned['value'] <= 0.00097
+                # An independent signer and an independent consensus engine must
+                # both accept our locally enforceable commitment.
+                checked = rpc('testmempoolaccept', json.dumps([closing]))[0]
+                if not checked['allowed']:
+                    assert close_mode == 'cooperative' and checked.get('reject-reason') == 'txn-already-in-mempool', checked
+                commitment_id = rpc('sendrawtransaction', closing)
+                rpc('generatetoaddress', 1, address)
+                receipt = {'result': 'passed', 'scope': 'Swift-funded static-remotekey opening, bidirectional direct payments, process restart/reestablishment and close',
+                    'close_mode': close_mode,
+                    'core_lightning_version': version, 'core_lightning_commit': commit,
+                    'bitcoin_core_version': rpc('getnetworkinfo')['version'],
+                    'swift_source': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
+                    'source_dirty': bool(subprocess.check_output(['git', 'status', '--porcelain'], cwd=ROOT, text=True).strip()),
+                    'channel_id': snapshot['id'], 'funding_txid': decoded['txid'], 'commitment_txid': commitment_id,
+                    'capacity_sat': 100_000, 'peer_to_us_msat': remote['to_us_msat'], 'payments': payments}
+                (evidence / 'opening-receipt.json').write_text(json.dumps(receipt, indent=2) + '\n')
+                print(json.dumps(receipt, sort_keys=True))
+            finally:
+                if swift:
+                    swift.close()
+                stop(daemon); stop(node)
+
+
+def check_peer(close_mode, evidence):
+    evidence.mkdir(parents=True, exist_ok=False)
+    attempts = []
+    for number in (1, 2):
+        attempt = evidence / f'attempt-{number}'
+        # Retain every failed fixture; never retry inside an existing channel.
+        attempt.mkdir(exist_ok=False)
+        try:
+            run_peer(close_mode, attempt)
+        except ReferenceStartupFailure as error:
+            attempts.append(dict(attempt=number, result='reference-startup-failure', error=str(error)))
+            (evidence / 'attempts.json').write_text(json.dumps(attempts, indent=2) + '\n')
+            if number == 2:
+                raise
+            print(f'{error}. Retrying once with fresh, unfunded test nodes.', flush=True)
+        else:
+            attempts.append(dict(attempt=number, result='passed'))
+            (evidence / 'attempts.json').write_text(json.dumps(attempts, indent=2) + '\n')
+            receipt = json.loads((attempt / 'opening-receipt.json').read_text())
+            receipt['attempts'] = attempts
+            (evidence / 'opening-receipt.json').write_text(json.dumps(receipt, indent=2) + '\n')
+            return
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--close', choices=('force', 'cooperative'), default='force')
+    close_mode = parser.parse_args().close
+    evidence = Path(os.environ.get('WINNOW_LIGHTNING_RESULTS', str(ROOT / '.build/lightning-peer-results'))).resolve() / close_mode
+    check_peer(close_mode, evidence)
+
+
+if __name__ == '__main__':
+    main()

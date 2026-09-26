@@ -12,7 +12,9 @@ SETTERS=(.github/workflows scripts)
 # Optional overrides a developer may set by hand; never a gate.
 ALLOW_UNSET="WINNOW_BITCOIN_CLI"
 # Conditional skips that are deliberate and documented.
-ALLOW_XCTSKIP="AppTests/E2EModeTests.swift"
+# Lightning's file-protection assertion uses the same measured OS capability
+# as WalletCore below. It remains a mandatory physical-device release check.
+ALLOW_XCTSKIP="AppTests/E2EModeTests.swift AppTests/LightningAppTests.swift"
 # Retired gates: node integration now runs through the one UI journey.
 DENY='WINNOW_DIFF|WINNOW_SIGNET|WINNOW_HEADERS_BIN|WINNOW_GENERATE_FALLBACK_PEERS'
 

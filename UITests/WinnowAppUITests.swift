@@ -15,7 +15,7 @@ final class WinnowAppUITests: XCTestCase {
 
     func test01CreateReceiveSendConfirm() async throws {
         continueAfterFailure = false
-        executionTimeAllowance = 600 // the host prepares the fixture before this UI journey
+        executionTimeAllowance = 900 // includes all on-chain and shared-wallet journeys on hosted simulators
         let setupStarted = Date()
         try SignetFixture.requirePreparedBank()
         print("SIGNET_SETUP_SECONDS=\(Date().timeIntervalSince(setupStarted))")

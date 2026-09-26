@@ -18,7 +18,9 @@ struct OnboardingView: View {
         NavigationStack {
             List {
                 Section {
-                    Text("Your bitcoin, on your phone. Winnow connects directly to Bitcoin and automatically backs up your wallet with iCloud when available.")
+                    Text(model.lightning == nil
+                        ? "Your bitcoin, on your phone. Winnow connects directly to Bitcoin and automatically backs up your wallet with iCloud when available."
+                        : "Winnow connects directly to Bitcoin. Mainnet uses real bitcoin; signet and regtest use test coins. This Lightning beta keeps wallet and channel recovery data on this device; iCloud backup is unavailable.")
                         .font(.subheadline).foregroundStyle(.secondary)
                 }
                 Section {
@@ -40,7 +42,9 @@ struct OnboardingView: View {
                             .accessibilityIdentifier("importWalletButton")
                     }
                 } footer: {
-                    Text("No iCloud? Your wallet still works. You can save a manual backup instead. Recovery words and backup controls are in Advanced.")
+                    Text(model.lightning == nil
+                        ? "No iCloud? Your wallet still works. You can save a manual backup instead. Recovery words and backup controls are in Advanced."
+                        : "Keep this device and its app data while channels or recovery are outstanding. A wallet backup alone cannot restore Lightning channels.")
                 }
                 if model.cloudBackups.busy { ProgressView("Checking iCloud…") }
                 if let message = model.cloudBackups.message {
@@ -54,8 +58,11 @@ struct OnboardingView: View {
                         )) {
                             Text("Mainnet").tag(BitcoinNetwork.mainnet)
                             Text("Signet").tag(BitcoinNetwork.signet)
+                            if model.supportsLightning || model.network == .regtest {
+                                Text("Regtest").tag(BitcoinNetwork.regtest)
+                            }
                         }
-                        .disabled(model.e2e?.forcedNetwork != nil || busy)
+                        .disabled(model.e2e?.forcedNetwork != nil || busy || model.changingNetwork)
                         .accessibilityIdentifier("onboardingNetworkPicker")
                     } footer: {
                         Text("Each network has its own wallet. Signet uses test coins with no value.")

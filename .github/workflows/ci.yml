@@ -25,11 +25,107 @@ jobs:
   tdx:
     if: vars.TDX_CI_ENABLED == 'true' && inputs.hosted != true && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     uses: ./.github/workflows/ci-tdx.yml
+  lightning:
+    name: Swift Lightning independent peers
+    runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      RUSTUP_TOOLCHAIN: '1.89.0'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Use the same Python runtime as Winnow validation
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - name: Research release evidence and signing policy tests
+        run: |
+          python3 -m unittest discover -s scripts/tests -p test_lightning_release.py
+          python3 -m unittest discover -s scripts/tests -p test_signed_distribution.py
+          python3 -m unittest discover -s scripts/tests -p test_lightning_references.py
+          python3 -m unittest discover -s scripts/tests -p test_lightning_peer.py
+      - name: Prepare host-only reference tools
+        run: |
+          brew install autoconf automake libtool gnu-sed gettext libsodium lowdown pkgconf openssl@3 make sqlite uv bitcoin
+          rustup toolchain install 1.89.0 --profile minimal
+          mkdir -p "$RUNNER_TEMP/lightning-results"
+          {
+            echo "REFERENCE_DIR=$RUNNER_TEMP/lightning-references"
+            echo "WINNOW_LIGHTNING_RESULTS=$RUNNER_TEMP/lightning-results"
+            echo "WINNOW_BITCOIN_DIR=$(dirname "$(command -v bitcoind)")"
+            echo "WINNOW_CLN_DIR=$RUNNER_TEMP/lightning-references/cln"
+            echo "WINNOW_LDK_HARNESS=$RUNNER_TEMP/lightning-references/harness/target/debug/winnow-lightning-reference"
+          } >> "$GITHUB_ENV"
+      - name: Fetch pinned external harness and build unmodified reference peers
+        run: scripts/ci-lightning-references "$REFERENCE_DIR" > "$WINNOW_LIGHTNING_RESULTS/reference-build.log" 2>&1
+      - name: Swift state, persistence, transport and vector tests
+        run: swift test --filter LightningCoreTests
+      - name: Upstream LDK offer, request and static-invoice checks
+        run: scripts/ci-lightning-offers
+      - name: Swift-to-LDK async settlement with both clients offline
+        run: scripts/ci-lightning-async --direction swift-to-ldk
+      - name: LDK-to-Swift async settlement with both clients offline
+        run: scripts/ci-lightning-async --direction ldk-to-swift
+      - name: Swift-to-LDK async settlement across provider crashes
+        run: scripts/ci-lightning-async --direction swift-to-ldk --restart-providers
+      - name: LDK-to-Swift async settlement across provider crashes
+        run: scripts/ci-lightning-async --direction ldk-to-swift --restart-providers
+      - name: Recipient never returns; Swift recovers without either provider
+        run: scripts/ci-lightning-timeout
+      - name: Stock-peer payments, process restart and force close
+        run: scripts/ci-lightning-peer --close force
+      - name: Stock-peer payments, process restart and cooperative close
+        run: scripts/ci-lightning-peer --close cooperative
+      - name: Install pinned app project generator
+        run: scripts/install-xcodegen
+      - name: Record Swift app sharing, offline payment, crashes and returned funds
+        env:
+          DERIVED_DATA: ${{ runner.temp }}/lightning-app-build
+        run: scripts/ci-lightning-ui "$RUNNER_TEMP/lightning-ui"
+      - name: Compile the device research release and exclude test activation
+        run: |
+          xcodebuild build -project WinnowApp.xcodeproj -scheme WinnowLightning -configuration ResearchRelease \
+            -destination 'generic/platform=iOS' -derivedDataPath "$RUNNER_TEMP/lightning-app-build" \
+            -skipPackagePluginValidation -skipMacroValidation CODE_SIGNING_ALLOWED=NO \
+            > "$RUNNER_TEMP/lightning-ui/research-release-build.log" 2>&1
+          app="$RUNNER_TEMP/lightning-app-build/Build/Products/ResearchRelease-iphoneos/WinnowApp.app"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Info.plist")" = com.btcswift.lightning
+          test "$(lipo -archs "$app/WinnowApp")" = arm64
+          scripts/verify-release-e2e-exclusion "$app"
+          scripts/check-dependencies --xcode "$RUNNER_TEMP/lightning-app-build"
+      - name: Preserve app recording and independent evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: swift-lightning-app
+          path: |
+            ${{ runner.temp }}/lightning-ui/journey.mp4
+            ${{ runner.temp }}/lightning-ui/display-ready.png
+            ${{ runner.temp }}/lightning-ui/screenshots
+            ${{ runner.temp }}/lightning-ui/LightningUI.xcresult
+            ${{ runner.temp }}/lightning-ui/*.log
+            ${{ runner.temp }}/lightning-ui/manifest.json
+            ${{ runner.temp }}/lightning-ui/journey.json
+            ${{ runner.temp }}/lightning-ui/fixture/evidence
+          retention-days: 14
+      - name: Preserve reference and interoperability evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: swift-lightning-peers
+          path: |
+            ${{ env.WINNOW_LIGHTNING_RESULTS }}
+            ${{ env.REFERENCE_DIR }}/reference-manifest.json
+            ${{ env.REFERENCE_DIR }}/ldk-async-*.log
+          retention-days: 14
   website:
     needs: [hosted, tdx]
     # Keep deployment secrets outside every validation workflow and guest.
     # Explicit status handling also permits intentionally skipped reuse lanes.
-    if: ${{ !cancelled() && (needs.hosted.result == 'success' || needs.tdx.result == 'success') && (github.workflow == 'CI' && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (github.ref == 'refs/heads/main' && github.event_name != 'schedule') || github.event_name == 'workflow_dispatch')) }}
+    # Forks validate wallet/media artifacts but do not deploy the upstream site.
+    if: ${{ !cancelled() && (needs.hosted.result == 'success' || needs.tdx.result == 'success') && (github.repository == 'winnowwallet/winnow' && github.workflow == 'CI' && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (github.ref == 'refs/heads/main' && github.event_name != 'schedule') || github.event_name == 'workflow_dispatch')) }}
     uses: ./.github/workflows/site.yml
     with:
       artifact-name: ${{ needs.tdx.outputs.website-artifact || needs.hosted.outputs.website-artifact }}
@@ -39,16 +135,18 @@ jobs:
       CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
   validation:
     if: always()
-    needs: [hosted, tdx, website]
+    needs: [hosted, tdx, lightning, website]
     runs-on: ubuntu-24.04
     steps:
       - env:
           HOSTED: ${{ needs.hosted.result }}
           TDX: ${{ needs.tdx.result }}
           WEBSITE: ${{ needs.website.result }}
-          DEPLOY: ${{ github.workflow == 'CI' && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (github.ref == 'refs/heads/main' && github.event_name != 'schedule') || github.event_name == 'workflow_dispatch') }}
+          LIGHTNING: ${{ needs.lightning.result }}
+          DEPLOY: ${{ github.repository == 'winnowwallet/winnow' && github.workflow == 'CI' && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (github.ref == 'refs/heads/main' && github.event_name != 'schedule') || github.event_name == 'workflow_dispatch') }}
         run: |
           [[ "$HOSTED:$TDX" == success:skipped || "$HOSTED:$TDX" == skipped:success ]] || exit 1
+          [[ "$LIGHTNING" == success ]] || exit 1
           if [[ "$DEPLOY" == true ]]; then
             [[ "$WEBSITE" == success ]] || exit 1
           else
