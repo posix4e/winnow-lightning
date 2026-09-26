@@ -22,12 +22,19 @@ Set the simulator's text size with `xcrun simctl ui <id> content_size
 accessibility-extra-extra-extra-large`, record its value, and restore it afterward.
 Keep the screenshots, video, xcresult, manifest and independent receipts.
 
-On a physical device, verify successful and canceled device-owner authentication
+Physical-device checks may be performed after installation through the existing
+internal TestFlight group. A connected development device is not required before
+uploading this regtest-only beta. Record `device_checks_deferred_to_testflight:
+true`, `physical_device: false`, and leave all four physical checks `pending`;
+do not relabel simulator results as physical verification. iPad and large-text
+simulator evidence remain required.
+
+On the TestFlight device, verify successful and canceled device-owner authentication
 for funding, payment and close; no mutation or publication after cancellation;
 exact Share/Copy bytes; and journal/key protection while the device is locked.
 `LightningAppTests` checks the stored Keychain attributes and the journal's
 complete file-protection class. A simulator that cannot record the protection
-class explicitly skips that assertion and cannot satisfy the physical gate.
+class explicitly skips that assertion and cannot establish physical verification.
 Retain the device model/OS, source commit, observations and test results. Do not
 mark these checks passed from simulated authentication.
 
@@ -46,7 +53,12 @@ requires the determination to include linked libraries. Retain either a reasoned
 exemption determination or the approved App Store Connect declaration belonging
 to this app. Review applicable reporting and destination requirements as part
 of that determination. This script does not change country availability or
-create declarations from assumptions about particular countries.
+create declarations from assumptions about particular countries. An upload may
+precede the determination: `--upload-only` accepts `encryption.mode: pending`
+with a retained, hashed inventory, keeps the encryption plist value YES, verifies
+upload and processing, and stops before tester assignment. It never claims an
+exemption or that a processed build is available to testers. Distribution still
+requires the reviewed determination or approved declaration.
 
 ## Exact-source release command
 
@@ -59,6 +71,7 @@ to that file, contained in its directory, and SHA-256 verified. For example
   "source": "<40-character tested commit>",
   "bundle": "com.btcswift.lightning",
   "physical_device": false,
+  "device_checks_deferred_to_testflight": true,
   "checks": {
     "owner_authentication": "pending",
     "cancelled_authentication": "pending",
@@ -94,11 +107,22 @@ scripts/release-lightning --commit <exact-green-SHA> \
   --evidence /path/to/review/evidence.json --output /path/to/new-release
 ```
 
-Without `--upload`, this signs, archives, exports and inspects the distribution
+With neither upload flag, this signs, archives, exports and inspects the distribution
 package. Add `--upload` to perform the already authorized internal rollout.
+Use `--upload-only` to upload while encryption review is pending. In that mode,
+use `encryption: {"mode": "pending", "artifact": "inventory.md"}` and include
+the inventory in the hashed artifact list.
 It verifies bundle/team/version/build, ARM64, no iCloud or Debug hooks, dependency
 policy and supply-chain metadata; uploads the inspected package; waits for VALID
 processing; updates What to Test; and verifies membership and tester availability
 in the existing `PQLNRegtestInternal` group. It never creates a replacement app or
-public beta group. A release is complete only when `release.json` records the
-processed build and `uploaded: true` after the final readbacks.
+public beta group. `release.json` records upload, processing and verified internal
+tester availability separately. Distribution is complete only when
+`available_to_internal_testers` is true after the final readbacks.
+
+Release-tooling changes need not rebuild an unchanged tested application. Pass
+`--source-checkout /path/to/clean/green/app-checkout` to run committed release
+tooling against the exact app commit supplied by `--commit`. Both checkouts must
+be clean. The receipt records both commits and the package provenance identifies
+the release-tooling commit. This does not reuse a CI result from a different app
+source commit.

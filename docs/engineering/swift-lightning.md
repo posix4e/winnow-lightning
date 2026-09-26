@@ -70,8 +70,10 @@ capability.
 Extend the existing CI workflow with a Swift Lightning lane beside ordinary
 checks. Start fresh reference fixtures, build app/test bundles once, reuse
 them for journeys, and retain videos, screenshots, xcresults, redacted logs and
-a source/peer manifest. Require iPhone journeys on PRs; check iPad, large text,
-and physical-device authentication/sharing before TestFlight.
+a source/peer manifest. Require iPhone journeys on PRs; check iPad and large text
+before TestFlight. Physical-device authentication, sharing and lock protection
+may be checked after installation through internal TestFlight, with the pending
+checks recorded explicitly rather than reported as passed.
 
 Keep the PR draft until these gates pass. Release the exact green commit to the
 existing `com.btcswift.lightning` TestFlight app through the existing signing,
@@ -143,8 +145,11 @@ research wallet has no iCloud backup and that its channel journal must stay on
 the device. Payment review keeps amount, fee and expiry above an expandable
 exact receive offer.
 
-Physical-device authentication/file protection, exact-source green CI and
-reviewed export compliance are mandatory release evidence. The signed archive,
+Exact-source green CI and reviewed export compliance remain required before
+internal tester distribution. Physical-device authentication/file protection may
+remain explicitly pending for testing through TestFlight. Upload-only mode
+keeps the conservative encryption plist value while review is pending and stops
+before assigning testers. The signed archive,
 export, upload, processing and existing internal-group readback are implemented
 in `scripts/release-lightning`; see `lightning-release.md`. A successful host or
 simulator run does not establish TestFlight availability.

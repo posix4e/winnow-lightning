@@ -16,6 +16,7 @@ if not __debug__:
     raise RuntimeError('Release validation requires Python assertions; remove -O or PYTHONOPTIMIZE')
 
 ROOT = Path(__file__).resolve().parent.parent
+DRIVER_ROOT = ROOT
 REPOSITORY = 'posix4e/winnow-lightning'
 BUNDLE = 'com.btcswift.lightning'
 APP_ID = '6815392502'
@@ -25,18 +26,28 @@ def output(*args):
     return subprocess.check_output(args, cwd=ROOT, text=True).strip()
 
 
-def check_evidence(path, source):
+def check_evidence(path, source, *, allow_pending_encryption=False):
     evidence = json.loads(path.read_text())
     assert evidence['source'] == source and evidence['bundle'] == BUNDLE
-    assert evidence['physical_device'] is True, 'simulators cannot prove device authentication or file protection'
-    required = {'owner_authentication', 'cancelled_authentication', 'file_protection', 'exact_share', 'ipad', 'large_text'}
-    assert all(evidence['checks'].get(name) == 'passed' for name in required), 'device/display release checks are incomplete'
+    device_checks = {'owner_authentication', 'cancelled_authentication', 'file_protection', 'exact_share'}
+    assert all(evidence['checks'].get(name) == 'passed' for name in {'ipad', 'large_text'}), 'display release checks are incomplete'
+    deferred = evidence.get('device_checks_deferred_to_testflight') is True
+    if deferred:
+        assert evidence['physical_device'] is False, 'deferred device checks must not claim physical verification'
+        assert all(evidence['checks'].get(name) == 'pending' for name in device_checks), 'deferred checks must remain pending, never passed or failed'
+    else:
+        assert evidence['physical_device'] is True, 'physical checks must pass or be explicitly deferred to internal TestFlight'
+        assert all(evidence['checks'].get(name) == 'passed' for name in device_checks), 'physical device checks are incomplete'
     assert evidence['artifacts'], 'device/display evidence is missing'
     for artifact in evidence['artifacts']:
         file = (path.parent / artifact['path']).resolve()
         assert file.is_relative_to(path.parent.resolve()), 'evidence path escapes its directory'
         assert hashlib.sha256(file.read_bytes()).hexdigest() == artifact['sha256'], 'evidence artifact changed'
     encryption = evidence['encryption']
+    if encryption['mode'] == 'pending':
+        assert allow_pending_encryption, 'unreviewed encryption permits upload only, never tester distribution'
+        assert encryption['artifact'] in {item['path'] for item in evidence['artifacts']}, 'retain the encryption inventory for review'
+        return evidence
     assert encryption['mode'] in {'exempt', 'declaration'}, 'a reviewed encryption determination is required'
     assert encryption['reviewed_by'].strip() and encryption['rationale'].strip()
     assert encryption['artifact'] in {item['path'] for item in evidence['artifacts']}, 'encryption determination must be retained with evidence'
@@ -46,28 +57,35 @@ def check_evidence(path, source):
 
 
 def main():
+    global ROOT
     parser = argparse.ArgumentParser()
     parser.add_argument('--commit', required=True)
     parser.add_argument('--version', required=True)
     parser.add_argument('--build', required=True)
     parser.add_argument('--evidence', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
-    parser.add_argument('--upload', action='store_true', help='Upload the verified IPA and enable the existing internal group')
+    parser.add_argument('--source-checkout', type=Path, default=ROOT, help='Clean checkout of the exact tested app source; release tooling may be newer')
+    uploads = parser.add_mutually_exclusive_group()
+    uploads.add_argument('--upload', action='store_true', help='Upload the verified IPA and enable the existing internal group')
+    uploads.add_argument('--upload-only', action='store_true', help='Upload and verify processing, leaving encryption review and tester assignment pending')
     args = parser.parse_args()
+    ROOT = args.source_checkout.resolve()
     assert re.fullmatch('[0-9a-f]{40}', args.commit) and output('git', 'rev-parse', 'HEAD') == args.commit
     assert not output('git', 'status', '--porcelain'), 'release requires a clean exact-source checkout'
     assert re.fullmatch(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', args.version)
     assert re.fullmatch('[1-9][0-9]*', args.build)
-    evidence = check_evidence(args.evidence.resolve(), args.commit)
+    evidence = check_evidence(args.evidence.resolve(), args.commit, allow_pending_encryption=args.upload_only)
+    driver_source = subprocess.check_output(['git', '-C', str(DRIVER_ROOT), 'rev-parse', 'HEAD'], text=True).strip()
+    assert not subprocess.check_output(['git', '-C', str(DRIVER_ROOT), 'status', '--porcelain'], text=True).strip(), 'release tooling must be committed and clean'
     runs = json.loads(output('gh', 'run', 'list', '-R', REPOSITORY, '--workflow', 'ci.yml', '--commit', args.commit,
                              '--limit', '50', '--json', 'databaseId,headSha,conclusion,status'))
     green = next((run for run in runs if run['headSha'] == args.commit and run['status'] == 'completed' and run['conclusion'] == 'success'), None)
     assert green, 'required CI has not passed for this commit'
     environment = dict(os.environ, TESTFLIGHT_BUNDLE_ID=BUNDLE, TESTFLIGHT_MARKETING_VERSION=args.version,
-                       TESTFLIGHT_BUILD_NUMBER=args.build, TESTFLIGHT_WHATS_NEW_FILE=str(ROOT / 'docs/lightning-what-to-test.txt'))
+                       TESTFLIGHT_BUILD_NUMBER=args.build, TESTFLIGHT_WHATS_NEW_FILE=str(DRIVER_ROOT / 'docs/lightning-what-to-test.txt'))
     environment.pop('TESTFLIGHT_BUILD_ID', None)
     encryption = evidence['encryption']
-    nonexempt = encryption['mode'] == 'declaration'
+    nonexempt = encryption['mode'] != 'exempt'
     environment['LIGHTNING_NONEXEMPT_ENCRYPTION'] = 'YES' if nonexempt else 'NO'
     key_id, issuer = environment['ASC_KEY_ID'], environment['ASC_ISSUER_ID']
     key = Path(environment.get('ASC_KEY_PATH', str(Path.home() / f'.appstoreconnect/private_keys/AuthKey_{key_id}.p8'))).resolve()
@@ -85,13 +103,13 @@ def main():
     app = asc('GET', '/apps/' + APP_ID)['data']
     assert app['attributes']['bundleId'] == BUNDLE
     declaration = encryption.get('declaration_id')
-    if nonexempt:
+    if encryption['mode'] == 'declaration':
         approved = asc('GET', '/appEncryptionDeclarations/' + declaration)['data']
         assert approved['attributes']['appEncryptionDeclarationState'] == 'APPROVED'
         owner = asc('GET', '/appEncryptionDeclarations/' + declaration + '/app')['data']
         assert owner['id'] == APP_ID, 'encryption declaration belongs to another app'
     destination = args.output.resolve()
-    assert not destination.is_relative_to(ROOT), 'release output must be outside the clean checkout'
+    assert not any(destination.is_relative_to(path) for path in (ROOT, DRIVER_ROOT)), 'release output must be outside both clean checkouts'
     destination.mkdir(parents=True, exist_ok=False)
 
     def run(name, command):
@@ -121,17 +139,19 @@ def main():
     run('ipa-policy', ['scripts/verify-exported-ipa', str(ipa)])
     run('provenance', ['scripts/generate-supply-chain-metadata', '--output-dir', str(destination / 'supply-chain'),
                       '--subject', str(ipa), '--subject-name', ipa.name,
-                      '--builder-id', f'https://github.com/{REPOSITORY}/blob/{args.commit}/scripts/release-lightning'])
+                      '--builder-id', f'https://github.com/{REPOSITORY}/blob/{driver_source}/scripts/release-lightning'])
     receipt = dict(source=args.commit, ci_run=green['databaseId'], bundle=BUNDLE, version=args.version, build=args.build,
                    ipa_sha256=hashlib.sha256(ipa.read_bytes()).hexdigest(),
-                   evidence_sha256=hashlib.sha256(args.evidence.read_bytes()).hexdigest(), encryption=encryption, uploaded=False)
+                   evidence_sha256=hashlib.sha256(args.evidence.read_bytes()).hexdigest(), encryption=encryption,
+                   release_tooling_source=driver_source, device_checks_deferred_to_testflight=evidence.get('device_checks_deferred_to_testflight', False),
+                   uploaded=False, processed=False, available_to_internal_testers=False)
     (destination / 'release.json').write_text(json.dumps(receipt, indent=2) + '\n')
-    if not args.upload:
+    if not (args.upload or args.upload_only):
         print('Verified ResearchRelease archive and distribution package; no upload requested.')
         return
     assert not output('git', 'status', '--porcelain'), 'source changed during archive'
     assert output('git', 'rev-parse', 'HEAD') == args.commit, 'checkout changed during archive'
-    check_evidence(args.evidence.resolve(), args.commit)
+    check_evidence(args.evidence.resolve(), args.commit, allow_pending_encryption=args.upload_only)
     run('upload-integrity', ['shasum', '-a', '256', '-c', str(ipa) + '.verified.sha256'])
     assert hashlib.sha256(ipa.read_bytes()).hexdigest() == receipt['ipa_sha256'], 'package changed after verification'
     # altool requires this exact filename, including when CI supplied AuthKey.p8.
@@ -140,19 +160,26 @@ def main():
         alias.symlink_to(key)
         environment['API_PRIVATE_KEYS_DIR'] = keys
         run('upload', ['xcrun', 'altool', '--upload-app', '-f', str(ipa), '-t', 'ios', '--apiKey', key_id, '--apiIssuer', issuer])
+    receipt['uploaded'] = True
+    (destination / 'release.json').write_text(json.dumps(receipt, indent=2) + '\n')
     run('processing', ['scripts/testflight.sh', 'wait-processing'])
     query = f'/builds?filter[app]={APP_ID}&filter[version]={args.build}&filter[preReleaseVersion.version]={args.version}&limit=2'
     builds = asc('GET', query)['data']
     assert len(builds) == 1 and builds[0]['attributes']['processingState'] == 'VALID'
     build = builds[0]['id']
-    if nonexempt:
+    receipt.update(processed=True, app_store_connect_build=build)
+    (destination / 'release.json').write_text(json.dumps(receipt, indent=2) + '\n')
+    environment['TESTFLIGHT_BUILD_ID'] = build
+    run('notes', ['scripts/testflight.sh', 'notes'])
+    if args.upload_only:
+        print('Verified upload and processing. Encryption review and internal tester assignment remain pending.')
+        return
+    if encryption['mode'] == 'declaration':
         asc('PATCH', '/builds/' + build + '/relationships/appEncryptionDeclaration',
             {'data': {'type': 'appEncryptionDeclarations', 'id': declaration}})
         assert asc('GET', '/builds/' + build + '/appEncryptionDeclaration')['data']['id'] == declaration
-    environment['TESTFLIGHT_BUILD_ID'] = build
-    run('notes', ['scripts/testflight.sh', 'notes'])
     run('internal', ['scripts/testflight.sh', 'internal'])
-    receipt.update(uploaded=True, app_store_connect_build=build, internal_group='PQLNRegtestInternal')
+    receipt.update(available_to_internal_testers=True, internal_group='PQLNRegtestInternal')
     (destination / 'release.json').write_text(json.dumps(receipt, indent=2) + '\n')
     print('Verified build processed and available to the existing Winnow Lightning internal testers.')
 
