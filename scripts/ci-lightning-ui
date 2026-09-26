@@ -13,9 +13,22 @@ import time
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def run(args, log, env=None):
+def run(args, log, env=None, timeout=None):
     with log.open('w') as out:
-        subprocess.run(args, cwd=ROOT, stdout=out, stderr=subprocess.STDOUT, env=env, check=True)
+        subprocess.run(args, cwd=ROOT, stdout=out, stderr=subprocess.STDOUT, env=env, check=True, timeout=timeout)
+
+
+def prepare_display(simulator, results):
+    # bootstatus can finish on a cold hosted runner without recordVideo ever
+    # receiving a display frame. Render a system app through simctl
+    # before starting the recorder. Do not launch Winnow until recording is
+    # acknowledged, so onboarding and every financial action remain captured.
+    run(['xcrun', 'simctl', 'launch', simulator, 'com.apple.Preferences'],
+        results / 'display-launch.log', timeout=60)
+    run(['xcrun', 'simctl', 'io', simulator, 'screenshot', str(results / 'display-ready.png')],
+        results / 'display-screenshot.log', timeout=60)
+    assert (results / 'display-ready.png').stat().st_size > 0, 'simulator display produced no screenshot'
+    print('Lightning UI simulator display ready', flush=True)
 
 
 def wait(check, seconds=90):
@@ -63,6 +76,7 @@ def main():
     assert info['CFBundleIdentifier'] == 'com.btcswift.lightning'
     binary = app / info['CFBundleExecutable']
     run(['xcrun', 'simctl', 'bootstatus', simulator, '-b'], results / 'simulator.log')
+    prepare_display(simulator, results)
     devices = json.loads(subprocess.check_output(['xcrun', 'simctl', 'list', 'devices', '--json'], text=True))['devices']
     identity = next(dict(name=device['name'], device_type=device['deviceTypeIdentifier'], runtime=runtime)
                     for runtime, entries in devices.items() for device in entries if device['udid'] == simulator)
@@ -112,6 +126,7 @@ def main():
             assert video.poll() is None, 'recorder exited'
             return 'Recording started' in (results / 'video.log').read_text()
         wait(recording, 60)
+        print('Lightning UI recording acknowledged; starting XCTest', flush=True)
         run(['xcodebuild', 'test-without-building', '-xctestrun', str(spec),
              '-destination', f'platform=iOS Simulator,id={simulator}', '-only-testing:WinnowAppUITests/LightningAppUITests',
              '-test-timeouts-enabled', 'YES', '-maximum-test-execution-time-allowance', '900',
