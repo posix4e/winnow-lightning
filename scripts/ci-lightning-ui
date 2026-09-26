@@ -76,7 +76,6 @@ def main():
     assert info['CFBundleIdentifier'] == 'com.btcswift.lightning'
     binary = app / info['CFBundleExecutable']
     run(['xcrun', 'simctl', 'bootstatus', simulator, '-b'], results / 'simulator.log')
-    prepare_display(simulator, results)
     devices = json.loads(subprocess.check_output(['xcrun', 'simctl', 'list', 'devices', '--json'], text=True))['devices']
     identity = next(dict(name=device['name'], device_type=device['deviceTypeIdentifier'], runtime=runtime)
                     for runtime, entries in devices.items() for device in entries if device['udid'] == simulator)
@@ -119,6 +118,9 @@ def main():
             assert fixture.poll() is None, 'fixture exited'
             return (results / 'fixture/connection.json').is_file()
         wait(fixture_ready, 180)
+        # Fixture setup can take minutes. Render immediately before recording,
+        # so display readiness is checked after that potentially idle interval.
+        prepare_display(simulator, results)
         with (results / 'video.log').open('w') as log:
             video = subprocess.Popen(['xcrun', 'simctl', 'io', simulator, 'recordVideo', '--codec=h264', str(results / 'journey.mp4')],
                                      stdout=log, stderr=subprocess.STDOUT)
@@ -127,8 +129,12 @@ def main():
             return 'Recording started' in (results / 'video.log').read_text()
         wait(recording, 60)
         print('Lightning UI recording acknowledged; starting XCTest', flush=True)
+        # This journey intentionally SIGKILLs the app. Xcode's verbose whole-
+        # simulator diagnostics can stall even after XCTest finishes; retain
+        # the result bundle, screenshots, video and peer logs without sysdiagnose.
         run(['xcodebuild', 'test-without-building', '-xctestrun', str(spec),
              '-destination', f'platform=iOS Simulator,id={simulator}', '-only-testing:WinnowAppUITests/LightningAppUITests',
+             '-collect-test-diagnostics', 'never',
              '-test-timeouts-enabled', 'YES', '-maximum-test-execution-time-allowance', '900',
              '-resultBundlePath', str(results / 'LightningUI.xcresult')], results / 'ui-tests.log')
         receipt = json.loads((results / 'fixture/evidence/receipt.json').read_text())
