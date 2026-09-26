@@ -17,8 +17,8 @@ struct WinnowApp: App {
                     OnboardingView()
                 case .ready:
                     // Beginner mode is one screen; Advanced mode is the
-                    // three tabs. The switch lives in each one's toolbar.
-                    if model.advancedMode || model.lightning != nil {
+                    // tab interface. The switch lives in each one's toolbar.
+                    if model.advancedMode {
                         MainTabView()
                     } else {
                         BeginnerHomeView()

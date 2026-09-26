@@ -16,6 +16,56 @@ final class LightningAppUITests: XCTestCase {
     private var control: URL!
     private var setup: [String: Any] = [:]
 
+    func testSimpleModePersistsAndKeepsLightningIdentity() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        defer { app.terminate() }
+        app.launchEnvironment = [
+            "WINNOW_E2E": "1", "WINNOW_E2E_RUN": "lightning-simple-\(UUID())",
+            "WINNOW_E2E_RESET": "1", "WINNOW_E2E_NETWORK": "signet",
+            "WINNOW_E2E_ENTROPY": String(repeating: "03", count: 16),
+            "WINNOW_E2E_PEER": "127.0.0.1:1", "WINNOW_E2E_PEER_COUNT": "1",
+        ]
+        app.launch()
+        XCTAssertTrue(app.buttons["createWalletButton"].appears(within: 30))
+        app.buttons["createWalletButton"].tap()
+        selectTab(app, "Lightning")
+        let node = app.staticTexts["lightningNodeID"]
+        XCTAssertTrue(scroll(app, node))
+        XCTAssertTrue(poll(timeout: 30, interval: 0.2, "durable node identity") {
+            (node.value as? String)?.count == 66
+        })
+        let identity = try XCTUnwrap(node.value as? String)
+        selectTab(app, "Wallet")
+        let mode = app.buttons["advancedModeButton"]
+        XCTAssertEqual(mode.label, "Simple")
+        mode.tap()
+        XCTAssertTrue(app.buttons.matching(identifier: "advancedModeButton")
+            .matching(NSPredicate(format: "label == %@", "Advanced")).firstMatch.appears(within: 10),
+            "Simple must replace the advanced tab layout")
+        XCTAssertFalse(app.buttons["Lightning"].exists)
+        XCTAssertTrue(app.buttons["openSendButton"].exists)
+        XCTAssertEqual(app.staticTexts["networkTag"].label, "Signet · test coins")
+        Screenshots.capture(app, "lightning-simple-mode", testCase: self)
+
+        app.terminate()
+        app.launchEnvironment.removeValue(forKey: "WINNOW_E2E_RESET")
+        app.launch()
+        XCTAssertTrue(mode.appears(within: 30))
+        XCTAssertEqual(mode.label, "Advanced", "relaunch must keep Simple mode")
+        XCTAssertFalse(app.buttons["Lightning"].exists)
+        XCTAssertTrue(app.buttons["receiveButton"].exists)
+        mode.tap()
+        let confirmation = app.alerts["Turn on Advanced mode?"]
+        XCTAssertTrue(confirmation.appears(within: 10))
+        confirmation.buttons["Turn on"].tap()
+        selectTab(app, "Lightning")
+        XCTAssertTrue(scroll(app, node))
+        XCTAssertEqual(node.value as? String, identity, "mode changes must retain the Lightning identity")
+        selectTab(app, "Wallet")
+        XCTAssertEqual(mode.label, "Simple")
+    }
+
     func testAsyncOfferAcrossActualAppCrashes() throws {
         continueAfterFailure = false
         executionTimeAllowance = 900

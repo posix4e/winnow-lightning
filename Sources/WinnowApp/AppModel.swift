@@ -474,7 +474,11 @@ final class AppModel {
             explorerProvider = scoped.esploraURL.isEmpty ? .blockstream : .custom
         }
         verifyFromGenesis = defaults.bool(forKey: DefaultsKey.verifyFromGenesis)
-        advancedMode = LightningResearch.enabled(e2e: e2e) || defaults.bool(forKey: DefaultsKey.advancedMode) || e2e?.advancedMode == true
+        // Lightning starts with its tab visible, but a saved Simple choice
+        // must survive relaunch just like a saved Advanced choice.
+        advancedMode = e2e?.advancedMode == true
+            || (defaults.object(forKey: DefaultsKey.advancedMode) as? Bool
+                ?? LightningResearch.enabled(e2e: e2e))
         // Test mode preconfigures the local node as the (only) manual peer;
         // custom signets have no DNS seeds.
         if let peer = e2e?.peer, !manualPeers.contains(peer) {
