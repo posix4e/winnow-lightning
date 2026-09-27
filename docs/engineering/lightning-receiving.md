@@ -4,7 +4,7 @@ Both wallet modes offer **Receive → Lightning or Bitcoin**. Bitcoin continues
 to show a Winnow address. Lightning shows a standard BOLT11 invoice for a
 specific amount once a confirmed channel has usable inbound capacity and a
 signed routing policy. An empty wallet does not invent capacity or an invoice.
-Kraken's Lightning withdrawal uses the Lightning invoice; an on-chain withdrawal
+A Lightning withdrawal uses the Lightning invoice; an on-chain withdrawal
 uses the Bitcoin address. Copy and Share preserve the exact invoice bytes.
 
 Fresh mainnet wallets recommend Olympus by ZEUS. The provider picker contains
@@ -20,7 +20,7 @@ because a choice is selected:
 Olympus and Megalith return live capacity limits and a separate setup fee invoice.
 Review the fee, capacity, lease and confirmation count. Approving the fee requires
 device authentication and reveals that invoice; it does **not** pay it. Pay it
-from another Lightning wallet or Kraken. The setup fee buys inbound capacity,
+from another Lightning wallet. The setup fee buys inbound capacity,
 not wallet balance. Check setup status and sync before creating a receive invoice.
 Orders and approval survive restart in a sealed, device-protected file. Providers
 cannot be changed while an approved order or an existing channel remains active.

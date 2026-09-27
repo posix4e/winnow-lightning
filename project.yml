@@ -29,6 +29,7 @@ targets:
       path: build/WinnowApp-Info.plist
       properties:
         LSMinimumSystemVersion: "14.0"
+        NSCameraUsageDescription: Scan a payment invoice.
         UIBackgroundModes: [fetch, processing]
         BGTaskSchedulerPermittedIdentifiers:
           - com.btcswift.winnow.chain-refresh

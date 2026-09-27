@@ -4,7 +4,7 @@ import Foundation
 /// durable decision; reconnecting rebuilds only Noise and publication cursors.
 public actor LightningPeerSession {
     public enum Status: Sendable, Equatable { case stopped, connecting, connected, failed(String) }
-    private let engine: LightningEngine
+    let engine: LightningEngine
     public let peer: Data
     private let host: String, port: UInt16
     private let onEvents: @Sendable ([LightningEngine.Event]) async throws -> Void
@@ -18,6 +18,8 @@ public actor LightningPeerSession {
     private var incoming: [LightningWire.Message] = []
     private var incomingBytes = 0
     private var handlingIncoming = false
+    var gossipQuery: LightningGossipQuery?
+    var gossipCompletion: CheckedContinuation<LightningRoutingGraph, any Error>?
     var liquidityRequests: [String: CheckedContinuation<Data, any Error>] = [:]
     var peerFeatures: LightningFeatures?
     public private(set) var status: Status = .stopped
@@ -56,6 +58,7 @@ public actor LightningPeerSession {
         guard let transport = connection else { status = .stopped; return }
         stopping = true; defer { stopping = false }
         cancelLiquidityRequests()
+        failRouting(LightningInvoiceError.unavailable)
         reader?.cancel(); timer?.cancel()
         await transport.close(); await engine.peerDisconnected(peer)
         connection = nil; reader = nil; timer = nil; status = .stopped
@@ -124,6 +127,7 @@ public actor LightningPeerSession {
             while !Task.isCancelled && epoch == generation {
                 try await Task.sleep(for: .milliseconds(250))
                 try await drainIncoming(epoch: epoch)
+                await checkRoutingTimeout(now: Self.now)
                 let events = try await engine.expireInvoiceRequests(now: Self.now)
                 if !events.isEmpty { try await onEvents(events) }
                 try await flush()
@@ -131,7 +135,7 @@ public actor LightningPeerSession {
         } catch { await finish(epoch: epoch, error: error) }
     }
     private static func requiresVerifiedChain(_ type: UInt16) -> Bool {
-        [32, 33, 34, 35, 36, 38, 39, 128, 130, 131, 132, 133, 134, 135, 136, 258, 513].contains(type)
+        [32, 33, 34, 35, 36, 38, 39, 128, 130, 131, 132, 133, 134, 135, 136, 513].contains(type)
     }
     private func drainIncoming(epoch: UInt64) async throws {
         guard !handlingIncoming else { return }
@@ -168,7 +172,10 @@ public actor LightningPeerSession {
         case LightningLiquidity.messageType:
             let response = try LightningLiquidity.response(message)
             liquidityRequests.removeValue(forKey: response.id)?.resume(with: response.result.mapError { $0 as any Error })
-        case 256, 257: break // General gossip is not used by this configured-route client.
+        case 256, 257, 261, 262, 263, 264: try await handleGossip(message)
+        case 258:
+            try await handleGossip(message)
+            try await engine.receiveChannelPolicy(peer: peer, message: message)
         case 1, 17: try await handlePeerNotice(message)
         default:
             guard message.type % 2 == 1 else { throw LightningError.invalidMessage }

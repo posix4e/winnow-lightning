@@ -14,6 +14,7 @@ struct PeerFixture {
     static func run() async throws {
         let args = Array(CommandLine.arguments.dropFirst())
         if ["probe-lsp", "probe-lsp-quote", "probe-lsp-stability", "probe-lsp-opening"].contains(args.first) { try await probeLSP(args); return }
+        if args.first == "probe-invoice-route" { try await probeInvoiceRoute(args); return }
         if args.first == "inspect-held" { try inspectHeld(args); return }
         guard [5, 7].contains(args.count), let port = UInt16(args[1]), let peer = Data(hex: args[2]), let chain = Data(hex: args[3])
         else { throw LightningError.invalidMessage }
@@ -68,6 +69,17 @@ struct PeerFixture {
             guard let onion = Data(hex: input["onion"] ?? ""), let hash = Data(hex: input["hash"] ?? "") else { throw LightningError.invalidMessage }
             let peeled = try OnionPacket.peel(onion, secret: Data(repeating: 1, count: 32), associatedData: hash)
             return ["payload": peeled.payload.hex, "shared_secret": peeled.sharedSecret.hex, "next": peeled.next?.hex ?? ""]
+        case "pay_invoice":
+            guard let id = Data(hex: input["id"] ?? ""), let channel = Data(hex: input["channel"] ?? ""),
+                  let text = input["invoice"], let height = UInt32(input["height"] ?? "") else { throw LightningError.invalidMessage }
+            try await engine.chainCaughtUp(height: height) // Disposable regtest driver has verified this tip.
+            let invoice = try Bolt11Invoice.decode(text, network: .regtest)
+            let amount = try invoice.amountMsat ?? Bolt11Invoice.millisatoshis(input["sats"] ?? "")
+            let hops = try input["route"].map { try JSONDecoder().decode([Bolt11Invoice.Route].self, from: Data($0.utf8)) } ?? []
+            let request = LightningEngine.InvoicePayment(id: id, peer: peer, channelID: channel, invoice: text, network: .regtest,
+                amountMsat: amount, feeLimitMsat: UInt64(input["fee"] ?? "") ?? 50_000, maximumDelta: 2016, route: try Bolt11PaymentRoute(hops: hops))
+            let payment = try await engine.payInvoice(request, now: UInt64(Date().timeIntervalSince1970))
+            return ["id": payment.id.hex, "phase": payment.phase.rawValue]
         case "pay":
             guard let id = Data(hex: input["id"] ?? ""), let channel = Data(hex: input["channel"] ?? ""),
                   let hash = Data(hex: input["hash"] ?? ""), let secret = Data(hex: input["secret"] ?? ""),

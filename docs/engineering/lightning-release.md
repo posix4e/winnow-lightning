@@ -18,7 +18,9 @@ includes the ordinary Winnow checks and signet journey, independent pinned CLN
 and LDK peers, recipient-never-returns recovery, and the recorded Swift app
 journey. The latter captures actual SIGKILLs, independent provider receipts,
 funding, exact Apple Share/Copy bytes, offline settlement, restored history and
-cooperative close returning funds to the Winnow wallet.
+cooperative close returning funds to the Winnow wallet. It also pays a stock-node
+BOLT11 invoice from Simple mode, cancels review before approval, verifies the
+independent receipt, and restores its payment history once after restart.
 
 Run the same recorded journey on iPad and with accessibility text before release.
 Use `SIMULATOR_ID`, `DERIVED_DATA` and `scripts/ci-lightning-ui`; each run needs a

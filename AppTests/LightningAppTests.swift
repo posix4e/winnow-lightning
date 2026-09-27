@@ -63,6 +63,40 @@ final class LightningAppTests: XCTestCase {
         XCTAssertTrue(controller.payments.isEmpty)
         XCTAssertEqual(try Data(contentsOf: dir.appending(path: "lightning/journal.v1")), before)
     }
+    private func invoiceReview(_ profile: LightningProfile) throws -> LightningAppController.InvoiceReview {
+        let text = try Bolt11Invoice.encode(network: .regtest, amountMsat: 5000, hash: Data(repeating: 8, count: 32),
+            secret: Data(repeating: 9, count: 32), nodeSecret: Data(repeating: 21, count: 32), route: nil, timestamp: UInt64(Date().timeIntervalSince1970))
+        let invoice = try Bolt11Invoice.decode(text, network: .regtest), route = try Bolt11PaymentRoute(hops: [])
+        let request = LightningEngine.InvoicePayment(id: Data(repeating: 3, count: 32), peer: profile.peerKey,
+            channelID: Data(repeating: 2, count: 32), invoice: text, network: .regtest, amountMsat: 5000, feeLimitMsat: 0, maximumDelta: 144, route: route)
+        return try .init(request: request, profile: profile,
+            quote: route.quote(invoice: invoice, amountMsat: 5000, feeLimitMsat: 0, height: 0, maximumDelta: 144),
+            description: invoice.description, payee: invoice.payee, expiresAt: invoice.expiresAt)
+    }
+    func testCancelledInvoiceAuthenticationCannotWritePayment() async throws {
+        let dir = directory(), controller = try await prepared(dir), profile = try profile(), auth = Denied()
+        try await controller.saveProfile(profile, model: makeModel(network: .regtest))
+        let model = makeModel(network: .regtest, deviceAuthenticator: auth)
+        let before = try Data(contentsOf: dir.appending(path: "lightning/journal.v1"))
+        do { try await controller.payInvoice(invoiceReview(profile), model: model); XCTFail() } catch is CancellationError {}
+        XCTAssertEqual(auth.attempts, 1); XCTAssertTrue(controller.payments.isEmpty)
+        XCTAssertFalse(model.keychainAuthentication.isGranted)
+        XCTAssertEqual(try Data(contentsOf: dir.appending(path: "lightning/journal.v1")), before)
+    }
+    func testInvoiceAuthenticationCannotApproveAfterControllerStops() async throws {
+        let dir = directory(), controller = try await prepared(dir), profile = try profile(), auth = Pending()
+        try await controller.saveProfile(profile, model: makeModel(network: .regtest))
+        let model = makeModel(network: .regtest, deviceAuthenticator: auth), request = try invoiceReview(profile)
+        let entered = expectation(description: "invoice authentication pending"); auth.entered = { entered.fulfill() }
+        let before = try Data(contentsOf: dir.appending(path: "lightning/journal.v1"))
+        let operation = Task { try await controller.payInvoice(request, model: model) }
+        await fulfillment(of: [entered], timeout: 5)
+        await controller.stop(); auth.continuation?.resume(); auth.continuation = nil
+        do { try await operation.value; XCTFail() } catch is CancellationError {}
+        XCTAssertTrue(controller.payments.isEmpty); XCTAssertFalse(model.keychainAuthentication.isGranted)
+        XCTAssertEqual(try Data(contentsOf: dir.appending(path: "lightning/journal.v1")), before)
+    }
+
     func testProviderAuthenticationCannotCompleteAfterTheControllerStops() async throws {
         let dir = directory(), controller = try await prepared(dir), auth = Pending()
         let model = makeModel(network: .regtest, deviceAuthenticator: auth)

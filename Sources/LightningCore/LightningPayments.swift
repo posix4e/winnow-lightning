@@ -29,6 +29,7 @@ extension LightningEngine {
         var htlcID: UInt64?
         let request: DirectPayment?
         var chainResolution: PaymentChainResolution?
+        var invoiceRequest: InvoicePayment? = nil
     }
     struct ReceiveRequest: Codable {
         let id: Data, preimage: Data, secret: Data
@@ -99,6 +100,7 @@ extension LightningEngine {
                 }
             }
             if record.payment != next.payments[index].payment {
+                if record.invoiceRequest != nil && record.payment.phase == .failed { publicRoutingGraph = nil }
                 next.payments[index] = record; events.append(.paymentChanged(record.payment))
                 next.async.outbox.removeAll { $0.key == Data([5]) + record.payment.id }
             }

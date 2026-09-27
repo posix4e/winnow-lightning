@@ -286,6 +286,55 @@ final class LightningAppUITests: XCTestCase {
         Screenshots.capture(app, "lightning-09-returned-wallet-funds", testCase: self)
     }
 
+    func testBolt11InvoiceFromSimpleSendSettlesAndSurvivesRestart() throws {
+        continueAfterFailure = false
+        executionTimeAllowance = 600
+        let path = try XCTUnwrap(ProcessInfo.processInfo.environment["WINNOW_LIGHTNING_UI_FIXTURE"])
+        config = try JSONDecoder().decode([String: String].self, from: Data(contentsOf: URL(fileURLWithPath: path)))
+        setup = try rpc("invoice_fixture")
+        control = FileManager.default.temporaryDirectory.appending(path: "invoice-control-\(UUID()).json")
+        defer { try? FileManager.default.removeItem(at: control) }
+        let app = XCUIApplication(); defer { app.terminate() }
+        try launch(app, role: "sender", fresh: true)
+        try fundWallet(app)
+        try configure(app, profile: XCTUnwrap(setup["sender"] as? [String: Any]))
+        try waitConnected(app)
+        XCTAssertTrue(scroll(app, app.textFields["lightningCapacity"], fullyVisible: true))
+        app.typeInto("lightningCapacity", "100000")
+        tap(app, "lightningOpen"); tap(app, "lightningFundingReview"); tap(app, "lightningConfirm")
+        _ = try rpc("confirm_funding")
+        XCTAssertTrue(poll(timeout: verifiedChainTimeout, interval: 1, "invoice channel verified") {
+            app.staticTexts["lightningChannelPhase"].label.contains("ready")
+        })
+        let invoice = try rpc("bolt11_invoice"), text = try XCTUnwrap(invoice["bolt11"] as? String)
+        selectTab(app, "Wallet"); app.buttons["advancedModeButton"].tap()
+        tap(app, "openSendButton"); tap(app, "sendLightning")
+        tap(app, "lightningScanInvoice")
+        XCTAssertTrue(app.staticTexts["Camera scanning unavailable"].appears(within: 15))
+        app.buttons["Cancel"].tap()
+        try paste("LIGHTNING:" + text); tap(app, "lightningPasteInvoice")
+        tap(app, "lightningReviewInvoice")
+        XCTAssertTrue(app.navigationBars["Review Lightning"].appears(within: 30), app.debugDescription)
+        XCTAssertTrue(scroll(app, app.staticTexts["Amount, 2000 sats"], fullyVisible: true))
+        Screenshots.capture(app, "bolt11-payment-review", testCase: self)
+        app.buttons["lightningCancel"].tap(); _ = try rpc("assert_invoice_unpaid")
+        tap(app, "lightningReviewInvoice"); tap(app, "lightningConfirm")
+        XCTAssertTrue(poll(timeout: 90, interval: 1, "ordinary invoice settled") {
+            app.staticTexts["lightningInvoicePaymentStatus"].label == "Settled"
+        }, app.debugDescription)
+        let receipt = try rpc("invoice_settled"), hash = try XCTUnwrap(receipt["payment_hash"] as? String)
+        Screenshots.capture(app, "bolt11-settled", testCase: self)
+        tap(app, "lightningInvoiceSendDone")
+        tap(app, "closeSendButton")
+        app.buttons["advancedModeButton"].tap()
+        // Restore the same wallet and invoice history in a new process.
+        app.terminate()
+        try launch(app, role: "sender", fresh: false)
+        try verifyHash(app, hash: hash)
+        XCTAssertEqual(app.staticTexts.matching(identifier: "lightningPaymentHash." + hash).count, 1)
+        Screenshots.capture(app, "bolt11-restored-once", testCase: self)
+    }
+
     private func selectTab(_ app: XCUIApplication, _ name: String) {
         // iPadOS 18 exposes the top tab strip outside the TabBar hierarchy.
         let button = app.buttons[name].firstMatch

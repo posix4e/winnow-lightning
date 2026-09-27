@@ -139,6 +139,8 @@ def main():
              '-resultBundlePath', str(results / 'LightningUI.xcresult')], results / 'ui-tests.log')
         receipt = json.loads((results / 'fixture/evidence/receipt.json').read_text())
         assert receipt['result'] == 'passed'
+        invoice_receipt = json.loads((results / 'fixture/evidence/bolt11-receipt.json').read_text())
+        assert invoice_receipt['result'] == 'passed'
     finally:
         try:
             if video:

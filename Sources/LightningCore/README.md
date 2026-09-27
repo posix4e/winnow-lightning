@@ -133,5 +133,6 @@ exact-source signed TestFlight release have separate required gates in the
 [release procedure](../../docs/engineering/lightning-release.md).
 
 Anchors, zero-fee commitments, splicing and post-quantum protocol extensions are
-not implemented or advertised. Unattended protection and general graph routing
-are outside this research release.
+not implemented or advertised. Unattended protection remains outside this
+research release. Single-part BOLT11 invoice payments use private hints and
+bounded signed public routing policies; see the [sending guide](../../docs/engineering/lightning-sending.md).

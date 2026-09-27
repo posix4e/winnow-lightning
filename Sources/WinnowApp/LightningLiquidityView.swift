@@ -69,7 +69,7 @@ struct LightningLiquidityView: View {
                 LabeledContent("Setup status", value: quote.order.orderState).accessibilityIdentifier("lightningSetupStatus")
                 TimelineView(.periodic(from: .now, by: 1)) { context in
                 if quote.isPayable(network: controller.network, now: UInt64(context.date.timeIntervalSince1970)) {
-                    Text("Pay this setup invoice from another Lightning wallet or Kraken. You will create a separate receive invoice after the channel is confirmed.")
+                    Text("Pay this setup invoice from another Lightning wallet. You will create a separate receive invoice after the channel is confirmed.")
                     QRCodeView(content: quote.invoice.uppercased()).frame(width: 240, height: 240).frame(maxWidth: .infinity)
                     Text(quote.invoice).font(.caption.monospaced()).lineLimit(3)
                         .accessibilityIdentifier("lightningSetupInvoice").accessibilityValue(quote.invoice)

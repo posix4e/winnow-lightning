@@ -57,7 +57,7 @@ struct LightningReceiveView: View {
                     if let error { Text(error).foregroundStyle(.red).accessibilityIdentifier("lightningReceiveError") }
                     Button("Sync and reconnect") { run { await model.syncNow(); await controller.resume(model: model) } }
                         .accessibilityIdentifier("lightningReceiveReconnect")
-                    Text("Use a Lightning invoice for Kraken's Lightning withdrawal. A Bitcoin address belongs in a Bitcoin withdrawal.")
+                    Text("Use a Lightning invoice for a Lightning payment or withdrawal. Use a Bitcoin address for an on-chain payment or withdrawal.")
                         .font(.footnote).foregroundStyle(.secondary)
                     Text("Keep Winnow open while receiving this invoice. It is a single-use invoice; offline async offers are available in Advanced mode.")
                         .font(.footnote).foregroundStyle(.secondary)

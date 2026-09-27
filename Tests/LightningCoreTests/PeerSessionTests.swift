@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import WalletCore
 import XCTest
 @testable import LightningCore
 
@@ -41,7 +42,7 @@ private actor SessionPeer {
         self.connection = connection
         connection.start(queue: DispatchQueue(label: "winnow.test.lightning.peer"))
     }
-    func handshake() async throws {
+    func handshake(features: LightningFeatures = .channelOpening) async throws {
         let deadline = ContinuousClock.now + .seconds(3)
         while connection == nil {
             guard ContinuousClock.now < deadline else { throw LightningError.closed }
@@ -53,7 +54,7 @@ private actor SessionPeer {
         let actThree = try await exact(66)
         transport = try XCTUnwrap(handshake.receive(actThree).transport)
         _ = try LightningFeatures.readInitialization(await receive())
-        try await send(LightningFeatures.channelOpening.initialization())
+        try await send(features.initialization())
     }
     func send(_ message: LightningWire.Message) async throws {
         try await write(XCTUnwrap(transport).encrypt(message.bytes))
@@ -95,7 +96,7 @@ private actor SessionPeer {
 final class PeerSessionTests: XCTestCase, @unchecked Sendable {
     func testChainScanKeepsControlTrafficAliveAndDefersChannelProcessing() async throws {
         let remote = try SessionPeer(), port = try await remote.listen()
-        let peer = try ChannelKeys.publicKey(secret: await remote.secret)
+        let peer = try ChannelKeys.publicKey(secret: remote.secret)
         let chain = Data(repeating: 7, count: 32)
         let engine = try LightningEngine(chain: chain, journal: SessionJournal())
         try await engine.chainCaughtUp()
@@ -138,5 +139,44 @@ final class PeerSessionTests: XCTestCase, @unchecked Sendable {
         } catch {
             await session.stop(); await remote.close(); handshake.cancel(); throw error
         }
+    }
+}
+
+extension PeerSessionTests {
+    func testCanceledRouteQueryDrainsAndKeepsPingAliveBeforeAnotherQuery() async throws {
+        let remote = try SessionPeer(), port = try await remote.listen(), peer = try ChannelKeys.publicKey(secret: remote.secret)
+        let chain = NetworkParams.regtest.genesisHash
+        let engine = try LightningEngine(chain: chain, journal: SessionJournal())
+        try await engine.chainCaughtUp(height: 100)
+        let session = LightningPeerSession(engine: engine, peer: peer, host: "127.0.0.1", port: port, onEvents: { _ in })
+        let features = try LightningFeatures(bits: LightningFeatures.channelOpening.bits.union([7]))
+        let handshake = Task { try await remote.handshake(features: features) }
+        let now = UInt64(Date().timeIntervalSince1970)
+        let invoice = try Bolt11Invoice.encode(network: .regtest, amountMsat: 5000, hash: Data(repeating: 1, count: 32),
+            secret: Data(repeating: 2, count: 32), nodeSecret: Data(repeating: 3, count: 32), route: nil, timestamp: now)
+        do {
+            try await session.start(); try await handshake.value
+            let first = Task { try await session.invoiceRoute(invoice: invoice, network: .regtest, amountMsat: 5000, feeLimitMsat: 1000) }
+            let query = try await remote.receive(); XCTAssertEqual(query.type, 263)
+            do { _ = try await session.invoiceRoute(invoice: invoice, network: .regtest, amountMsat: 5000, feeLimitMsat: 1000); XCTFail("Queries overlapped") } catch {}
+            first.cancel(); do { _ = try await first.value; XCTFail() } catch is CancellationError {}
+            await engine.chainDisconnected()
+            var ping = LightningWire.Writer(); ping.u16(2); ping.u16(0)
+            try await remote.send(.init(type: 18, payload: ping.data))
+            let pong = try await remote.receive(); XCTAssertEqual(pong.type, 19)
+            var reply = LightningWire.Writer(); reply.append(chain); reply.u32(0); reply.u32(101); reply.u8(1); reply.u16(1); reply.u8(0)
+            try await remote.send(.init(type: 264, payload: reply.data))
+            let deadline = ContinuousClock.now + .seconds(3)
+            while await session.gossipQuery != nil, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+            let remaining = await session.gossipQuery; XCTAssertNil(remaining)
+            try await engine.chainCaughtUp(height: 100)
+            let second = Task { try await session.invoiceRoute(invoice: invoice, network: .regtest, amountMsat: 5000, feeLimitMsat: 1000) }
+            let next = try await remote.receive(); XCTAssertEqual(next.type, 263)
+            await session.checkRoutingTimeout(now: now + 100)
+            do { _ = try await second.value; XCTFail("Timeout kept continuation alive") } catch {}
+            let status = await session.status, channels = await engine.channels(), payments = await engine.payments()
+            XCTAssertEqual(status, .stopped); XCTAssertTrue(channels.isEmpty); XCTAssertTrue(payments.isEmpty)
+            await remote.close()
+        } catch { await session.stop(); await remote.close(); handshake.cancel(); throw error }
     }
 }

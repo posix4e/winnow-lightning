@@ -23,8 +23,8 @@ private final class MemoryJournal: LightningJournal {
 final class ChannelEngineTests: XCTestCase, @unchecked Sendable {
     private let chain = Data(repeating: 7, count: 32)
     private func key(_ byte: UInt8) throws -> Data { try ChannelKeys.publicKey(secret: Data(repeating: byte, count: 32)) }
-    private func engine(_ memory: JournalMemory, peer: Data, secret: Data? = nil, features: LightningFeatures = .channelOpening) async throws -> LightningEngine {
-        let engine = try LightningEngine(chain: chain, nodeSecret: secret, journal: MemoryJournal(memory))
+    private func engine(_ memory: JournalMemory, peer: Data, secret: Data? = nil, features: LightningFeatures = .channelOpening, networkChain: Data? = nil) async throws -> LightningEngine {
+        let engine = try LightningEngine(chain: networkChain ?? chain, nodeSecret: secret, journal: MemoryJournal(memory))
         try await engine.chainCaughtUp()
         try await engine.peerInitialized(peer, features: features)
         return engine
@@ -161,12 +161,12 @@ final class ChannelEngineTests: XCTestCase, @unchecked Sendable {
         let aliceKey: Data, bobKey: Data, id: Data
         let aliceStore: JournalMemory, bobStore: JournalMemory
     }
-    private func pair(holdingPeer: Bool = false, anySegwit: Bool = true) async throws -> Pair {
+    private func pair(holdingPeer: Bool = false, anySegwit: Bool = true, networkChain: Data? = nil) async throws -> Pair {
         let aliceKey = try key(1), bobKey = try key(2), aStore = JournalMemory(), bStore = JournalMemory()
         let base = LightningFeatures.channelOpening.bits.subtracting(anySegwit ? [] : [27])
         let alice = try await engine(aStore, peer: bobKey, secret: Data(repeating: 1, count: 32),
-            features: LightningFeatures(bits: base.union(holdingPeer ? [153] : [])))
-        let bob = try await engine(bStore, peer: aliceKey, secret: Data(repeating: 2, count: 32), features: LightningFeatures(bits: base))
+            features: LightningFeatures(bits: base.union(holdingPeer ? [153] : [])), networkChain: networkChain)
+        let bob = try await engine(bStore, peer: aliceKey, secret: Data(repeating: 2, count: 32), features: LightningFeatures(bits: base), networkChain: networkChain)
         let temporary = try await alice.openChannel(peer: bobKey, capacitySat: 100_000, feePerKW: 1000)
         _ = try await bob.receive(peer: aliceKey, message: alice.pendingMessages(peer: bobKey)[0].message)
         let events = try await alice.receive(peer: bobKey, message: bob.pendingMessages(peer: aliceKey)[0].message)
@@ -519,5 +519,59 @@ private extension LightningEngine {
                 }
             }
         }
+    }
+}
+
+extension ChannelEngineTests {
+    func testInvoicePaymentPersistsOnceAndSettlesThroughTheChannel() async throws {
+        let p = try await pair(networkChain: NetworkParams.regtest.genesisHash)
+        let invoice = try await p.bob.registerReceive(id: Data(repeating: 91, count: 32), amountMsat: 5_000_000, expiry: 300)
+        let text = try Bolt11Invoice.encode(network: .regtest, amountMsat: invoice.amountMsat,
+            hash: invoice.paymentHash, secret: invoice.paymentSecret, nodeSecret: Data(repeating: 2, count: 32), route: nil, timestamp: 100)
+        let request = LightningEngine.InvoicePayment(id: Data(repeating: 92, count: 32), peer: p.bobKey, channelID: p.id,
+            invoice: text, network: .regtest, amountMsat: 5_000_000, feeLimitMsat: 0, maximumDelta: 144, route: try Bolt11PaymentRoute(hops: []))
+        let before = p.aliceStore.load()
+        let quote = try await p.alice.invoiceQuote(request, now: 101)
+        XCTAssertEqual(quote.feeMsat, 0); XCTAssertEqual(before, p.aliceStore.load())
+        let initial = try await p.alice.payInvoice(request, now: 101), stored = p.aliceStore.load()
+        let repeated = try await p.alice.payInvoice(request, now: 102)
+        XCTAssertEqual(initial, repeated); XCTAssertEqual(stored, p.aliceStore.load())
+        let different = LightningEngine.InvoicePayment(id: request.id, peer: p.bobKey, channelID: p.id, invoice: text,
+            network: .regtest, amountMsat: 5_000_001, feeLimitMsat: 0, maximumDelta: 144, route: request.route)
+        do { _ = try await p.alice.payInvoice(different, now: 102); XCTFail() } catch {}
+        XCTAssertEqual(stored, p.aliceStore.load())
+        let restored = try LightningEngine(chain: NetworkParams.regtest.genesisHash, journal: MemoryJournal(p.aliceStore))
+        try await restored.chainCaughtUp(); try await restored.peerInitialized(p.bobKey, features: .channelOpening)
+        let afterInitialization = p.aliceStore.load()
+        let replay = try await restored.payInvoice(request, now: 103)
+        XCTAssertEqual(replay, initial); XCTAssertEqual(afterInitialization, p.aliceStore.load())
+        var aSent = Set<UInt64>(), bSent = Set<UInt64>()
+        for _ in 0..<6 {
+            try await pump(p.alice, peer: p.bobKey, to: p.bob, from: p.aliceKey, sent: &aSent)
+            try await pump(p.bob, peer: p.aliceKey, to: p.alice, from: p.bobKey, sent: &bSent)
+        }
+        let paid = await p.alice.payments(), received = await p.bob.payments()
+        XCTAssertEqual(paid.map(\.phase), [.settled]); XCTAssertEqual(received.map(\.phase), [.settled])
+        XCTAssertEqual(paid.first?.preimage, received.first?.preimage)
+        XCTAssertEqual(try storedChannel(p.aliceStore).view(localOwner: true, number: 2).localMsat, 95_000_000)
+    }
+    func testInvoiceInvalidAmountExpiryAndDiskFailureCannotPublish() async throws {
+        let p = try await pair(networkChain: NetworkParams.regtest.genesisHash)
+        let text = try Bolt11Invoice.encode(network: .regtest, amountMsat: 5_000_000, hash: Data(repeating: 9, count: 32),
+            secret: Data(repeating: 8, count: 32), nodeSecret: Data(repeating: 2, count: 32), route: nil, timestamp: 100)
+        func request(_ amount: UInt64) throws -> LightningEngine.InvoicePayment {
+            try .init(id: Data(repeating: 92, count: 32), peer: p.bobKey, channelID: p.id, invoice: text, network: .regtest,
+                      amountMsat: amount, feeLimitMsat: 0, maximumDelta: 144, route: try Bolt11PaymentRoute(hops: []))
+        }
+        let before = p.aliceStore.load()
+        do { _ = try await p.alice.payInvoice(request(5_000_001), now: 101); XCTFail() } catch {}
+        do { _ = try await p.alice.payInvoice(request(5_000_000), now: 3700); XCTFail() } catch {}
+        XCTAssertEqual(before, p.aliceStore.load())
+        p.aliceStore.fail()
+        do { _ = try await p.alice.payInvoice(request(5_000_000), now: 101); XCTFail() }
+        catch { XCTAssertEqual(error as? LightningError, .storageFailed) }
+        XCTAssertEqual(before, p.aliceStore.load())
+        do { _ = try await p.alice.pendingMessages(peer: p.bobKey); XCTFail() }
+        catch { XCTAssertEqual(error as? LightningError, .storageFailed) }
     }
 }

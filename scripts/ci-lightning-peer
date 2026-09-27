@@ -71,10 +71,9 @@ def settle(swift, payment_id):
 def check_payments(ln, swift, channel, height):
     invoice = ln('invoice', '5000000msat', 'swift-outbound', 'Swift independent interop')
     decoded = ln('decode', invoice['bolt11'])
-    request = dict(id='51' * 32, channel=channel['channel_id'], hash=decoded['payment_hash'],
-                   secret=decoded['payment_secret'], amount='5000000', expiry=str(height + 144))
-    first = swift.call('pay', **request)
-    assert swift.call('pay', **request) == first
+    request = dict(id='51' * 32, channel=channel['channel_id'], invoice=invoice['bolt11'], height=str(height))
+    first = swift.call('pay_invoice', **request)
+    assert swift.call('pay_invoice', **request) == first
     outgoing = settle(swift, request['id'])
     paid = ln('listinvoices', 'swift-outbound')['invoices'][0]
     assert paid['status'] == 'paid' and paid['amount_received_msat'] == 5_000_000
@@ -90,6 +89,28 @@ def check_payments(ln, swift, channel, height):
     assert completed['status'] == 'complete' and completed['amount_msat'] == 2_000_000
     assert completed['amount_sent_msat'] == 2_000_000 and completed['payment_preimage'] == received['preimage']
     return {'swift_to_cln': outgoing, 'cln_to_swift': received}
+
+
+def check_routed_invoice(ln, recipient, swift, channel, height, executable, peer_port, peer_id, evidence):
+    invoice = recipient('-k', 'invoice', 'amount_msat=2000000msat', 'label=swift-routed',
+                        'description=Swift public gossip route', 'exposeprivatechannels=false')
+    decoded = recipient('decode', invoice['bolt11'])
+    assert not decoded.get('routes'), decoded
+    probe = subprocess.run([executable, 'probe-invoice-route', '127.0.0.1', str(peer_port), peer_id,
+                            'regtest', str(height), invoice['bolt11']], text=True, capture_output=True, timeout=180)
+    (evidence / 'invoice-route-probe.log').write_text(probe.stdout + probe.stderr)
+    probe.check_returncode()
+    route = json.loads(probe.stdout)
+    assert len(json.loads(route['route'])) == 1 and int(route['fee_msat']) > 0, route
+    request = dict(id='53' * 32, channel=channel['channel_id'], invoice=invoice['bolt11'], height=str(height), route=route['route'])
+    swift.call('pay_invoice', **request)
+    outgoing = settle(swift, request['id'])
+    paid = recipient('listinvoices', 'swift-routed')['invoices'][0]
+    assert paid['status'] == 'paid' and paid['amount_received_msat'] == 2_000_000, paid
+    assert paid['payment_hash'] == outgoing['hash'] and outgoing['fee'] == route['fee_msat']
+    forwards = ln('listforwards')['forwards']
+    assert any(item['status'] == 'settled' and item['out_msat'] == 2_000_000 for item in forwards), forwards
+    return dict(payment=outgoing, quote=route, independent_invoice=paid)
 
 
 def wait_for(check, timeout=45):
@@ -205,7 +226,7 @@ def run_peer(close_mode, evidence):
                                              method, *map(str, args)], text=True, stderr=subprocess.PIPE, timeout=20)
             return json.loads(value)
 
-        node = daemon = swift = None
+        node = daemon = recipient_daemon = swift = None
         with open(evidence / 'bitcoin.log', 'w') as core_log, open(evidence / 'cln.log', 'w') as cln_log, open(evidence / 'swift-peer.log', 'w') as swift_log:
             try:
                 node = subprocess.Popen([str(bitcoin / 'bitcoind'), *base, '-server=1', '-listen=0', '-connect=0',
@@ -251,12 +272,35 @@ def run_peer(close_mode, evidence):
                 assert remote['total_msat'] == 100_000_000 and remote['to_us_msat'] == 0
                 assert remote['channel_type']['bits'] == [12]
                 payments = check_payments(ln, swift, remote, rpc('getblockcount'))
-                remote = ln('listpeerchannels')['channels'][0]
-                assert remote['to_us_msat'] == 3_000_000
+                if close_mode == 'cooperative':
+                    recipient_dir = root / 'recipient'; recipient_dir.mkdir()
+                    recipient_port = port()
+                    def recipient(method, *args):
+                        value = subprocess.check_output([str(cln / 'cli/lightning-cli'), '-J', '--notifications=none',
+                            f'--lightning-dir={recipient_dir}', '--network=regtest', method, *map(str, args)], text=True, stderr=subprocess.PIPE, timeout=30)
+                        return json.loads(value)
+                    recipient_daemon = subprocess.Popen([str(cln / 'lightningd/lightningd'), f'--lightning-dir={recipient_dir}', '--network=regtest',
+                        f'--addr=127.0.0.1:{recipient_port}', '--autolisten=false', '--announce-addr-discovered=false',
+                        f'--bitcoin-cli={bitcoin / "bitcoin-cli"}', f'--bitcoin-datadir={core_dir}', f'--bitcoin-rpcport={rpc_port}',
+                        f'--log-file={evidence / "recipient-cln.log"}', '--log-level=debug'], stdout=cln_log, stderr=cln_log)
+                    recipient_info = wait_for(lambda: recipient('getinfo'))
+                    deposit = ln('newaddr')['bech32']; rpc('sendtoaddress', deposit, 0.01); rpc('generatetoaddress', 1, address)
+                    wait_for(lambda: ln('listfunds')['outputs'])
+                    ln('connect', recipient_info['id'], '127.0.0.1', recipient_port)
+                    ln('-k', 'fundchannel', 'id=' + recipient_info['id'], 'amount=500000sat', 'announce=true')
+                    rpc('generatetoaddress', 6, address)
+                    wait_for(lambda: any(c['state'] == 'CHANNELD_NORMAL' for c in recipient('listpeerchannels')['channels']))
+                    wait_for(lambda: ln('listchannels')['channels'])
+                    payments['swift_to_routed_cln'] = check_routed_invoice(ln, recipient, swift, remote, rpc('getblockcount'),
+                        executable, peer_port, info['id'], evidence)
+
+                remote = next(c for c in ln('listpeerchannels')['channels'] if c['channel_id'] == snapshot['id'])
+                expected_peer_balance = 3_000_000 + (2_000_000 + int(payments['swift_to_routed_cln']['payment']['fee']) if close_mode == 'cooperative' else 0)
+                assert remote['to_us_msat'] == expected_peer_balance
                 snapshot = swift.call('snapshot')
                 previous_commitment = snapshot['commitment']
                 swift.close()
-                wait_for(lambda: not ln('listpeers')['peers'][0]['connected'])
+                wait_for(lambda: not next(p for p in ln('listpeers')['peers'] if p['id'] == swift.initialization['node_id'])['connected'])
                 swift = SwiftPeer([executable, '127.0.0.1', str(peer_port), info['id'], chain, str(root / 'swift-journal')], swift_log)
                 swift.call('snapshot')  # Flush only channel_reestablish first.
                 swift.receive(136)
@@ -274,7 +318,7 @@ def run_peer(close_mode, evidence):
                     closing = swift.receive(39)['transaction']
                     outputs = rpc('decoderawtransaction', closing)['vout']
                     returned = next(output for output in outputs if output['scriptPubKey']['hex'] == destination)
-                    assert 0.00096276 <= returned['value'] <= 0.00097
+                    assert 0.00094274 <= returned['value'] <= 0.00094999
                 # An independent signer and an independent consensus engine must
                 # both accept our locally enforceable commitment.
                 checked = rpc('testmempoolaccept', json.dumps([closing]))[0]
@@ -282,7 +326,7 @@ def run_peer(close_mode, evidence):
                     assert close_mode == 'cooperative' and checked.get('reject-reason') == 'txn-already-in-mempool', checked
                 commitment_id = rpc('sendrawtransaction', closing)
                 rpc('generatetoaddress', 1, address)
-                receipt = {'result': 'passed', 'scope': 'Swift-funded static-remotekey opening, bidirectional direct payments, process restart/reestablishment and close',
+                receipt = {'result': 'passed', 'scope': 'Swift-funded static-remotekey opening, bidirectional BOLT11 payments, production gossip routing and forwarded invoice settlement (cooperative run), process restart/reestablishment and close',
                     'close_mode': close_mode,
                     'core_lightning_version': version, 'core_lightning_commit': commit,
                     'bitcoin_core_version': rpc('getnetworkinfo')['version'],
@@ -295,7 +339,7 @@ def run_peer(close_mode, evidence):
             finally:
                 if swift:
                     swift.close()
-                stop(daemon); stop(node)
+                stop(recipient_daemon); stop(daemon); stop(node)
 
 
 def check_peer(close_mode, evidence):

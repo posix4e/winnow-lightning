@@ -14,12 +14,14 @@ extension LightningEngine {
     }
     /// Authenticated private-channel policy, never an invented route or fee.
     public func receiveChannelPolicy(peer: Data, message: LightningWire.Message) throws {
-        try operational(peer)
+        // Signed policy metadata is control traffic; financial invoice/channel
+        // actions still require a verified chain in their own entry points.
+        try healthy(); guard peers[peer] != nil else { throw LightningError.invalidState }
         guard message.type == 258 else { throw LightningError.invalidMessage }
         // No private routing policy can apply before funding is identified.
         // Old rejected requests must not turn general gossip into a failure.
         guard state.channels.contains(where: { $0.peer == peer && $0.phase != .closed && $0.fundingTxid != nil }) else { return }
-        guard let policy = try parsePolicy(peer: peer, message: message) else { return }
+        guard let policy = try? parsePolicy(peer: peer, message: message) else { return }
         let scid = policy.shortChannelID, timestamp = policy.timestamp
         if persistedPolicy(scid: scid, isNewerThan: timestamp) { return }
         if let previous = invoicePolicies[scid], previous.timestamp > timestamp { return }
@@ -35,7 +37,7 @@ extension LightningEngine {
         let timestamp = try reader.u32(), messageFlags = try reader.u8(), channelFlags = try reader.u8()
         let delta = try reader.u16(), minimum = try reader.u64(), base = try reader.u32(), proportional = try reader.u32()
         let maximum = messageFlags & 1 == 1 ? try reader.u64() : nil
-        try reader.requireEnd()
+        // Future signed policy extensions are included in the signature.
         // Ignore general gossip and our own direction, while checking policies
         // used for invoices against the authenticated peer's signature.
         guard chain == state.chain, channelFlags & 1 == (peer.lexicographicallyPrecedes(try nodeID()) ? 0 : 1) else { return nil }

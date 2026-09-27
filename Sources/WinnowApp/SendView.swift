@@ -50,6 +50,7 @@ struct SendView: View {
 
     @State private var selectedPersonID: String?
     @State private var showRecipients = false
+    @State private var showLightning = false
     @State private var destination = ""
     @State private var amountText = ""
     @State private var priority: FeePolicy.Priority = .medium
@@ -131,6 +132,9 @@ struct SendView: View {
                     }
                 }
             }
+            .sheet(isPresented: $showLightning) {
+                if let controller = model.lightning { LightningInvoiceSendView(controller: controller) }
+            }
             .sheet(isPresented: $showRecipients) {
                 SavedRecipientsView { person in
                     selectedPersonID = person.id
@@ -177,6 +181,9 @@ struct SendView: View {
 
     private var paymentForm: some View {
         Group {
+            if model.lightning != nil, accountID == nil, selectedPerson == nil {
+                Section { Button("Pay Lightning invoice") { showLightning = true }.accessibilityIdentifier("sendLightning") }
+            }
             if !model.vaults.isEmpty {
                 Section("From") {
                     Picker("Account", selection: $accountID) {

@@ -8,6 +8,7 @@ struct LightningView: View {
     let controller: LightningAppController
     @State private var setup = false
     @State private var send = false
+    @State private var sendInvoice = false
     @State private var receive = false
     @State private var capacity = ""
     @State private var review: LightningReview?
@@ -35,6 +36,7 @@ struct LightningView: View {
                 channelSection
                 receiveSection
                 Section("Payments") {
+                    Button("Pay Lightning invoice") { sendInvoice = true }.accessibilityIdentifier("lightningSendInvoice")
                     Button("Pay a receive offer") { send = true }.accessibilityIdentifier("lightningSend")
                         .disabled(!controller.channels.contains(where: { $0.phase == .ready }))
                     ForEach(controller.payments.reversed(), id: \.id) { payment in
@@ -53,6 +55,7 @@ struct LightningView: View {
             .navigationTitle("Lightning")
             .disabled(busy)
             .sheet(isPresented: $setup) { LightningSetupView(controller: controller) }
+            .sheet(isPresented: $sendInvoice) { LightningInvoiceSendView(controller: controller) }
             .sheet(isPresented: $send) { LightningSendView(controller: controller) }
             .sheet(isPresented: $receive) { LightningReceiveView(controller: controller) }
             .sheet(item: $review) { LightningReviewView(controller: controller, review: $0) }

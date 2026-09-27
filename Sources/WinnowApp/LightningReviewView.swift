@@ -6,12 +6,14 @@ enum LightningReview: Identifiable {
     case profile(LightningProfile)
     case funding(LightningAppController.FundingReview)
     case payment(LightningAppController.PaymentReview)
+    case invoice(LightningAppController.InvoiceReview)
     case close(LightningAppController.CloseReview)
     var id: String {
         switch self {
         case .profile(let profile): "profile-" + profile.peer
         case .funding(let review): "funding-" + review.request.temporaryID.hex
         case .payment(let review): "payment-" + review.request.id.hex
+        case .invoice(let review): "invoice-" + review.request.id.hex
         case .close(let review): "close-\(review.force)-" + review.channel.id.hex
         }
     }
@@ -70,6 +72,20 @@ struct LightningReviewView: View {
                 }
                 Text("Funds may remain committed while the recipient is offline. “Awaiting recipient” means pending; only “Settled” confirms payment.")
             }
+        case .invoice(let review):
+            Section("Send payment") {
+                LabeledContent("Amount", value: "\(Bolt11Invoice.sats(review.request.amountMsat)) sats")
+                LabeledContent("Routing fee", value: "\(Bolt11Invoice.sats(review.quote.feeMsat)) sats")
+                LabeledContent("Maximum fee", value: "\(Bolt11Invoice.sats(review.request.feeLimitMsat)) sats")
+                LabeledContent("Total", value: "\(Bolt11Invoice.sats(review.quote.amountMsat)) sats")
+                LabeledContent("Payment timeout", value: "\(review.quote.delta) blocks")
+                if let description = review.description { Text(description) }
+                DisclosureGroup("Recipient and invoice") {
+                    Text(review.payee.hex).font(.caption.monospaced())
+                    Text(review.request.invoice).font(.caption.monospaced()).textSelection(.enabled)
+                }
+                Text("Invoice expires \(Date(timeIntervalSince1970: Double(review.expiresAt)).formatted()). Keep Winnow open while paying. Pending is not confirmation.")
+            }
         case .close(let review):
             let force = review.force
             Section(force ? "Force close" : "Cooperative close") {
@@ -93,6 +109,7 @@ struct LightningReviewView: View {
                 case .profile(let profile): try await controller.saveProfile(profile, model: model)
                 case .funding(let review): try await controller.fund(review, model: model)
                 case .payment(let review): try await controller.pay(review, model: model)
+                case .invoice(let review): try await controller.payInvoice(review, model: model)
                 case .close(let review): try await controller.close(review, model: model)
                 }
                 onConfirmed()
