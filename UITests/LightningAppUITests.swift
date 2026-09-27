@@ -106,7 +106,8 @@ final class LightningAppUITests: XCTestCase {
             XCTAssertTrue(scroll(app, app.buttons["lightningProvider.\(provider)"]))
         }
         Screenshots.capture(app, "lightning-three-providers", testCase: self)
-        app.buttons["lightningSetupDone"].tap()
+        tapToolbar(app, "lightningSetupDone")
+        XCTAssertTrue(app.buttons["lightningSetupDone"].disappears(within: 10), app.debugDescription)
         XCTAssertTrue(scroll(app, app.buttons["Receive Bitcoin instead"]))
         app.buttons["Receive Bitcoin instead"].tap()
         let skip = app.buttons["skipReceiveAddressLabelButton"]
@@ -240,6 +241,10 @@ final class LightningAppUITests: XCTestCase {
         tap(app, "lightningPasteOffer")
         XCTAssertTrue(scroll(app, app.textFields["lightningAmount"], fullyVisible: true))
         app.typeInto("lightningAmount", "5000")
+        if app.keyboards.firstMatch.exists {
+            tapToolbar(app, "sendKeyboardDone")
+            XCTAssertTrue(app.keyboards.firstMatch.disappears(within: 10), app.debugDescription)
+        }
         tap(app, "lightningReviewPayment")
         XCTAssertTrue(app.navigationBars["Review Lightning"].appears(within: 15), app.debugDescription)
         for row in ["Amount, 5000 sats", "Maximum fee, 50 sats", "Maximum expiry, 2016 blocks"] {
@@ -311,7 +316,8 @@ final class LightningAppUITests: XCTestCase {
         tap(app, "openSendButton"); tap(app, "sendLightning")
         tap(app, "lightningScanInvoice")
         XCTAssertTrue(app.staticTexts["Camera scanning unavailable"].appears(within: 15))
-        tap(app, "lightningScanCancel")
+        tapToolbar(app, "lightningScanCancel")
+        XCTAssertTrue(app.buttons["lightningScanCancel"].disappears(within: 10), app.debugDescription)
         try paste("LIGHTNING:" + text); tap(app, "lightningPasteInvoice")
         tap(app, "lightningReviewInvoice")
         XCTAssertTrue(app.navigationBars["Review Lightning"].appears(within: 30), app.debugDescription)
@@ -324,8 +330,10 @@ final class LightningAppUITests: XCTestCase {
         }, app.debugDescription)
         let receipt = try rpc("invoice_settled"), hash = try XCTUnwrap(receipt["payment_hash"] as? String)
         Screenshots.capture(app, "bolt11-settled", testCase: self)
-        tap(app, "lightningInvoiceSendDone")
-        tap(app, "closeSendButton")
+        tapToolbar(app, "lightningInvoiceSendDone")
+        XCTAssertTrue(app.buttons["lightningInvoiceSendDone"].disappears(within: 10), app.debugDescription)
+        tapToolbar(app, "closeSendButton")
+        XCTAssertTrue(app.buttons["closeSendButton"].disappears(within: 10), app.debugDescription)
         app.buttons["advancedModeButton"].tap()
         // Restore the same wallet and invoice history in a new process.
         app.terminate()
@@ -406,7 +414,13 @@ final class LightningAppUITests: XCTestCase {
         // scroll its contents. The form gutter moves the surrounding controls.
         // On iPad the modal form is centered within the wider app surface.
         return scrollUntilExists(app, element, up: up, fullyVisible: fullyVisible,
-                                 dragX: app.frame.width < 600 ? 0.03 : 0.5)
+                                 dragX: 0.03)
+    }
+    private func tapToolbar(_ app: XCUIApplication, _ identifier: String) {
+        let button = app.buttons[identifier]
+        XCTAssertTrue(button.appears(within: 15), app.debugDescription)
+        XCTAssertTrue(button.isEnabled)
+        XCTAssertTrue(tapVisibleCenter(app, button), app.debugDescription)
     }
     private func tap(_ app: XCUIApplication, _ identifier: String, up: Bool = false) {
         let button = app.buttons[identifier]

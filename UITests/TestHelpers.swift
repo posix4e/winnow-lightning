@@ -78,18 +78,31 @@ extension XCTestCase {
                 guard fullyVisible else { return true }
                 return reveal(app, element, fullyVisible: fullyVisible, dragX: dragX)
             }
-            guard let frame = usableFrame(app), let band = clearBand(app, in: frame) else { return false }
+            guard let appFrame = usableFrame(app), let frame = scrollingFrame(app, within: appFrame),
+                  let band = clearBand(app, in: frame) else { return false }
             let reach = band.upperBound - band.lowerBound
             let origin = app.coordinate(withNormalizedOffset: .zero)
-            let start = origin.withOffset(CGVector(dx: frame.width * dragX,
-                dy: band.lowerBound + reach * (up ? 0.25 : 0.75) - frame.minY))
-            let end = origin.withOffset(CGVector(dx: frame.width * dragX,
-                dy: band.lowerBound + reach * (up ? 0.75 : 0.25) - frame.minY))
+            let start = origin.withOffset(CGVector(dx: frame.minX + frame.width * dragX - appFrame.minX,
+                dy: band.lowerBound + reach * (up ? 0.25 : 0.75) - appFrame.minY))
+            let end = origin.withOffset(CGVector(dx: frame.minX + frame.width * dragX - appFrame.minX,
+                dy: band.lowerBound + reach * (up ? 0.75 : 0.25) - appFrame.minY))
             start.press(forDuration: 0.05, thenDragTo: end, withVelocity: .default, thenHoldForDuration: 0.25)
         }
         guard element.appears(within: 1.5) else { return false }
         guard fullyVisible else { return true }
         return reveal(app, element, fullyVisible: fullyVisible, dragX: dragX)
+    }
+
+    /// The last Form belongs to the presented navigation stack. On iPad its
+    /// sheet occupies only part of the window; drags outside it hit the dimmed
+    /// wallet instead of scrolling the form.
+    @MainActor
+    private func scrollingFrame(_ app: XCUIApplication, within frame: CGRect) -> CGRect? {
+        guard let snapshot = try? app.snapshot() else { return nil }
+        func forms(_ node: XCUIElementSnapshot) -> [CGRect] {
+            (node.elementType == .collectionView ? [node.frame] : []) + node.children.flatMap(forms)
+        }
+        return forms(snapshot).last.map { $0.intersection(frame) } ?? frame
     }
 
     /// The vertical band a row is tappable in: below the lowest navigation
@@ -134,7 +147,7 @@ extension XCTestCase {
         guard let appFrame = usableFrame(app) else { return false }
         // Each AX frame read resolves the element again. Reuse this geometry
         // within the reveal; the moving row is still reread after every drag.
-        guard let band = clearBand(app, in: appFrame) else { return false }
+        guard let viewport = scrollingFrame(app, within: appFrame), let band = clearBand(app, in: viewport) else { return false }
         let reach = band.upperBound - band.lowerBound - 2 * margin
         guard reach.isFinite, reach > 0 else { return false }
         for attempt in 0 ... 3 {
@@ -143,13 +156,13 @@ extension XCTestCase {
             if shift == 0 {
                 // XCTest can reject a valid visible button's activation point.
                 // Verify its bounds here; the shared journey taps its center.
-                return !fullyVisible || (frame.minX >= appFrame.minX && frame.maxX <= appFrame.maxX
+                return !fullyVisible || (frame.minX >= viewport.minX && frame.maxX <= viewport.maxX
                     && frame.minY >= band.lowerBound + margin && frame.maxY <= band.upperBound - margin)
             }
             guard attempt < 3 else { return false }
             let midY = (band.lowerBound + band.upperBound) / 2
             let start = app.coordinate(withNormalizedOffset: .zero)
-                .withOffset(CGVector(dx: appFrame.width * dragX, dy: midY - shift / 2 - appFrame.minY))
+                .withOffset(CGVector(dx: viewport.minX + viewport.width * dragX - appFrame.minX, dy: midY - shift / 2 - appFrame.minY))
             start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 0, dy: shift)),
                         withVelocity: .default, thenHoldForDuration: 0.25)
         }
@@ -179,9 +192,9 @@ extension XCTestCase {
         guard let appFrame = usableFrame(app), let frame = usableFrame(element) else { return false }
         var viewport = appFrame
         if excludingBars {
-            guard let band = clearBand(app, in: appFrame) else { return false }
-            viewport = CGRect(x: appFrame.minX, y: band.lowerBound,
-                              width: appFrame.width, height: band.upperBound - band.lowerBound)
+            guard let form = scrollingFrame(app, within: appFrame), let band = clearBand(app, in: form) else { return false }
+            viewport = CGRect(x: form.minX, y: band.lowerBound,
+                              width: form.width, height: band.upperBound - band.lowerBound)
         }
         let visible = frame.intersection(viewport)
         guard !visible.isNull, visible.width > 0,
