@@ -12,7 +12,7 @@ extension PeerFixture {
         defer { try? FileManager.default.removeItem(at: root) }
         let engine = try LightningEngine(chain: NetworkParams.mainnet.genesisHash,
             journal: FileLightningJournal(directory: root, key: Data(repeating: 42, count: 32)))
-        // Diagnostic permits only get_info; this is not a mainnet sync receipt.
+        // Diagnostic never supplies funding/signatures; not a mainnet sync receipt.
         try await engine.chainCaughtUp()
         let session = LightningPeerSession(engine: engine, peer: peer, host: args[1], port: port, onEvents: { _ in })
         do {
@@ -34,9 +34,15 @@ extension PeerFixture {
                 try emit(["status": "unpaid-quote-validated", "fee_sat": String(fee), "order_id": order.orderId,
                     "minimum_confirmations": String(purchase.requiredChannelConfirmations), "payment": "never authorized or sent"])
             }
-            if args.first == "probe-lsp-stability" {
+            if args.first == "probe-lsp-opening" {
+                _ = try await engine.openChannel(peer: peer, capacitySat: 100_000, feePerKW: 1000)
+                try await session.flush()
+            }
+            if ["probe-lsp-stability", "probe-lsp-opening"].contains(args.first) {
+                let duration = args.first == "probe-lsp-opening" ? 10 : 60
                 var lastWarning: String?
-                for second in 1...60 {
+                var rejectedAndReconnected = false
+                for second in 1...duration {
                     try await Task.sleep(for: .seconds(1))
                     let status = await session.status
                     if let warning = await session.lastPeerWarning, warning != lastWarning {
@@ -44,10 +50,21 @@ extension PeerFixture {
                         lastWarning = warning
                     }
                     guard status == .connected else {
+                        if args.first == "probe-lsp-opening", !rejectedAndReconnected,
+                           case .failed(let reason) = status,
+                           await engine.channels().allSatisfy({ $0.phase == .closed }) {
+                            try emit(["status": "unfunded-request-rejected", "reason": reason])
+                            await session.stop(); try await session.start()
+                            _ = try await session.liquidityInfo()
+                            rejectedAndReconnected = true
+                            continue
+                        }
                         throw LightningLiquidityError.provider("Disconnected after \(second) seconds: \(status)")
                     }
                 }
-                try emit(["status": "connected-for-60-seconds", "payment": "never authorized or sent"])
+                try emit(["status": rejectedAndReconnected ? "rejected-unfunded-request-and-reconnected" : "connected-for-\(duration)-seconds",
+                    "payment": "never authorized or sent",
+                    "channel_phase": await engine.channels().first?.phase.rawValue ?? "none"])
             }
             await session.stop()
         } catch {

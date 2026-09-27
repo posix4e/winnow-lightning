@@ -58,11 +58,26 @@ reading provider notices. Financial messages wait in a bounded, ordered queue
 (128 messages / 1 MiB) until the engine verifies the chain again. Overflow
 disconnects rather than accepting financial work against an unverified chain.
 
+Manual channel funding starts with an empty capacity field. This spending setup
+is separate from buying provider-funded receiving capacity. Opening and accepted
+negotiations do not report proposed allocations as local balances. A balance
+requires a funding outpoint and an enforceable peer-signed commitment; recovery
+destinations can still be configured before funding. Receiving status distinguishes
+unfinished negotiation, funding signatures, confirmations, and routing capacity.
+
+A provider error declining a locally initiated request still in `opening` marks
+that unfunded request closed and removes its queued messages. Reconnecting or
+restarting cannot replay it indefinitely. Its history remains in the journal.
+This rejection path cannot close or discard enforceable funded channels.
+
 The host-only `winnow-lightning-peer-fixture probe-lsp-stability HOST PORT PEER
 [API]` command authenticates a temporary node, requests provider information,
 and checks that the session stays connected for 60 seconds. It does not request
 a channel, create an order, or send funds. A passing result is a connection
 diagnostic, not a mainnet receiving or chain-validation receipt.
+`probe-lsp-opening` makes a temporary 100,000-sat negotiation request, supplies no
+funding or signatures, and checks reconnection if the provider rejects it. A
+provider's direct-funding minimum can differ from its LSPS1 capacity minimum.
 
 Primary contracts:
 

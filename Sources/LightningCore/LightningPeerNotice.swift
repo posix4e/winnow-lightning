@@ -31,4 +31,27 @@ extension LightningEngine {
             $0.peer == peer && ($0.id == notice.channelID || $0.temporaryID == notice.channelID)
         }
     }
+    /// A declined initial request has released no funding signature. Retain
+    /// its history, but stop replaying open_channel on every reconnection.
+    func rejectOpening(_ notice: LightningPeerNotice, peer: Data) throws {
+        try healthy()
+        guard notice.isError else { return }
+        let global = notice.channelID == Data(repeating: 0, count: 32)
+        let indices = state.channels.indices.filter { index in
+            let channel = state.channels[index]
+            return channel.peer == peer && (global || channel.id == notice.channelID || channel.temporaryID == notice.channelID)
+                && channel.isFunder && channel.phase == .opening && channel.fundingTxid == nil
+                && channel.fundingTransaction == nil && channel.signedCommitment == nil
+        }
+        guard !indices.isEmpty else { return }
+        var next = state
+        for index in indices {
+            let channel = next.channels[index]
+            next.channels[index].phase = .closed
+            next.outbox.removeAll {
+                $0.peer == peer && ($0.channelID == channel.id || $0.channelID == channel.temporaryID)
+            }
+        }
+        try persist(next)
+    }
 }

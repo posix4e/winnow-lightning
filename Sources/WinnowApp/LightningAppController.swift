@@ -215,8 +215,8 @@ final class LightningAppController {
         try requireNetwork(model)
         let epoch = generation
         guard profile != nil, let engine, let wallet = model.wallet else { return }
-        let balances = try await engine.channelBalances()
-        for channel in await engine.channels() where balances.contains(where: { $0.id == channel.id && !$0.recoveryConfigured }) {
+        let needingRecovery = Set(try await engine.channelsNeedingRecoveryConfiguration())
+        for channel in await engine.channels() where needingRecovery.contains(channel.id) {
             let address = try await wallet.freshReceiveAddress()
             try requireNetwork(model, generation: epoch)
             let destination = try AddressDecoder.scriptPubKey(for: address, network: network)

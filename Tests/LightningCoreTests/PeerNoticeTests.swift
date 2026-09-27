@@ -2,10 +2,11 @@ import Foundation
 import XCTest
 @testable import LightningCore
 
-private final class NoticeJournal: LightningJournal {
+private final class NoticeJournal: LightningJournal, @unchecked Sendable {
+    private let lock = NSLock()
     private var bytes: Data?
-    func load() -> Data? { bytes }
-    func store(_ snapshot: Data) { bytes = snapshot }
+    func load() -> Data? { lock.withLock { bytes } }
+    func store(_ snapshot: Data) { lock.withLock { bytes = snapshot } }
 }
 
 final class PeerNoticeTests: XCTestCase, @unchecked Sendable {
@@ -58,5 +59,37 @@ final class PeerNoticeTests: XCTestCase, @unchecked Sendable {
         for length in [0, 31, 32, 33, complete.payload.count - 1] {
             XCTAssertThrowsError(try LightningPeerNotice(.init(type: 1, payload: complete.payload.prefix(length))))
         }
+    }
+    func testRejectedOpeningDoesNotReplayAfterReconnectOrRestart() async throws {
+        let journal = NoticeJournal(), chain = Data(repeating: 7, count: 32)
+        let engine = try LightningEngine(chain: chain, journal: journal)
+        let peer = try ChannelKeys.publicKey(secret: Data(repeating: 2, count: 32))
+        let other = try ChannelKeys.publicKey(secret: Data(repeating: 3, count: 32))
+        try await engine.chainCaughtUp()
+        try await engine.peerInitialized(peer, features: .channelOpening)
+        try await engine.peerInitialized(other, features: .channelOpening)
+        let rejected = try await engine.openChannel(peer: peer, capacitySat: 100_000, feePerKW: 1000)
+        let retained = try await engine.openChannel(peer: other, capacitySat: 100_000, feePerKW: 1000)
+        let session = LightningPeerSession(engine: engine, peer: peer, host: "localhost", port: 9735, onEvents: { _ in })
+        try await session.handlePeerNotice(message(type: 1, channel: rejected, data: Data("temporary".utf8)))
+        let warningChannels = await engine.channels()
+        XCTAssertEqual(warningChannels.first?.phase, .opening)
+        do {
+            try await session.handlePeerNotice(message(type: 17, channel: rejected, data: Data("below minimum".utf8)))
+            XCTFail()
+        } catch { XCTAssertEqual(error.localizedDescription, "Provider error: below minimum") }
+        let channels = await engine.channels()
+        XCTAssertEqual(channels.first(where: { $0.id == rejected })?.phase, .closed)
+        XCTAssertEqual(channels.first(where: { $0.id == retained })?.phase, .opening)
+        await engine.peerDisconnected(peer)
+        try await engine.peerInitialized(peer, features: .channelOpening)
+        let pending = try await engine.pendingMessages(peer: peer)
+        XCTAssertTrue(pending.isEmpty)
+        let restored = try LightningEngine(chain: chain, journal: journal)
+        try await restored.chainCaughtUp(); try await restored.peerInitialized(peer, features: .channelOpening)
+        let replayed = try await restored.pendingMessages(peer: peer)
+        XCTAssertTrue(replayed.isEmpty, "A rejected unfunded request must not return after a process restart")
+        let balances = try await restored.channelBalances()
+        XCTAssertTrue(balances.isEmpty)
     }
 }

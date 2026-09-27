@@ -35,15 +35,27 @@ final class ChannelEngineTests: XCTestCase, @unchecked Sendable {
         let id = try await alice.openChannel(peer: bobKey, capacitySat: 100_000, feePerKW: 1000)
         let opening = await alice.channels()
         XCTAssertFalse(try XCTUnwrap(opening.first).needsMonitoring)
+        let openingBalances = try await alice.channelBalances()
+        XCTAssertTrue(openingBalances.isEmpty, "Requested capacity is not an owned balance")
         let open = try await alice.pendingMessages(peer: bobKey)[0].message
         _ = try await bob.receive(peer: aliceKey, message: open)
         let accept = try await bob.pendingMessages(peer: aliceKey)[0].message
         let events = try await alice.receive(peer: bobKey, message: accept)
         guard case .fundingRequired(let temporary, let amount, let script) = try XCTUnwrap(events.first) else { return XCTFail() }
         XCTAssertEqual(temporary, id); XCTAssertEqual(amount, 100_000)
+        let acceptedBalances = try await alice.channelBalances(), fundeeBalances = try await bob.channelBalances()
+        XCTAssertTrue(acceptedBalances.isEmpty); XCTAssertTrue(fundeeBalances.isEmpty)
+        let preparation = try await alice.channelsNeedingRecoveryConfiguration()
+        XCTAssertEqual(preparation, [id], "Recovery preparation must remain available before funding")
+        try await alice.configureRecovery(channelID: id, peer: bobKey,
+            destination: ChannelScripts.witnessKeyHash(aliceKey), feeSat: 500)
+        let prepared = try await alice.channelsNeedingRecoveryConfiguration()
+        XCTAssertTrue(prepared.isEmpty)
         let funding = Transaction(version: 2, inputs: [.init(previousOutput: .init(txid: Data(repeating: 9, count: 32), vout: 1),
             scriptSig: Data(), sequence: .max, witness: [Data([1])])], outputs: [.init(value: 100_000, scriptPubKey: script)], locktime: 0)
         try await alice.provideFunding(temporaryID: id, peer: bobKey, transaction: funding, output: 0)
+        let unsignedBalances = try await alice.channelBalances()
+        XCTAssertTrue(unsignedBalances.isEmpty, "No funded balance before the peer's enforceable signature")
         let created = try await alice.pendingMessages(peer: bobKey)[0].message
         _ = try await bob.receive(peer: aliceKey, message: created)
         let signed = try await bob.pendingMessages(peer: aliceKey)[0].message
@@ -58,6 +70,8 @@ final class ChannelEngineTests: XCTestCase, @unchecked Sendable {
         } catch { XCTAssertEqual(error as? LightningError, .invalidSignature) }
         XCTAssertEqual(beforeInvalid, aStore.load())
         let publish = try await alice.receive(peer: bobKey, message: signed)
+        let fundedBalances = try await alice.channelBalances()
+        XCTAssertEqual(fundedBalances.first?.localMsat, 100_000_000)
         guard case .broadcastFunding(let channelID, let raw) = try XCTUnwrap(publish.first) else { return XCTFail() }
         XCTAssertEqual(raw, funding.serialized(includeWitness: true))
         let persisted = try JSONDecoder().decode(LightningEngine.State.self, from: XCTUnwrap(aStore.load()))
@@ -89,6 +103,17 @@ final class ChannelEngineTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(store.load(), durable)
         do { _ = try await engine.pendingMessages(peer: peer); XCTFail("Even an existing outbox freezes after an uncertain write") }
         catch { XCTAssertEqual(error as? LightningError, .storageFailed) }
+    }
+    func testOpeningRejectionCannotDiscardEnforceableChannel() async throws {
+        let p = try await pair()
+        let before = await p.alice.channels()
+        var writer = LightningWire.Writer(); writer.append(Data(repeating: 0, count: 32)); writer.u16(0)
+        let notice = try LightningPeerNotice(.init(type: 17, payload: writer.data))
+        try await p.alice.rejectOpening(notice, peer: p.bobKey)
+        let after = await p.alice.channels()
+        XCTAssertEqual(after.first?.phase, before.first?.phase)
+        XCTAssertEqual(after.first?.signedCommitment, before.first?.signedCommitment)
+        XCTAssertTrue(try XCTUnwrap(after.first).needsMonitoring)
     }
     func testFundingAndPeerIdentityCannotBeSubstituted() async throws {
         let peer = try key(2), otherPeer = try key(3), memory = JournalMemory()

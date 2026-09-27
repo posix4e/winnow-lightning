@@ -42,9 +42,7 @@ struct LightningReceiveView: View {
                 } else {
                     Section("Set up Lightning receiving") {
                         Text("Your wallet needs receiving capacity before it can accept a Lightning payment. Setup may have a one-time fee.")
-                        if controller.channels.contains(where: { $0.phase != .closed }) {
-                            Text("Waiting for a confirmed channel and its receiving policy. Keep Winnow open and sync to check progress.")
-                        }
+                        if let notice = controller.receivingSetupNotice { Text(notice) }
                         NavigationLink("Get receiving capacity") { LightningLiquidityView(controller: controller) }
                             .disabled(controller.profile?.liquidityProvider == nil)
                             .accessibilityIdentifier("lightningGetCapacity")

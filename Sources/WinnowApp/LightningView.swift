@@ -9,7 +9,7 @@ struct LightningView: View {
     @State private var setup = false
     @State private var send = false
     @State private var receive = false
-    @State private var capacity = "100000"
+    @State private var capacity = ""
     @State private var review: LightningReview?
     @State private var busy = false
 
@@ -80,18 +80,25 @@ struct LightningView: View {
     }
     private var channelSection: some View {
         Section("Channels") {
-            if controller.channels.isEmpty {
+            if controller.channels.allSatisfy({ $0.phase == .closed }) {
+                Text("This funds a channel with your Bitcoin for spending. To set up receiving capacity, use Receive Lightning.")
+                    .font(.footnote).foregroundStyle(.secondary)
                 TextField("Capacity in sats", text: $capacity).keyboardType(.numberPad).accessibilityIdentifier("lightningCapacity")
                 Button("Request a channel") { run {
                     guard let amount = UInt64(capacity) else { throw LightningError.invalidAmount }
                     try await controller.openChannel(capacitySat: amount, model: model)
-                } }.disabled(controller.profile == nil).accessibilityIdentifier("lightningOpen")
+                } }.disabled(controller.profile == nil || capacity.isEmpty).accessibilityIdentifier("lightningOpen")
             }
             ForEach(controller.channels, id: \.id) { channel in
                 VStack(alignment: .leading) {
-                    Text("\(channel.capacitySat) sats · \(channel.phase.rawValue)").accessibilityIdentifier("lightningChannelPhase")
+                    Text(channel.signedCommitment == nil && !channel.needsMonitoring
+                         ? "\(channel.capacitySat) sats requested · \(channel.phase.rawValue)"
+                         : "\(channel.capacitySat) sats · \(channel.phase.rawValue)")
+                        .accessibilityIdentifier("lightningChannelPhase")
                     if let balance = controller.balances.first(where: { $0.id == channel.id }) {
                         Text("Local balance: \(balance.localMsat / 1000) sats").font(.caption)
+                    } else if [.opening, .accepted].contains(channel.phase) {
+                        Text("Requested capacity · funding not completed").font(.caption).foregroundStyle(.secondary)
                     }
                     if [.ready, .closing].contains(channel.phase) {
                         Button("Review channel close") { run {

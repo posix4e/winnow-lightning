@@ -177,7 +177,10 @@ public actor LightningPeerSession {
     func handlePeerNotice(_ message: LightningWire.Message) async throws {
         let notice = try LightningPeerNotice(message)
         guard await engine.recognizesNotice(notice, peer: peer) else { return }
-        if notice.isError { throw notice }
+        if notice.isError {
+            try await engine.rejectOpening(notice, peer: peer)
+            throw notice
+        }
         lastPeerWarning = notice.description
     }
     private func finish(epoch: UInt64, error: Error) async {

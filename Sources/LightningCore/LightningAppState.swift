@@ -26,10 +26,20 @@ extension LightningEngine {
     }
     public func channelBalances() throws -> [ChannelBalance] {
         try healthy()
-        return try state.channels.map { channel in
+        // Negotiation terms describe a proposed allocation, not owned funds.
+        // Require an enforceable commitment before reporting a funded channel.
+        return try state.channels.filter {
+            $0.fundingTxid != nil && $0.signedCommitment != nil && $0.phase != .closed
+        }.map { channel in
             let view = try channel.view(localOwner: true, number: channel.localNumber)
             return ChannelBalance(id: channel.id, localMsat: view.localMsat, remoteMsat: view.remoteMsat,
                                   recoveryConfigured: channel.recovery != nil)
         }
+    }
+    /// Recovery destinations can be prepared before funding. Keep this work
+    /// separate from reporting the proposed allocation as an owned balance.
+    public func channelsNeedingRecoveryConfiguration() throws -> [Data] {
+        try healthy()
+        return state.channels.filter { $0.recovery == nil && $0.phase != .closed }.map(\.id)
     }
 }

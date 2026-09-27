@@ -16,7 +16,9 @@ extension LightningEngine {
     public func receiveChannelPolicy(peer: Data, message: LightningWire.Message) throws {
         try operational(peer)
         guard message.type == 258 else { throw LightningError.invalidMessage }
-        guard state.channels.contains(where: { $0.peer == peer }) else { return }
+        // No private routing policy can apply before funding is identified.
+        // Old rejected requests must not turn general gossip into a failure.
+        guard state.channels.contains(where: { $0.peer == peer && $0.phase != .closed && $0.fundingTxid != nil }) else { return }
         guard let policy = try parsePolicy(peer: peer, message: message) else { return }
         let scid = policy.shortChannelID, timestamp = policy.timestamp
         if persistedPolicy(scid: scid, isNewerThan: timestamp) { return }

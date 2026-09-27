@@ -155,6 +155,9 @@ final class LightningAppUITests: XCTestCase {
         try fundWallet(app)
         try configure(app, profile: XCTUnwrap(setup["sender"] as? [String: Any]))
         try waitConnected(app)
+        let capacity = app.textFields["lightningCapacity"]
+        XCTAssertTrue(scroll(app, capacity, fullyVisible: true))
+        app.typeInto("lightningCapacity", "100000")
         tap(app, "lightningOpen")
         let funding = app.buttons["lightningFundingReview"]
         XCTAssertTrue(scroll(app, funding))

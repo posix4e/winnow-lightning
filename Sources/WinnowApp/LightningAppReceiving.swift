@@ -15,6 +15,22 @@ extension LightningAppController {
         }
     }
     var maximumReceivableSat: UInt64 { (invoiceCapacities.map(\.maximumMsat).max() ?? 0) / 1000 }
+    var receivingSetupNotice: String? {
+        guard let channel = channels.first(where: { $0.phase != .closed }) else { return nil }
+        switch channel.phase {
+        case .opening, .accepted:
+            return "There is an unfinished channel request. It does not provide receiving capacity yet."
+        case .awaitingFundingSignature:
+            return "Channel funding is waiting for the provider's signature. Keep Winnow open and reconnect to check progress."
+        case .awaitingConfirmation:
+            return "Waiting for a confirmed channel and its receiving policy. Keep Winnow open and sync to check progress."
+        case .ready:
+            return "The channel has no usable receiving capacity yet. Sync and reconnect to check its balance and receiving policy."
+        case .closing, .recovering:
+            return "The existing channel is closing or recovering. Continue chain checks while its funds return."
+        case .closed: return nil
+        }
+    }
 
     func prepareLiquidity(model: AppModel) async throws {
         try requireNetwork(model)

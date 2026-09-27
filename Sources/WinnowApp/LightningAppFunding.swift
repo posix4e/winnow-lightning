@@ -15,7 +15,7 @@ extension LightningAppController {
         try await model.exclusively(.spending) {
             try requireNetwork(model)
             let epoch = generation
-            guard let engine, let profile, await engine.channels().isEmpty else { throw LightningError.invalidState }
+            guard let engine, let profile, await engine.channels().allSatisfy({ $0.phase == .closed }) else { throw LightningError.invalidState }
             let rate = try Self.commitmentFeeRate(satPerVByte: await model.resolvedFeeRate(priority: .medium, override: nil))
             try requireNetwork(model, generation: epoch)
             _ = try await engine.openChannel(peer: profile.peerKey, capacitySat: capacitySat, feePerKW: rate)

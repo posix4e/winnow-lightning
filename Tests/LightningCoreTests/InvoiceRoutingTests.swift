@@ -78,4 +78,20 @@ final class InvoiceRoutingTests: XCTestCase, @unchecked Sendable {
         XCTAssertTrue(status.rescanRequired)
         XCTAssertTrue(capacity.isEmpty)
     }
+    func testUnfundedAndRejectedRequestsIgnoreUnrelatedRoutingUpdates() async throws {
+        let peer = try ChannelKeys.publicKey(secret: peerSecret)
+        let empty = LightningEngine.State(chain: NetworkParams.regtest.genesisHash, nodeSecret: nodeSecret)
+        let (engine, _) = try await engine(empty)
+        let id = try await engine.openChannel(peer: peer, capacitySat: 100_000, feePerKW: 1000)
+        let policy = try update()
+        let unrelated = try LightningWire.Message(type: 258, payload: policy.payload + Data([0, 0]))
+        try await engine.receiveChannelPolicy(peer: peer, message: unrelated)
+        let before = await engine.invoicePolicies
+        XCTAssertTrue(before.isEmpty)
+        var error = LightningWire.Writer(); error.append(id); error.u16(0)
+        try await engine.rejectOpening(LightningPeerNotice(.init(type: 17, payload: error.data)), peer: peer)
+        try await engine.receiveChannelPolicy(peer: peer, message: unrelated)
+        let after = await engine.invoicePolicies, capacities = try await engine.invoiceCapacities(peer: peer)
+        XCTAssertTrue(after.isEmpty); XCTAssertTrue(capacities.isEmpty)
+    }
 }
