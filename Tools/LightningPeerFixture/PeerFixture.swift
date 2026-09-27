@@ -13,7 +13,7 @@ struct PeerFixture {
     }
     static func run() async throws {
         let args = Array(CommandLine.arguments.dropFirst())
-        if ["probe-lsp", "probe-lsp-quote"].contains(args.first) { try await probeLSP(args); return }
+        if ["probe-lsp", "probe-lsp-quote", "probe-lsp-stability"].contains(args.first) { try await probeLSP(args); return }
         if args.first == "inspect-held" { try inspectHeld(args); return }
         guard [5, 7].contains(args.count), let port = UInt16(args[1]), let peer = Data(hex: args[2]), let chain = Data(hex: args[3])
         else { throw LightningError.invalidMessage }

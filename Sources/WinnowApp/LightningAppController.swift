@@ -21,6 +21,7 @@ final class LightningAppController {
     var liquidityRequestInFlight = false
     var liquiditySession: LightningPeerSession? { session }
     private(set) var connection = "Waiting for verified chain"
+    private(set) var peerWarning: String?
     private(set) var chainCurrent = false
     var error: String?
     private(set) var engine: LightningEngine?
@@ -185,6 +186,7 @@ final class LightningAppController {
         case .failed(let reason): connection = "Disconnected: \(reason)"
         default: connection = chainCurrent ? "Ready to connect" : "Waiting for verified chain"
         }
+        peerWarning = await session?.lastPeerWarning
     }
     func handle(_ events: [LightningEngine.Event], model: AppModel) async throws {
         try requireNetwork(model)

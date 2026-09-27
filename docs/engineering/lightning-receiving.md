@@ -47,9 +47,27 @@ BOLT11 receiving. A default provider does not provide external watchtower
 protection; iOS background checks run only when permitted. Public connection and
 unpaid-quote diagnostics are separate from funded mainnet payment validation.
 
+Provider warnings are retained separately from connection failures. BOLT 1
+warnings do not themselves close the session; errors referring to this peer's
+channels stop the session and retain the provider's printable reason. Notices
+for unknown channels are ignored. Displayed provider text is capped at 240
+characters, and non-printable data is hidden. This diagnostic handling does not
+delete channel state or authorize funding, setup payments, or recovery spends.
+During a verified chain scan, the transport continues answering keepalives and
+reading provider notices. Financial messages wait in a bounded, ordered queue
+(128 messages / 1 MiB) until the engine verifies the chain again. Overflow
+disconnects rather than accepting financial work against an unverified chain.
+
+The host-only `winnow-lightning-peer-fixture probe-lsp-stability HOST PORT PEER
+[API]` command authenticates a temporary node, requests provider information,
+and checks that the session stays connected for 60 seconds. It does not request
+a channel, create an order, or send funds. A passing result is a connection
+diagnostic, not a mainnet receiving or chain-validation receipt.
+
 Primary contracts:
 
 - [BOLT11](https://github.com/lightning/bolts/blob/master/11-payment-encoding.md)
+- [BOLT 1 peer warnings and errors](https://github.com/lightning/bolts/blob/master/01-messaging.md#the-error-and-warning-messages)
 - [LSPS1](https://github.com/lightning/blips/blob/master/blip-0051.md)
 - [Olympus](https://docs.zeusln.app/lsp/services/lsps1/)
 - [Megalith](https://docs.megalithic.me/lightning-services/lsp1-get-inbound-liquidity-for-mobile-clients/)

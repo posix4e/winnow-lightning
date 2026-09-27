@@ -27,6 +27,7 @@ struct LightningView: View {
                         .accessibilityLabel("Connection").accessibilityValue(controller.connection)
                         .accessibilityIdentifier("lightningConnection")
                     if let error = controller.error { Text(error).foregroundStyle(.red).accessibilityIdentifier("lightningError") }
+                    if let warning = controller.peerWarning { Text(warning).foregroundStyle(.secondary) }
                     Button("Sync and reconnect") { run { await model.syncNow() } }.accessibilityIdentifier("lightningSync")
                 }
                 Section("Chain checks") { BackgroundSyncStatusView() }

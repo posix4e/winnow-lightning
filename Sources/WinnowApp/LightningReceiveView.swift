@@ -52,6 +52,7 @@ struct LightningReceiveView: View {
                     }
                 }
                 Section {
+                    if let warning = controller.peerWarning { Text(warning).foregroundStyle(.secondary) }
                     if let error { Text(error).foregroundStyle(.red).accessibilityIdentifier("lightningReceiveError") }
                     Button("Sync and reconnect") { run { await model.syncNow(); await controller.resume(model: model) } }
                         .accessibilityIdentifier("lightningReceiveReconnect")

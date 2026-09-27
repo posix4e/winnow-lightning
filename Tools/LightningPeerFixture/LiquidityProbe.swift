@@ -34,6 +34,21 @@ extension PeerFixture {
                 try emit(["status": "unpaid-quote-validated", "fee_sat": String(fee), "order_id": order.orderId,
                     "minimum_confirmations": String(purchase.requiredChannelConfirmations), "payment": "never authorized or sent"])
             }
+            if args.first == "probe-lsp-stability" {
+                var lastWarning: String?
+                for second in 1...60 {
+                    try await Task.sleep(for: .seconds(1))
+                    let status = await session.status
+                    if let warning = await session.lastPeerWarning, warning != lastWarning {
+                        FileHandle.standardError.write(Data("\(warning)\n".utf8))
+                        lastWarning = warning
+                    }
+                    guard status == .connected else {
+                        throw LightningLiquidityError.provider("Disconnected after \(second) seconds: \(status)")
+                    }
+                }
+                try emit(["status": "connected-for-60-seconds", "payment": "never authorized or sent"])
+            }
             await session.stop()
         } catch {
             FileHandle.standardError.write(Data("Provider session status: \(await session.status)\n".utf8))

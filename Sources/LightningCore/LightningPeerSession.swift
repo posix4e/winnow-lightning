@@ -15,9 +15,13 @@ public actor LightningPeerSession {
     private var flushing = false
     private var stopping = false
     private var starting = false
+    private var incoming: [LightningWire.Message] = []
+    private var incomingBytes = 0
+    private var handlingIncoming = false
     var liquidityRequests: [String: CheckedContinuation<Data, any Error>] = [:]
     var peerFeatures: LightningFeatures?
     public private(set) var status: Status = .stopped
+    public private(set) var lastPeerWarning: String?
 
     public init(engine: LightningEngine, peer: Data, host: String, port: UInt16,
                 onEvents: @escaping @Sendable ([LightningEngine.Event]) async throws -> Void) {
@@ -31,7 +35,7 @@ public actor LightningPeerSession {
         let epoch = generation
         let transport = try await engine.connection(host: host, port: port, peer: peer)
         guard epoch == generation else { throw CancellationError() }
-        connection = transport; status = .connecting; sent.removeAll()
+        connection = transport; status = .connecting; sent.removeAll(); lastPeerWarning = nil
         do {
             try await transport.start()
             try await transport.send(LightningFeatures.asyncClient.initialization())
@@ -55,6 +59,7 @@ public actor LightningPeerSession {
         reader?.cancel(); timer?.cancel()
         await transport.close(); await engine.peerDisconnected(peer)
         connection = nil; reader = nil; timer = nil; status = .stopped
+        incoming.removeAll(); incomingBytes = 0
     }
     /// Reentrant callers share a single ordered publisher. Channel messages
     /// replay only after a new authenticated session; onion publication is
@@ -95,12 +100,20 @@ public actor LightningPeerSession {
         do {
             while !Task.isCancelled && epoch == generation {
                 let message = try await transport.receive()
-                while !(await engine.chainIsCurrent) { try await Task.sleep(for: .milliseconds(100)) }
                 try Task.checkCancellation()
                 guard epoch == generation else { return }
-                do { try await handle(message, transport: transport) }
-                catch LightningError.invalidMessage {
-                    throw LightningLiquidityError.provider("Unsupported Lightning message \(message.type).")
+                if Self.requiresVerifiedChain(message.type) {
+                    // A chain scan must pause financial processing, not TCP
+                    // keepalives. Retain a bounded, ordered queue while still
+                    // reading ping/pong and provider notices from the wire.
+                    let size = message.payload.count + 2
+                    guard incoming.count < 128, incomingBytes + size <= 1_048_576 else {
+                        throw LightningLiquidityError.provider("Too many provider messages while verifying the chain.")
+                    }
+                    incoming.append(message); incomingBytes += size
+                    try await drainIncoming(epoch: epoch)
+                } else {
+                    try await handleChecked(message, transport: transport)
                 }
                 try await flush()
             }
@@ -110,11 +123,37 @@ public actor LightningPeerSession {
         do {
             while !Task.isCancelled && epoch == generation {
                 try await Task.sleep(for: .milliseconds(250))
+                try await drainIncoming(epoch: epoch)
                 let events = try await engine.expireInvoiceRequests(now: Self.now)
                 if !events.isEmpty { try await onEvents(events) }
                 try await flush()
             }
         } catch { await finish(epoch: epoch, error: error) }
+    }
+    private static func requiresVerifiedChain(_ type: UInt16) -> Bool {
+        [32, 33, 34, 35, 36, 38, 39, 128, 130, 131, 132, 133, 134, 135, 136, 258, 513].contains(type)
+    }
+    private func drainIncoming(epoch: UInt64) async throws {
+        guard !handlingIncoming else { return }
+        handlingIncoming = true; defer { handlingIncoming = false }
+        while epoch == generation, status == .connected, let message = incoming.first {
+            let events: [LightningEngine.Event]?
+            do { events = try await engine.receiveWhenCurrent(peer: peer, message: message, now: Self.now) }
+            catch LightningError.invalidMessage {
+                throw LightningLiquidityError.provider("Invalid or unsupported provider message \(message.type).")
+            }
+            // The readiness check and state transition share the engine actor.
+            // A scan starting between two awaits cannot discard this message.
+            guard let events, epoch == generation, status == .connected else { return }
+            incoming.removeFirst(); incomingBytes -= message.payload.count + 2
+            try await onEvents(events)
+        }
+    }
+    private func handleChecked(_ message: LightningWire.Message, transport: LightningConnection) async throws {
+        do { try await handle(message, transport: transport) }
+        catch LightningError.invalidMessage {
+            throw LightningLiquidityError.provider("Invalid or unsupported provider message \(message.type).")
+        }
     }
     private func handle(_ message: LightningWire.Message, transport: LightningConnection) async throws {
         switch message.type {
@@ -126,29 +165,38 @@ public actor LightningPeerSession {
                 var pong = LightningWire.Writer(); pong.u16(count); pong.append(Data(repeating: 0, count: Int(count)))
                 try await transport.send(.init(type: 19, payload: pong.data))
             }
-        case 513:
-            try await onEvents(engine.receiveOnionMessage(message, now: Self.now))
         case LightningLiquidity.messageType:
             let response = try LightningLiquidity.response(message)
             liquidityRequests.removeValue(forKey: response.id)?.resume(with: response.result.mapError { $0 as any Error })
-        case 32, 33, 34, 35, 36, 38, 39, 128, 130, 131, 132, 133, 134, 135, 136:
-            try await onEvents(engine.receive(peer: peer, message: message))
-        case 258: try await engine.receiveChannelPolicy(peer: peer, message: message)
         case 256, 257: break // General gossip is not used by this configured-route client.
-        case 1, 17: throw LightningError.closed
+        case 1, 17: try await handlePeerNotice(message)
         default:
             guard message.type % 2 == 1 else { throw LightningError.invalidMessage }
         }
     }
+    func handlePeerNotice(_ message: LightningWire.Message) async throws {
+        let notice = try LightningPeerNotice(message)
+        guard await engine.recognizesNotice(notice, peer: peer) else { return }
+        if notice.isError { throw notice }
+        lastPeerWarning = notice.description
+    }
     private func finish(epoch: UInt64, error: Error) async {
         guard epoch == generation else { return }
         await stop()
-        if generation == epoch &+ 1 { status = .failed(String(describing: error)) }
+        if generation == epoch &+ 1 { status = .failed(error.localizedDescription) }
     }
     private static var now: UInt64 { UInt64(Date().timeIntervalSince1970) }
 }
 
 extension LightningEngine {
+    func receiveWhenCurrent(peer: Data, message: LightningWire.Message, now: UInt64) throws -> [Event]? {
+        guard chainIsCurrent else { return nil }
+        switch message.type {
+        case 258: try receiveChannelPolicy(peer: peer, message: message); return []
+        case 513: return try receiveOnionMessage(message, now: now)
+        default: return try receive(peer: peer, message: message)
+        }
+    }
     func connection(host: String, port: UInt16, peer: Data) throws -> LightningConnection {
         try healthy()
         guard chainIsCurrent else { throw LightningError.invalidState }
