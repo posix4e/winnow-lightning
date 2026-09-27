@@ -220,6 +220,8 @@ final class LightningAppUITests: XCTestCase {
         let capacity = app.textFields["lightningCapacity"]
         XCTAssertTrue(scroll(app, capacity, fullyVisible: true))
         app.typeInto("lightningCapacity", "100000")
+        if app.keyboards.firstMatch.exists { tapToolbar(app, "sendKeyboardDone") }
+        XCTAssertTrue(app.keyboards.firstMatch.disappears(within: 10), app.debugDescription)
         tap(app, "lightningOpen")
         let funding = app.buttons["lightningFundingReview"]
         XCTAssertTrue(scroll(app, funding))
@@ -306,6 +308,8 @@ final class LightningAppUITests: XCTestCase {
         try waitConnected(app)
         XCTAssertTrue(scroll(app, app.textFields["lightningCapacity"], fullyVisible: true))
         app.typeInto("lightningCapacity", "100000")
+        if app.keyboards.firstMatch.exists { tapToolbar(app, "sendKeyboardDone") }
+        XCTAssertTrue(app.keyboards.firstMatch.disappears(within: 10), app.debugDescription)
         tap(app, "lightningOpen"); tap(app, "lightningFundingReview"); tap(app, "lightningConfirm")
         _ = try rpc("confirm_funding")
         XCTAssertTrue(poll(timeout: verifiedChainTimeout, interval: 1, "invoice channel verified") {

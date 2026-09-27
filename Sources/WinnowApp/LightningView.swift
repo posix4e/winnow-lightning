@@ -11,6 +11,7 @@ struct LightningView: View {
     @State private var sendInvoice = false
     @State private var receive = false
     @State private var capacity = ""
+    @FocusState private var editingCapacity: Bool
     @State private var review: LightningReview?
     @State private var busy = false
 
@@ -53,6 +54,11 @@ struct LightningView: View {
                 }
             }
             .navigationTitle("Lightning")
+            .toolbar {
+                ToolbarItem(placement: .keyboard) {
+                    Button("Done") { editingCapacity = false }.accessibilityIdentifier("sendKeyboardDone")
+                }
+            }
             .disabled(busy)
             .sheet(isPresented: $setup) { LightningSetupView(controller: controller) }
             .sheet(isPresented: $sendInvoice) { LightningInvoiceSendView(controller: controller) }
@@ -87,7 +93,8 @@ struct LightningView: View {
                 Text("This funds a channel with your Bitcoin for spending. To set up receiving capacity, use Receive Lightning.")
                     .font(.footnote).foregroundStyle(.secondary)
                 TextField("Capacity in sats", text: $capacity).keyboardType(.numberPad).accessibilityIdentifier("lightningCapacity")
-                Button("Request a channel") { run {
+                    .focused($editingCapacity)
+                Button("Request a channel") { editingCapacity = false; run {
                     guard let amount = UInt64(capacity) else { throw LightningError.invalidAmount }
                     try await controller.openChannel(capacitySat: amount, model: model)
                 } }.disabled(controller.profile == nil || capacity.isEmpty).accessibilityIdentifier("lightningOpen")
