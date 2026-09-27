@@ -126,8 +126,8 @@ final class LightningAppUITests: XCTestCase {
         let reminderBanner = app.buttons["channelReminderBanner"]
         XCTAssertTrue(reminderBanner.appears(within: 60), "funded channels must offer check reminders")
         reminderBanner.tap()
-        XCTAssertTrue(app.staticTexts["channelProtectionLimitations"].appears(within: 10))
-        XCTAssertTrue(scroll(app, app.buttons["channelCheckReminders"]))
+        XCTAssertTrue(scroll(app, app.staticTexts["channelProtectionLimitations"]))
+        XCTAssertTrue(scroll(app, app.buttons["channelCheckReminders"], up: true))
         Screenshots.capture(app, "lightning-channel-protection-reminders", testCase: self)
         app.buttons["Done"].tap()
         tap(app, "lightningCreateOffer")
