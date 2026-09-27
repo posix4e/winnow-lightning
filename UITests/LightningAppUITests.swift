@@ -321,7 +321,10 @@ final class LightningAppUITests: XCTestCase {
         try paste("LIGHTNING:" + text); tap(app, "lightningPasteInvoice")
         tap(app, "lightningReviewInvoice")
         XCTAssertTrue(app.navigationBars["Review Lightning"].appears(within: 30), app.debugDescription)
-        XCTAssertTrue(scroll(app, app.staticTexts["Amount, 2000 sats"], fullyVisible: true))
+        // The invoice form underneath the review also shows this amount.
+        // Read the presented Form, not a globally ambiguous static-text query.
+        let reviewForm = app.collectionViews.element(boundBy: app.collectionViews.count - 1)
+        XCTAssertTrue(scroll(app, reviewForm.staticTexts["Amount, 2000 sats"], fullyVisible: true))
         Screenshots.capture(app, "bolt11-payment-review", testCase: self)
         app.buttons["lightningCancel"].tap(); _ = try rpc("assert_invoice_unpaid")
         tap(app, "lightningReviewInvoice"); tap(app, "lightningConfirm")
@@ -335,6 +338,9 @@ final class LightningAppUITests: XCTestCase {
         tapToolbar(app, "closeSendButton")
         XCTAssertTrue(app.buttons["closeSendButton"].disappears(within: 10), app.debugDescription)
         app.buttons["advancedModeButton"].tap()
+        XCTAssertTrue(app.alerts["Turn on Advanced mode?"].appears(within: 10))
+        app.alerts["Turn on Advanced mode?"].buttons["Turn on"].tap()
+        XCTAssertTrue(app.buttons["Lightning"].appears(within: 10), app.debugDescription)
         // Restore the same wallet and invoice history in a new process.
         app.terminate()
         try launch(app, role: "sender", fresh: false)
