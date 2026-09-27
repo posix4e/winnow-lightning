@@ -258,10 +258,7 @@ final class LightningAppUITests: XCTestCase {
         XCTAssertTrue(app.buttons["lightningConfirm"].disappears(within: 30), app.debugDescription)
         let button = app.buttons[done]
         XCTAssertTrue(poll(timeout: 15, interval: 0.2, "input sheet is visible after approval") { button.isHittable })
-        if !tapVisibleCenter(app, button) {
-            XCTAssertTrue(scroll(app, button, up: up, fullyVisible: true), app.debugDescription)
-            XCTAssertTrue(tapVisibleCenter(app, button))
-        }
+        XCTAssertTrue(tapVisibleCenter(app, button))
         XCTAssertTrue(button.disappears(within: 15))
     }
     private func waitConnected(_ app: XCUIApplication) throws {
@@ -305,7 +302,10 @@ final class LightningAppUITests: XCTestCase {
         // Use the real center: SwiftUI may expose an incorrect activation
         // point for a button. iPad's last row can fit the window without
         // fitting the helper's extra home-indicator margin.
-        XCTAssertTrue(tapVisibleCenter(app, button))
+        if !tapVisibleCenter(app, button, excludingBars: true) {
+            XCTAssertTrue(scroll(app, button, up: up, fullyVisible: true), app.debugDescription)
+            XCTAssertTrue(tapVisibleCenter(app, button, excludingBars: true))
+        }
     }
     private func verifyHash(_ app: XCUIApplication, hash: String) throws {
         let value = app.staticTexts["lightningPaymentHash." + hash]

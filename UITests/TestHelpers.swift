@@ -169,11 +169,14 @@ extension XCTestCase {
     /// AX element during a button-relative tap, turning a valid center into
     /// the row's corner. Anchor the event to the stable app using fresh bounds.
     @MainActor
-    func tapVisibleCenter(_ app: XCUIApplication, _ element: XCUIElement) -> Bool {
-        guard let appFrame = usableFrame(app), let frame = usableFrame(element),
-              let band = clearBand(app, in: appFrame) else { return false }
-        let viewport = CGRect(x: appFrame.minX, y: band.lowerBound,
+    func tapVisibleCenter(_ app: XCUIApplication, _ element: XCUIElement, excludingBars: Bool = false) -> Bool {
+        guard let appFrame = usableFrame(app), let frame = usableFrame(element) else { return false }
+        var viewport = appFrame
+        if excludingBars {
+            guard let band = clearBand(app, in: appFrame) else { return false }
+            viewport = CGRect(x: appFrame.minX, y: band.lowerBound,
                               width: appFrame.width, height: band.upperBound - band.lowerBound)
+        }
         let visible = frame.intersection(viewport)
         guard !visible.isNull, visible.width > 0,
               visible.height >= min(frame.height, 24) else { return false }
