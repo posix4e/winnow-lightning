@@ -39,8 +39,13 @@ extension LightningAppController {
         let epoch = generation
         await resume(model: model)
         try requireNetwork(model, generation: epoch)
-        guard let profile, profile.liquidityProvider != nil, let session = liquiditySession else { throw LightningLiquidityError.unavailable }
-        guard await session.status == .connected else { throw LightningLiquidityError.unavailable }
+        guard chainCurrent else {
+            throw LightningLiquidityError.provider("Bitcoin is still syncing. Wait for the chain check before setting up Lightning receiving.")
+        }
+        guard let profile, profile.liquidityProvider != nil else { throw LightningLiquidityError.unavailable }
+        guard let session = liquiditySession, await session.status == .connected else {
+            throw LightningLiquidityError.provider(error ?? "The provider is not connected yet. Reconnect and try again.")
+        }
         let info: LightningLiquidity.Info
         if let base = LightningProviders.provider(profile)?.api { info = try await LightningLiquidityHTTP(base: base).info() }
         else { info = try await session.liquidityInfo() }

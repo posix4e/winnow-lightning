@@ -106,7 +106,7 @@ struct HomeView: View {
                     if model.status.syncing, model.syncStatusText == nil {
                         BusyIndicator(text: "Scanning filters…")
                     }
-                    if let error = model.status.lastSyncError {
+                    if let error = model.status.syncErrorForDisplay(phase: model.syncPhase) {
                         Text(error)
                             .font(.footnote)
                             .foregroundStyle(.red)

@@ -864,9 +864,17 @@ public actor FilterSync {
             throw FilterSyncError.badPeerResponse("missing header at \(chunkStop)")
         }
         let count = Int(chunkStop - chunkStart + 1)
-        let responses = try await peer.requestMany(
-            .getcfilters(GetCFiltersRequest(startHeight: chunkStart, stopHash: stopHash)),
-            expecting: "cfilter", count: count, timeout: Self.chunkTimeout(filters: count))
+        let responses: [PeerMessage]
+        do {
+            responses = try await peer.requestMany(
+                .getcfilters(GetCFiltersRequest(startHeight: chunkStart, stopHash: stopHash)),
+                expecting: "cfilter", count: count, timeout: Self.chunkTimeout(filters: count))
+        } catch let error as PeerError where error.isTransport {
+            // Keep verified batches, but do not select this stalled socket
+            // again on the next pass. The pool retains it for a later retry.
+            await pool.transportFailure(peer, reason: error.localizedDescription)
+            throw error
+        }
 
         var heightByHash: [Data: UInt32] = [:]
         for height in chunkStart ... chunkStop {
@@ -984,9 +992,15 @@ public actor FilterSync {
 
     private func verifiedBlock(from peer: PeerConnection, height: UInt32, blockHash: Data,
                                timeout: Duration = .seconds(120)) async throws -> Block {
-        let blockResponse = try await peer.request(
-            .getdata(InventoryPayload([InventoryVector(type: .witnessBlock, hash: blockHash)])),
-            expecting: ["block", "notfound"], timeout: timeout)
+        let blockResponse: PeerMessage
+        do {
+            blockResponse = try await peer.request(
+                .getdata(InventoryPayload([InventoryVector(type: .witnessBlock, hash: blockHash)])),
+                expecting: ["block", "notfound"], timeout: timeout)
+        } catch let error as PeerError where error.isTransport {
+            await pool.transportFailure(peer, reason: error.localizedDescription)
+            throw error
+        }
         switch blockResponse {
         case let .block(block):
             guard block.hash == blockHash else {

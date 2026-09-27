@@ -40,7 +40,11 @@ struct LightningLiquidityView: View {
                         Button("Check provider options") { run {
                             try await controller.prepareLiquidity(model: model)
                             capacity = String(controller.liquidityInfo?.minimumCapacitySat ?? 0)
-                        } }.accessibilityIdentifier("lightningProviderOptions")
+                        } }.disabled(!controller.chainCurrent).accessibilityIdentifier("lightningProviderOptions")
+                        if !controller.chainCurrent {
+                            Text("Bitcoin is still syncing. Provider setup becomes available after Winnow verifies the chain.")
+                                .accessibilityIdentifier("lightningSetupWaitingForChain")
+                        }
                     }
                 }
             }

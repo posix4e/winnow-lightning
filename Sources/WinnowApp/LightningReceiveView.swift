@@ -22,6 +22,9 @@ struct LightningReceiveView: View {
                     LabeledContent("Provider", value: controller.profile?.name ?? "Choose a provider")
                         .accessibilityIdentifier("lightningReceiveProvider").accessibilityValue(controller.profile?.name ?? "Choose a provider")
                     LabeledContent("Connection", value: controller.connection)
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel("Connection").accessibilityValue(controller.connection)
+                        .accessibilityIdentifier("lightningReceiveConnection")
                     LabeledContent("Can receive", value: "\(controller.maximumReceivableSat) sats")
                         .accessibilityIdentifier("lightningReceivable")
                 }

@@ -31,6 +31,15 @@ final class LightningReceivingTests: XCTestCase {
             _ = try await controller.createReceiveInvoice(amountSat: 21, model: makeModel(network: .mainnet))
             XCTFail("fresh wallet invented receiving capacity")
         } catch LightningError.invalidState {}
+        do {
+            try await controller.prepareLiquidity(model: makeModel(network: .mainnet))
+            XCTFail("provider setup ran before the first verified chain scan")
+        } catch let LightningLiquidityError.provider(reason) {
+            XCTAssertTrue(reason.contains("Bitcoin is still syncing"), reason)
+        }
+        XCTAssertNil(controller.liquidityInfo)
+        XCTAssertNil(controller.liquidityQuote)
+        XCTAssertTrue(controller.channels.isEmpty)
     }
     func testBuiltinProviderIdentityAndNetworkCannotBeReplacedInImportedProfile() throws {
         let recommended = LightningProviders.mainnet[0].profile

@@ -110,6 +110,19 @@ final class AppModel {
         var nextScanHeight: UInt32 = 0
         var syncing = false
         var lastSyncError: String?
+        /// Retain the last failed attempt for diagnostics, but do not present
+        /// it as the current state while retrying or after peers reconnect.
+        func syncErrorForDisplay(phase: SyncPhase) -> String? {
+            guard !syncing else { return nil }
+            if lastSyncError == FilterSyncError.noPeers.errorDescription {
+                switch phase {
+                case .headers, .filters, .synced: return nil
+                case .connecting(let connected, _) where connected > 0: return nil
+                default: break
+                }
+            }
+            return lastSyncError
+        }
         /// A damaged relay store was set aside so sync could continue (#150).
         /// Distinct from `lastSyncError`: sync is fine, relay lost its queue.
         var relayStoreQuarantined: String?

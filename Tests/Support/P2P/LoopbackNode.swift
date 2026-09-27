@@ -22,6 +22,9 @@ public actor LoopbackNode {
     /// is reachable and well-behaved but too slow to reply, which is the shape
     /// that used to get an endpoint banned for the session (#82).
     public let withholdHeaders: Bool
+    /// Keep answering headers/checkpoints/pings but stop sending filter bodies
+    /// from this height, reproducing a peer that stalls partway through sync.
+    public let withholdFiltersFromHeight: UInt32?
     /// When set, the filter served for this height is bit-flipped (lying node).
     public let corruptFilterAtHeight: Int?
     /// Serves filter *commitments* that disagree with the honest chain while
@@ -88,7 +91,7 @@ public actor LoopbackNode {
     private var filterHeaders: [Data] = []
 
     public init(params: NetworkParams, services: UInt64 = PeerConnection.nodeCompactFilters,
-         chain: [Block] = [], withholdHeaders: Bool = false,
+         chain: [Block] = [], withholdHeaders: Bool = false, withholdFiltersFromHeight: UInt32? = nil,
          corruptFilterAtHeight: Int? = nil,
          lieAboutFilterCommitments: Bool = false, lieSalt: UInt8 = 0xFF,
          cfcheckptStopHashOverride: Data? = nil, cfcheckptLieAtHeight: Int? = nil,
@@ -106,6 +109,7 @@ public actor LoopbackNode {
         self.services = services
         self.chain = chain
         self.withholdHeaders = withholdHeaders
+        self.withholdFiltersFromHeight = withholdFiltersFromHeight
         self.corruptFilterAtHeight = corruptFilterAtHeight
         self.lieAboutFilterCommitments = lieAboutFilterCommitments
         self.lieSalt = lieSalt
@@ -408,6 +412,7 @@ public actor LoopbackNode {
                                                        filterHashes: Array(filterHashes[start ... stop]))))
 
         case let .getcfilters(request):
+            if let height = withholdFiltersFromHeight, request.startHeight >= height { return }
             guard let stop = height(ofHash: request.stopHash) else { return }
             let start = Int(request.startHeight)
             guard start <= stop else { return }

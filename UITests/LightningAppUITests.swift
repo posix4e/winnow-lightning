@@ -16,6 +16,67 @@ final class LightningAppUITests: XCTestCase {
     private var control: URL!
     private var setup: [String: Any] = [:]
 
+    /// Opt-in public-network smoke test. No local Bitcoin/Lightning peer,
+    /// synthetic chain position, fee approval, or funds are used. This isolated
+    /// debug wallet is for diagnostics only; never fund it from an exchange.
+    func testLiveMainnetSyncAndUnpaidReceivingQuote() throws {
+        guard ProcessInfo.processInfo.environment["WINNOW_LIVE_MAINNET"] == "1" else {
+            throw XCTSkip("Requires explicit live mainnet diagnostic opt-in")
+        }
+        continueAfterFailure = false
+        executionTimeAllowance = 1_050
+        let app = XCUIApplication()
+        defer { app.terminate() }
+        let started = Date()
+        app.launchEnvironment = [
+            "WINNOW_E2E": "1", "WINNOW_E2E_RUN": "live-mainnet-\(UUID())",
+            "WINNOW_E2E_NETWORK": "mainnet", "WINNOW_E2E_ADVANCED": "1",
+            "WINNOW_E2E_ENTROPY": String(repeating: "05", count: 16),
+            "WINNOW_E2E_SYNC_INTERVAL": "5",
+            "WINNOW_E2E_CENSUS_URL": "https://census.winnowwallet.com/census/peers.json",
+        ]
+        app.launch()
+        tap(app, "createWalletButton")
+        selectTab(app, "Wallet")
+        app.buttons["advancedModeButton"].tap()
+        app.buttons["receiveButton"].tap()
+        tap(app, "receiveLightning")
+        XCTAssertEqual(app.staticTexts["lightningReceiveProvider"].value as? String, "Olympus by ZEUS")
+        XCTAssertTrue(app.staticTexts["lightningReceivable"].label.contains("0 sats"))
+        XCTAssertFalse(app.staticTexts["lightningReceiveInvoice"].exists)
+        tap(app, "lightningGetCapacity")
+        let options = app.buttons["lightningProviderOptions"]
+        XCTAssertTrue(poll(timeout: 900, interval: 3, "fresh verified mainnet scan enables provider setup") {
+            options.isEnabled
+        }, app.debugDescription)
+        print("LIVE_MAINNET_SYNC_SECONDS=\(Date().timeIntervalSince(started))")
+        tap(app, "lightningProviderOptions")
+        XCTAssertTrue(poll(timeout: 60, interval: 2, "live provider options") {
+            app.textFields["lightningInboundCapacity"].exists || app.staticTexts["lightningLiquidityError"].exists
+        }, app.debugDescription)
+        XCTAssertFalse(app.staticTexts["lightningLiquidityError"].exists, app.debugDescription)
+        XCTAssertTrue(app.textFields["lightningInboundCapacity"].exists, app.debugDescription)
+        Screenshots.capture(app, "live-mainnet-provider-options", testCase: self)
+        tap(app, "lightningQuoteCapacity")
+        XCTAssertTrue(poll(timeout: 60, interval: 2, "live unpaid provider quote") {
+            app.staticTexts["lightningSetupFee"].exists || app.staticTexts["lightningLiquidityError"].exists
+        }, app.debugDescription)
+        XCTAssertFalse(app.staticTexts["lightningLiquidityError"].exists, app.debugDescription)
+        XCTAssertTrue(app.staticTexts["lightningSetupFee"].exists, app.debugDescription)
+        XCTAssertTrue(app.buttons["lightningApproveSetupFee"].exists)
+        XCTAssertFalse(app.staticTexts["lightningSetupInvoice"].exists, "Unapproved quote must not expose a payable invoice")
+        Screenshots.capture(app, "live-mainnet-unpaid-quote", testCase: self)
+        print("LIVE_MAINNET_QUOTE=\(app.staticTexts["lightningSetupFee"].label)")
+        print("LIVE_MAINNET_FINANCIAL_ACTIONS=none")
+        app.navigationBars["Set up receiving"].buttons.firstMatch.tap()
+        app.buttons["Done"].tap()
+        XCTAssertTrue(poll(timeout: 900, interval: 3, "verified public mainnet sync") {
+            app.staticTexts["syncSummaryText"].label == "Up to date"
+        }, app.debugDescription)
+        print("LIVE_MAINNET_SYNC_SECONDS_THIS_LAUNCH=\(Date().timeIntervalSince(started))")
+        Screenshots.capture(app, "live-mainnet-synced", testCase: self)
+    }
+
     func testFreshSimpleModeOffersBothReceiveMethodsAndThreeProviders() throws {
         continueAfterFailure = false
         let app = XCUIApplication()

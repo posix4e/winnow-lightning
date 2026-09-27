@@ -79,6 +79,25 @@ diagnostic, not a mainnet receiving or chain-validation receipt.
 funding or signatures, and checks reconnection if the provider rejects it. A
 provider's direct-funding minimum can differ from its LSPS1 capacity minimum.
 
+Before the first verified Bitcoin scan, provider setup explains that the chain
+check is still pending. It cannot misreport an unstarted connection as lack of
+provider support. The previous scan error remains in diagnostics but is not
+presented as current during a retry; an old no-peers error also disappears once
+the live connection phase shows peers. Verification failures remain visible.
+Filter-body and matched-block transport failures disconnect and cool down the
+serving peer, preserving completed batches for the next scan with another peer.
+
+`LightningAppUITests.testLiveMainnetSyncAndUnpaidReceivingQuote` is a manual
+public-network diagnostic. Set `WINNOW_LIVE_MAINNET=1` in the XCTest runner's
+test environment and select that test in the WinnowLightning scheme. Each run
+uses a new storage/Keychain namespace and ordinary public peers and the signed
+Winnow census. It verifies a complete chain scan and an unpaid Olympus quote;
+it never approves a fee or exposes an approved payment invoice. Its known debug
+seed must never receive real funds. Provider outages do not fail deterministic
+CI, where this one case explicitly skips without the opt-in. Local results and
+recordings are evidence of the diagnostic only, not a funded mainnet payment,
+TestFlight release, or physical-device authentication/storage validation.
+
 Primary contracts:
 
 - [BOLT11](https://github.com/lightning/bolts/blob/master/11-payment-encoding.md)

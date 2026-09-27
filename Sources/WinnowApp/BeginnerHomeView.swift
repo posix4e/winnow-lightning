@@ -48,7 +48,7 @@ struct BeginnerHomeView: View {
                         }
                         .accessibilityIdentifier("retryPeersButton")
                     }
-                    if let error = model.status.lastSyncError {
+                    if let error = model.status.syncErrorForDisplay(phase: model.syncPhase) {
                         Text(error)
                             .font(.footnote)
                             .foregroundStyle(.red)

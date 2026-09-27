@@ -9,14 +9,18 @@ cd "$(dirname "$0")/.."
 TEST_DIRS=(Tests UITests AppTests)
 for d in Tools/*/Tests; do [ -d "$d" ] && TEST_DIRS+=("$d"); done
 SETTERS=(.github/workflows scripts)
-# Optional overrides a developer may set by hand; never a gate.
-ALLOW_UNSET="WINNOW_BITCOIN_CLI"
+# Optional manual diagnostics/overrides. The public mainnet smoke test creates
+# only an unpaid, expiring order. External provider availability is deliberately
+# not a release gate; CI retains mandatory deterministic peer interoperability.
+ALLOW_UNSET="WINNOW_BITCOIN_CLI WINNOW_LIVE_MAINNET"
 # Conditional skips that are deliberate and documented.
 # Lightning's file-protection assertion uses the same measured OS capability
 # as WalletCore below. The background recovery file checks both protection
 # classes, skipping only when a simulator records neither; hardware must enforce
 # both. These remain pending physical-device checks in the TestFlight evidence.
-ALLOW_XCTSKIP="AppTests/E2EModeTests.swift AppTests/LightningAppTests.swift AppTests/BackgroundSyncTests.swift"
+# LightningAppUITests skips only the explicitly opted-in public mainnet smoke
+# test above. Its deterministic regtest and receive/setup tests remain required.
+ALLOW_XCTSKIP="AppTests/E2EModeTests.swift AppTests/LightningAppTests.swift AppTests/BackgroundSyncTests.swift UITests/LightningAppUITests.swift"
 # Retired gates: node integration now runs through the one UI journey.
 DENY='WINNOW_DIFF|WINNOW_SIGNET|WINNOW_HEADERS_BIN|WINNOW_GENERATE_FALLBACK_PEERS'
 
