@@ -86,8 +86,8 @@ checks recorded explicitly rather than reported as passed.
 Keep the PR draft until these gates pass. Release the exact green commit to the
 existing `com.btcswift.lightning` TestFlight app through the existing signing,
 export/compliance and release gates. Verify processing and tester availability.
-This remains a foreground research beta; it does not provide unattended channel
-protection. The app now supports mainnet, public signet and regtest (see below).
+This remains a research beta with opportunistic background checks, without
+guaranteed unattended channel protection. The app now supports mainnet, public signet and regtest (see below).
 
 ## Public networks
 
@@ -101,7 +101,7 @@ Lightning uses the selected network's chain hash, addresses, sealed profile and
 offer checks. Funding commitment rates use Winnow's fee policy. Compatible
 provider configuration is still required for channels, and async receive offers
 require an async-capable provider and configured route. This change does not
-implement provider discovery, general graph routing or background monitoring.
+implement provider discovery or general graph routing.
 
 Before the first channel, the ordinary wallet scanner runs without journaling
 every historical block. The Lightning monitor saves a verified starting point
@@ -111,8 +111,9 @@ normal reorgs use the monitor's retained ancestry. Header caches are caught up
 before comparing persisted monitor positions. A fork below the starting point
 stops for recovery rather than discarding channel history.
 
-The journal is schema 3. Schema-2 regtest journals retain their genesis-based
-scan history and identity when upgraded; older binaries refuse schema 3.
+The journal is schema 4. Schema-2 and schema-3 journals retain their scan
+history and identity when upgraded; older binaries refuse schema 4 so they
+cannot ignore a close initiated by the background monitor.
 Network switching drains the old scanner and stops its Lightning session before
 loading another wallet. Pending reviews and late events are rejected after the
 session generation changes. Mainnet connectivity tests must be distinguished
@@ -144,7 +145,7 @@ forwarding fees, and record process order plus source/reference identities.
 LDK can insert dummy hops: distinguish the actual incoming channel amount from
 the post-dummy-hop amount in its claim event, while checking the exact total debit.
 
-The shared journal payload is schema 3 (schema 2 is upgraded); pre-release schema 1 is refused rather
+The shared journal payload is schema 4 (schemas 2 and 3 are upgraded); pre-release schema 1 is refused rather
 than silently discarding channel state. The app integration must use its own new
 Swift namespace and preserve the prior PQLN application's files. Optional onion
 messages are discarded according to BOLT4 without interrupting channel messages;
@@ -192,3 +193,46 @@ review is pending and stops before assigning testers. The signed archive,
 export, upload, processing and existing internal-group readback are implemented
 in `scripts/release-lightning`; see `lightning-release.md`. A successful host or
 simulator run does not establish TestFlight availability.
+
+
+## Bounded background chain checks
+
+The iOS app registers BGAppRefresh and BGProcessing tasks at launch and requests
+checks with a 15-minute earliest start. iOS chooses the actual schedule. Refresh
+work has a 25-second local budget; processing has a 120-second budget. Expiry
+cancels work, closes sockets and drains the scan before completing the task.
+Foreground activation cancels and drains background work before rebuilding its
+network stack. Checks cover the selected network; the timestamp is network scoped.
+
+Wallet and channel watches use the same PeerPool, HeaderChain, FilterSync and
+TxBroadcaster. Verified partial progress persists. A complete check is recorded
+only after catching up and serving any recovery transactions to a peer; serving
+is not mining confirmation. The UI calls a check overdue after an hour, which is
+a freshness reminder, not a calculated safe offline duration.
+
+The full Lightning journal remains encrypted with a WhenUnlockedThisDeviceOnly
+key and complete file protection. The separate background journal contains public
+chain observations and pre-signed recovery transactions, including HTLC second
+stages and revoked-commitment penalties. It contains no wallet seed, node secret,
+channel signing keys or revocation secrets. Its separate encryption key uses
+AfterFirstUnlockThisDeviceOnly and its file uses complete-until-first-unlock
+protection. Both remain excluded from backup. Recovery destinations and fees are
+fixed by the foreground recovery policy; background cannot pay, fund, sign new
+transactions or connect to a Lightning protocol peer.
+
+Every foreground transition updates recovery before the full journal and before
+publishing protocol messages. If the second write fails, the recovery revision is
+ahead and foreground refuses to resume rather than replacing it with older data.
+A store lease prevents simultaneous foreground writes and background recovery.
+A background close intent persists before broadcast; foreground adopts it before
+resuming protocol work and replays its own verified scan cursor. Reorgs recompute
+CSV/CLTV maturity from retained chain observations. A stale or corrupt store fails
+closed. Header ancestry outside the retained window requires foreground recovery.
+
+Tests cover the shared scanner, incomplete catch-up, expiry, close handoff,
+failed writes, private-key exclusion, CSV reorgs, direct/second-stage penalty
+recovery and bounded transaction relay. Simulator tests do not establish actual
+locked-device Data Protection enforcement or iOS scheduling reliability. Check
+those on physical devices using the internal TestFlight build. Powered-off,
+force-quit and indefinitely offline phones cannot perform these checks; no external
+watchtower has been added. Dynamic fee bumping remains a foreground limitation.

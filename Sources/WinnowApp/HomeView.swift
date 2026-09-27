@@ -76,6 +76,7 @@ struct HomeView: View {
                 }
 
                 Section("Sync") {
+                    BackgroundSyncStatusView()
                     if let statusText = model.syncStatusText {
                         if case .peerDiscoveryFailed = model.syncPhase {
                             Text(statusText)

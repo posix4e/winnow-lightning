@@ -277,7 +277,7 @@ final class ChainRecoveryTests: XCTestCase, @unchecked Sendable {
         let status = await restored.chainStatus()
         XCTAssertEqual(status.origin.height, 0)
         XCTAssertEqual(status.origin.hash, genesis.hash)
-        XCTAssertEqual(try state(store).version, 3)
+        XCTAssertEqual(try state(store).version, 4)
         XCTAssertEqual(try state(store).channels.first?.id, legacy.channels.first?.id)
         XCTAssertEqual(try state(store).nodeSecret, legacy.nodeSecret)
     }
@@ -338,5 +338,192 @@ final class ChainRecoveryTests: XCTestCase, @unchecked Sendable {
         let replayed = try await driver.sync(using: filters, walletScripts: [], onEvent: { _ in }, onMatch: { _ in })
         XCTAssertTrue(replayed)
         let replayStatus = await engine.chainStatus(); XCTAssertEqual(replayStatus.nextHeight, 7)
+    }
+}
+
+extension ChainRecoveryTests {
+    private func backgroundFixture(_ channel: ChannelState) throws -> (LightningBackgroundStore, RecoveryStore) {
+        let bytes = RecoveryStore(), store = LightningBackgroundStore(journal: RecoveryJournal(bytes))
+        var state = LightningEngine.State(chain: genesis.hash, nodeSecret: Data(repeating: 1, count: 32))
+        state.channels = [channel]
+        try store.replace(.make(state))
+        return (store, bytes)
+    }
+    @discardableResult
+    private func backgroundScan(_ monitor: LightningBackgroundMonitor, height: UInt32, previous: Data,
+                                transaction: Transaction? = nil) async throws -> BlockHeader {
+        let root = transaction?.txid ?? Data(repeating: UInt8(truncatingIfNeeded: height), count: 32)
+        let header = minedHeader(previousHash: previous, merkleRoot: root, time: genesis.time + height * 600)
+        _ = try await monitor.scannedBlock(.init(height: height, header: header,
+            block: transaction.map { Block(header: header, transactions: [$0]) }, watchRevision: monitor.chainStatus().revision))
+        return header
+    }
+    func testBackgroundRecoveryContainsNoPrivateKeysAndHonorsCSVAndReorg() async throws {
+        let (channel, funding) = try fixture(), (store, bytes) = try backgroundFixture(channel)
+        let json = String(decoding: try XCTUnwrap(bytes.load()), as: UTF8.self)
+        for secret in [channel.secrets.funding, channel.secrets.revocation, channel.secrets.payment,
+                       channel.secrets.delayed, channel.secrets.htlc, channel.secrets.seed] {
+            XCTAssertFalse(json.contains(secret.base64EncodedString()))
+        }
+        let monitor = try LightningBackgroundMonitor(store: store, chain: genesis.hash)
+        let first = try await backgroundScan(monitor, height: 1, previous: genesis.hash, transaction: funding)
+        let commitment = try Transaction.decode(XCTUnwrap(channel.signedCommitment))
+        var tip = try await backgroundScan(monitor, height: 2, previous: first.hash, transaction: commitment)
+        do { _ = try await monitor.pendingChainEvents(); XCTFail("partial scan published a sweep") } catch {}
+        let delay = UInt32(try XCTUnwrap(channel.remote?.delay))
+        for height in 3...delay { tip = try await backgroundScan(monitor, height: height, previous: tip.hash) }
+        try await monitor.chainCaughtUp(height: delay)
+        let immature = try await monitor.pendingChainEvents(); XCTAssertTrue(immature.isEmpty)
+        _ = try await backgroundScan(monitor, height: delay + 1, previous: tip.hash)
+        try await monitor.chainCaughtUp(height: delay + 1)
+        let mature = try await monitor.pendingChainEvents(); XCTAssertEqual(mature.count, 1)
+        try await monitor.blocksDisconnected(to: 1, hash: first.hash)
+        tip = try await backgroundScan(monitor, height: 2, previous: first.hash)
+        _ = try await backgroundScan(monitor, height: 3, previous: tip.hash, transaction: commitment)
+        try await monitor.chainCaughtUp(height: 3)
+        let reorg = try await monitor.pendingChainEvents(); XCTAssertTrue(reorg.isEmpty)
+        await monitor.finish()
+        let reopened = try LightningBackgroundMonitor(store: store, chain: genesis.hash)
+        let status = await reopened.chainStatus(); XCTAssertEqual(status.nextHeight, 4)
+        do { _ = try await reopened.pendingChainEvents(); XCTFail("restart trusted an old tip") } catch {}
+        await reopened.finish()
+    }
+    func testBackgroundDeadlinePersistsCloseBeforeBroadcastAndForegroundAdoptsIt() async throws {
+        let (channel, funding, _) = try paymentFixture(preimage: Data(repeating: 23, count: 32), success: false)
+        let (store, _) = try backgroundFixture(channel)
+        let full = RecoveryStore()
+        let original = try engine(channel: channel, store: full)
+        _ = original
+        let foreground = try LightningEngine(chain: genesis.hash, journal: RecoveryJournal(full), backgroundStore: store)
+        try await foreground.resumeFromBackground()
+        let monitor = try LightningBackgroundMonitor(store: store, chain: genesis.hash)
+        // A lease rejects a competing foreground transition.
+        XCTAssertThrowsError(try store.replace(storeForTest(channel)))
+        var tip = try await backgroundScan(monitor, height: 1, previous: genesis.hash, transaction: funding)
+        for height: UInt32 in 2...11 { tip = try await backgroundScan(monitor, height: height, previous: tip.hash) }
+        try await monitor.chainCaughtUp(height: 11)
+        let before = try await monitor.pendingChainEvents(); XCTAssertTrue(before.isEmpty)
+        _ = try await backgroundScan(monitor, height: 12, previous: tip.hash)
+        try await monitor.chainCaughtUp(height: 12)
+        let events = try await monitor.pendingChainEvents(); XCTAssertEqual(events.count, 1)
+        await monitor.finish()
+        XCTAssertEqual(try store.load()?.channels.first?.closingIntent, channel.signedCommitment)
+        try await foreground.resumeFromBackground()
+        let state = try state(full)
+        XCTAssertEqual(state.channels.first?.phase, .closing)
+        XCTAssertEqual(state.channels.first?.closingTransaction, channel.signedCommitment)
+        XCTAssertTrue(state.outbox.isEmpty)
+    }
+    private func storeForTest(_ channel: ChannelState) throws -> LightningBackgroundSnapshot {
+        var state = LightningEngine.State(chain: genesis.hash, nodeSecret: Data(repeating: 1, count: 32))
+        state.channels = [channel]
+        return try .make(state)
+    }
+    func testBackgroundStoreAheadOfFailedFullJournalCannotResumePayments() async throws {
+        let (channel, _) = try fixture(), full = RecoveryStore(), background = RecoveryStore()
+        _ = try engine(channel: channel, store: full)
+        let store = LightningBackgroundStore(journal: RecoveryJournal(background))
+        let engine = try LightningEngine(chain: genesis.hash, journal: RecoveryJournal(full), backgroundStore: store)
+        full.fail()
+        do { try await engine.resumeFromBackground(); XCTFail() } catch {}
+        XCTAssertEqual(try store.load()?.revision, 1)
+        XCTAssertEqual(try state(full).revision, 0)
+        let reopened = try LightningEngine(chain: genesis.hash, journal: RecoveryJournal(full), backgroundStore: store)
+        do { try await reopened.resumeFromBackground(); XCTFail("older full journal overwrote newer recovery") }
+        catch { XCTAssertEqual(error as? LightningError, .storageFailed) }
+        let monitor = try LightningBackgroundMonitor(store: store, chain: genesis.hash)
+        await monitor.finish()
+    }
+    func testBackgroundUsesWalletScannerAndDoesNotPublishDuringPartialCatchup() async throws {
+        let fixture = makeSyntheticChain(length: 6), (store, _) = try backgroundFixture(self.fixture().0)
+        let node = LoopbackNode(params: fixture.params, chain: fixture.blocks)
+        try await node.start()
+        let pool = PeerPool(params: fixture.params, peerCount: 1, manualPeers: [await node.endpoint])
+        defer { Task { await pool.stop(); await node.stop() } }
+        await pool.start()
+        let chain = try HeaderChain(params: fixture.params)
+        let filters = try FilterSync(pool: pool, chain: chain, startHeight: 1, requiredCheckpointPeers: 1)
+        let monitor = try LightningBackgroundMonitor(store: store, chain: fixture.params.genesisHash)
+        let driver = LightningChainDriver(monitor: monitor, headers: chain)
+        let first = try await driver.sync(using: filters, walletScripts: [], maxBlocks: 2,
+            onEvent: { _ in XCTFail("published before catching up") }, onMatch: { _ in })
+        XCTAssertFalse(first)
+        let complete = try await driver.sync(using: filters, walletScripts: [], onEvent: { _ in }, onMatch: { _ in })
+        XCTAssertTrue(complete)
+        let frontier = await filters.nextScanHeight, checked = await monitor.chainStatus().nextHeight
+        XCTAssertEqual(frontier, 7); XCTAssertEqual(frontier, checked)
+        await monitor.finish()
+    }
+}
+
+extension ChainRecoveryTests {
+    func testBackgroundPresignsRevokedRemoteHTLCAndSecondStagePenalty() async throws {
+        var (channel, _) = try fixture()
+        let bob = try ChannelSecrets()
+        channel.remote = try bob.terms(capacity: channel.capacity)
+        channel.remoteCurrentPoint = try bob.point(1)
+        channel.remoteNextPoint = try bob.point(2)
+        channel.remoteNumber = 1
+        try channel.revocations.insert(secret: ChannelKeys.commitmentSecret(seed: bob.seed, number: 0), commitmentNumber: 0)
+        channel.updates = [.init(change: .add(.init(id: 0, offered: true, amountMsat: 5_000_000,
+            paymentHash: ChannelKeys.hash(Data(repeating: 3, count: 32)), expiry: 12), onion: Data()),
+            fromLocal: true, localNumber: nil, remoteNumber: 0, remoteAcknowledged: true)]
+        // Re-sign the local commitment after changing the fixture's remote key.
+        let local = try channel.commitment(localOwner: true), digest = try ChannelTransactions.fundingDigest(local)
+        channel.signedCommitment = try ChannelTransactions.signed(local,
+            localSignature: ChannelKeys.sign(digest: digest, secret: channel.secrets.funding),
+            remoteSignature: ChannelKeys.sign(digest: digest, secret: bob.funding)).serialized(includeWitness: true)
+        let revoked = try channel.commitment(localOwner: false, number: 0)
+        let secondStage = try ChannelTransactions.htlcTransaction(commitment: revoked, output: XCTUnwrap(revoked.htlcOutputs.first))
+        let (store, _) = try backgroundFixture(channel)
+        let plan = try XCTUnwrap(store.load()?.channels.first)
+        XCTAssertTrue(try plan.spends.contains { try Transaction.decode($0.transaction).inputs.first?.previousOutput.txid == secondStage.txid })
+        let monitor = try LightningBackgroundMonitor(store: store, chain: genesis.hash)
+        let first = try await backgroundScan(monitor, height: 1, previous: genesis.hash, transaction: revoked.transaction)
+        _ = try await backgroundScan(monitor, height: 2, previous: first.hash, transaction: secondStage)
+        try await monitor.chainCaughtUp(height: 2)
+        let events = try await monitor.pendingChainEvents()
+        let txs = try events.compactMap { event -> Transaction? in
+            if case .broadcastRecovery(_, let raw) = event { return try Transaction.decode(raw) }; return nil
+        }
+        XCTAssertTrue(txs.contains { $0.inputs.first?.previousOutput.txid == secondStage.txid })
+        XCTAssertFalse(txs.contains { $0.inputs.first?.previousOutput == secondStage.inputs.first?.previousOutput },
+                       "must not relay a direct HTLC penalty after its second stage confirmed")
+        await monitor.finish()
+    }
+    func testFailedBackgroundWriteNeverAdvancesFullJournalOrPublishesActions() async throws {
+        let full = RecoveryStore(), background = RecoveryStore()
+        _ = try engine(channel: fixture().0, store: full)
+        let original = full.load()
+        let store = LightningBackgroundStore(journal: RecoveryJournal(background))
+        let engine = try LightningEngine(chain: genesis.hash, journal: RecoveryJournal(full), backgroundStore: store)
+        background.fail()
+        do { try await engine.resumeFromBackground(); XCTFail() } catch {}
+        XCTAssertEqual(full.load(), original)
+        do { try await engine.chainCaughtUp(height: 1); XCTFail("storage failure must poison the engine") } catch {}
+    }
+}
+
+extension ChainRecoveryTests {
+    func testSchemaUpgradePrecedesFirstBackgroundPlanAndFailureLeavesNoPlan() async throws {
+        for failure in [false, true] {
+            let full = RecoveryStore(), background = RecoveryStore()
+            var old = LightningEngine.State(chain: genesis.hash, nodeSecret: Data(repeating: 1, count: 32))
+            old.version = 3; old.revision = 9; old.channels = [try fixture().0]
+            try full.store(JSONEncoder().encode(old))
+            let store = LightningBackgroundStore(journal: RecoveryJournal(background))
+            let engine = try LightningEngine(chain: genesis.hash, journal: RecoveryJournal(full), backgroundStore: store)
+            if failure { full.fail() }
+            do {
+                try await engine.resumeFromBackground()
+                XCTAssertFalse(failure)
+                XCTAssertEqual(try state(full).version, 4)
+                XCTAssertEqual(try state(full).revision, try store.load()?.revision)
+            } catch {
+                XCTAssertTrue(failure)
+                XCTAssertNil(background.load())
+                XCTAssertEqual(try state(full).version, 3)
+            }
+        }
     }
 }

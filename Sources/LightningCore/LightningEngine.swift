@@ -28,7 +28,7 @@ public actor LightningEngine {
         case broadcastRecovery(channelID: Data, transaction: Data)
     }
     struct State: Codable {
-        var version = 3
+        var version = 4
         var revision: UInt64 = 0
         var nextSequence: UInt64 = 0
         var chain: Data
@@ -41,6 +41,9 @@ public actor LightningEngine {
         var async = AsyncState()
     }
     let journal: any LightningJournal
+    let backgroundStore: LightningBackgroundStore?
+    private var backgroundCache = LightningBackgroundSnapshot.Cache()
+    var needsBackgroundSchemaUpgrade = false
     var state: State
     var failed = false
     var chainIsCurrent = false
@@ -48,13 +51,16 @@ public actor LightningEngine {
     var peers: [Data: LightningFeatures] = [:]
     var reestablishing = Set<Data>()
 
-    public init(chain: Data, nodeSecret: Data? = nil, journal: sending any LightningJournal) throws {
+    public init(chain: Data, nodeSecret: Data? = nil, journal: sending any LightningJournal,
+                backgroundStore: LightningBackgroundStore? = nil) throws {
         guard chain.count == 32 else { throw LightningError.invalidHash }
         self.journal = journal
+        self.backgroundStore = backgroundStore
         if let bytes = try journal.load() {
             var loaded = try JSONDecoder().decode(State.self, from: bytes)
-            guard [2, 3].contains(loaded.version), loaded.chain == chain else { throw LightningError.storageFailed }
-            loaded.version = 3
+            guard [2, 3, 4].contains(loaded.version), loaded.chain == chain else { throw LightningError.storageFailed }
+            needsBackgroundSchemaUpgrade = loaded.version < 4
+            loaded.version = 4
             guard nodeSecret == nil || nodeSecret == loaded.nodeSecret else { throw LightningError.storageFailed }
             try Self.validateLoaded(loaded)
             state = loaded
@@ -160,6 +166,10 @@ public actor LightningEngine {
         next.revision = state.revision + 1
         do {
             let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+            // The locked monitor must be updated BEFORE saving/publishing a
+            // revocation. A crash between stores leaves recovery ahead and
+            // foreground fails closed; it can never expose an older commitment.
+            try backgroundStore?.replace(LightningBackgroundSnapshot.make(next, cache: &backgroundCache))
             try journal.store(encoder.encode(next))
             state = next
         } catch { failed = true; throw LightningError.storageFailed }

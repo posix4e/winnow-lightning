@@ -14,16 +14,18 @@ public protocol LightningJournal: AnyObject {
 /// This store detects torn/corrupt writes, not restoration of an entire older
 /// wallet backup. Restored backups must remain recovery-only.
 public final class FileLightningJournal: LightningJournal {
+    public enum Protection { case whenUnlocked, afterFirstUnlock }
     private let directory: URL
     private let key: SymmetricKey
+    private let protection: Protection
     private let lockFD: Int32
     private var failed = false
     private static let header = Data("WINNOW-SWIFT-LN\0\u{1}".utf8)
     private static let maximumBytes = 64 * 1024 * 1024
 
-    public init(directory: URL, key: Data) throws {
+    public init(directory: URL, key: Data, protection: Protection = .whenUnlocked) throws {
         guard key.count == 32, directory.isFileURL else { throw LightningError.storageFailed }
-        self.directory = directory; self.key = SymmetricKey(data: key)
+        self.directory = directory; self.key = SymmetricKey(data: key); self.protection = protection
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
                                                 attributes: [.posixPermissions: 0o700])
         let values = try directory.resourceValues(forKeys: [.isSymbolicLinkKey, .isDirectoryKey])
@@ -31,6 +33,12 @@ public final class FileLightningJournal: LightningJournal {
         var protected = directory
         var resources = URLResourceValues(); resources.isExcludedFromBackup = true
         try protected.setResourceValues(resources)
+        #if os(iOS)
+        if protection == .afterFirstUnlock {
+            try FileManager.default.setAttributes([.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+                                                  ofItemAtPath: directory.path)
+        }
+        #endif
         let descriptor = Darwin.open(directory.appendingPathComponent("writer.lock").path,
                                      O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0o600)
         guard descriptor >= 0 else { throw LightningError.storageFailed }
@@ -68,7 +76,8 @@ public final class FileLightningJournal: LightningJournal {
         guard descriptor >= 0 else { throw LightningError.storageFailed }
         defer { Darwin.close(descriptor); try? FileManager.default.removeItem(at: temporary) }
         #if os(iOS)
-        try FileManager.default.setAttributes([.protectionKey: FileProtectionType.complete],
+        try FileManager.default.setAttributes([.protectionKey: protection == .whenUnlocked
+            ? FileProtectionType.complete : FileProtectionType.completeUntilFirstUserAuthentication],
                                               ofItemAtPath: temporary.path)
         #endif
         try writeAll(bytes, descriptor: descriptor)

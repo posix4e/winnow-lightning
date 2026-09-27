@@ -22,6 +22,8 @@ final class LightningAppController {
     private(set) var driver: LightningChainDriver?
     @ObservationIgnored private var session: LightningPeerSession?
     @ObservationIgnored private let keys: any StoreKeyVault
+    @ObservationIgnored private let backgroundKeys: any StoreKeyVault
+    @ObservationIgnored private var backgroundStore: LightningBackgroundStore?
     @ObservationIgnored private var directory: URL?
     @ObservationIgnored private var connecting = false
     @ObservationIgnored private(set) var generation: UInt64 = 0
@@ -31,7 +33,27 @@ final class LightningAppController {
     static let recoveryFeeSat: UInt64 = 500
     static var now: UInt64 { UInt64(Date().timeIntervalSince1970) }
 
-    init(network: BitcoinNetwork, keys: any StoreKeyVault) { self.network = network; self.keys = keys }
+    init(network: BitcoinNetwork, keys: any StoreKeyVault, backgroundKeys: (any StoreKeyVault)? = nil) {
+        self.network = network; self.keys = keys; self.backgroundKeys = backgroundKeys ?? keys
+    }
+
+    private func openBackgroundStore(root: URL, create: Bool) throws -> LightningBackgroundStore {
+        if let backgroundStore { return backgroundStore }
+        let dir = root.appending(path: "lightning-background", directoryHint: .isDirectory)
+        let account = "lightning-background-v1.\(network.rawValue)"
+        let existing = try backgroundKeys.key(for: account)
+        let hasJournal = FileManager.default.fileExists(atPath: dir.appending(path: "journal.v1").path)
+        guard (existing != nil) == hasJournal, create || hasJournal else { throw LightningError.storageFailed }
+        let key = try existing ?? backgroundKeys.establishKey(for: account)
+        let store = try LightningBackgroundStore(directory: dir, key: key.withUnsafeBytes { Data($0) })
+        backgroundStore = store
+        return store
+    }
+
+    func prepareBackground(directory: URL) throws -> LightningBackgroundMonitor {
+        try LightningBackgroundMonitor(store: openBackgroundStore(root: directory, create: false),
+                                       chain: NetworkParams.params(for: network).genesisHash)
+    }
 
     func requireNetwork(_ model: AppModel, generation expected: UInt64? = nil) throws {
         guard model.network == network, !model.changingNetwork,
@@ -53,13 +75,15 @@ final class LightningAppController {
             #else
             let nodeSecret: Data? = nil
             #endif
-            let opened = try LightningEngine(chain: NetworkParams.params(for: network).genesisHash, nodeSecret: nodeSecret, journal: journal)
-            try await opened.persistIdentity()
+            let opened = try LightningEngine(chain: NetworkParams.params(for: network).genesisHash, nodeSecret: nodeSecret,
+                journal: journal, backgroundStore: openBackgroundStore(root: root, create: true))
             directory = dir
             let loaded = try loadProfile()
             engine = opened; profile = loaded
         }
         guard let engine else { throw LightningError.storageFailed }
+        try await engine.resumeFromBackground()
+        try await engine.persistIdentity()
         driver = LightningChainDriver(engine: engine, headers: headers)
         try await refresh()
     }

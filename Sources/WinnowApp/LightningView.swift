@@ -17,7 +17,7 @@ struct LightningView: View {
             Form {
                 Section {
                     Text(controller.networkNotice).font(.headline)
-                    Text("Experimental Lightning. Keep the app open to verify the chain and recover funds. This beta does not protect channels while the app is stopped.")
+                    Text("Experimental Lightning. Background checks can relay pre-signed channel recovery transactions, but this beta has no external watchtower.")
                         .font(.footnote).foregroundStyle(.secondary)
                     Text("Each network has its own wallet and channels. Wallet and channel recovery data stay on this device.")
                         .font(.footnote).foregroundStyle(.secondary)
@@ -28,6 +28,7 @@ struct LightningView: View {
                     if let error = controller.error { Text(error).foregroundStyle(.red).accessibilityIdentifier("lightningError") }
                     Button("Sync and reconnect") { run { await model.syncNow() } }.accessibilityIdentifier("lightningSync")
                 }
+                Section("Chain checks") { BackgroundSyncStatusView() }
                 providerSection
                 channelSection
                 receiveSection

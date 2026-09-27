@@ -4,10 +4,11 @@ import WalletCore
 /// The engine adds watch scripts to Winnow's verified scanner. It never opens
 /// a second Bitcoin connection or treats a remote channel_ready as funding.
 public actor LightningChainDriver {
-    private let engine: LightningEngine
+    private let engine: any LightningChainMonitor
     private let headers: HeaderChain
     private var syncing = false
     public init(engine: LightningEngine, headers: HeaderChain) { self.engine = engine; self.headers = headers }
+    public init(monitor: LightningBackgroundMonitor, headers: HeaderChain) { self.engine = monitor; self.headers = headers }
 
     @discardableResult
     public func sync(using filters: FilterSync, walletScripts: [Data], maxBlocks: UInt32? = nil,

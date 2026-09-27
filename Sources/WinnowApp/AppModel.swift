@@ -377,6 +377,14 @@ final class AppModel {
     private var phaseTask: Task<Void, Never>?
     private var broadcasterEventTask: Task<Void, Never>?
     private var isActive = false
+    private var bootTask: Task<Void, Never>?
+    private var backgroundRun: Task<Bool, Never>?
+    private var networkShutdown: Task<Void, Never>?
+    private(set) var backgroundRunning = false
+    var backgroundMonitor: LightningBackgroundMonitor?
+    private(set) var lastCompleteCheck: Date?
+    private(set) var backgroundSyncError: String?
+
     private var buildingStack = false
     /// Prevents the E2E journal from repeating an identical wallet/vault
     /// snapshot every time SwiftUI asks for a refresh.
@@ -422,7 +430,8 @@ final class AppModel {
         let lightningKeys = storeKeys ?? KeychainStoreKeyVault(service: keychainService, protection: .whenUnlocked)
         lightningControllers = LightningResearch.enabled(e2e: e2e)
             ? Dictionary(uniqueKeysWithValues: BitcoinNetwork.allCases.map {
-                ($0, LightningAppController(network: $0, keys: lightningKeys))
+                ($0, LightningAppController(network: $0, keys: lightningKeys,
+                    backgroundKeys: storeKeys ?? KeychainStoreKeyVault(service: keychainService)))
             }) : [:]
         #if DEBUG
         if e2e?.forcedNetwork == .regtest, let entropy = e2e?.entropy {
@@ -500,6 +509,14 @@ final class AppModel {
 
     /// Opens the persisted wallet for the current network, if any.
     func boot() async {
+        if let bootTask { await bootTask.value; return }
+        let opening = Task { await openWalletForBoot() }
+        bootTask = opening
+        await opening.value
+        bootTask = nil
+    }
+
+    private func openWalletForBoot() async {
         // A crash with the export sheet open skips its cleanup; the staging
         // file may carry the recovery phrase, so it does not wait for tmp.
         ExportStagingFile.sweep()
@@ -538,7 +555,7 @@ final class AppModel {
             "walletID": walletID ?? "",
         ])
         await refresh()
-        if isActive { await activate() }
+        if isActive && !backgroundRunning { await activate() }
     }
 
     /// A wallet stored by 0.7.1 or earlier has its secret behind the
@@ -576,13 +593,16 @@ final class AppModel {
         await boot()
     }
 
-    /// Sync-while-active: the stack runs only while the scene is foreground.
+    /// Foreground networking and bounded background checks never overlap.
     func scenePhaseChanged(_ phase: ScenePhase) async {
         e2e?.journal("app.scenePhase", fields: ["phase": String(describing: phase)])
         switch phase {
         case .active:
             if !isActive { attemptedCloudPreparation.removeAll() }
             isActive = true
+            await cancelBackgroundSync()
+            await networkShutdown?.value
+            lastCompleteCheck = defaults.object(forKey: "sync.lastComplete.\(network.rawValue)") as? Date
             await activate()
         case .background:
             isActive = false
@@ -590,8 +610,14 @@ final class AppModel {
             cloudPreparationTask = nil
             cloudBackups.suspend()
             keychainAuthentication.revoke()
+            BackgroundSyncScheduler.shared.schedule()
+            // A cold BGTask launch can deliver the initial scene phase after
+            // its handler started. That phase must not tear down its own scan.
+            if backgroundRun != nil { return }
             suspendNetworking()
-            await stopNetworking()
+            let shutdown = Task { await stopNetworking() }
+            networkShutdown = shutdown
+            await shutdown.value
         default:
             break // .inactive: still foreground — keep syncing
         }
@@ -599,7 +625,7 @@ final class AppModel {
 
     private func activate() async {
         // Boot must attach the saved wallet before a stack chooses its filters.
-        guard stage != .loading, isActive, !changingNetwork, storageDirectory() != nil else { return }
+        guard stage != .loading, isActive, !backgroundRunning, !changingNetwork, storageDirectory() != nil else { return }
         if case .storageDamaged = stage { return }
         scheduleAutomaticCloudPreparation()
         let epoch = networkGeneration
@@ -621,6 +647,46 @@ final class AppModel {
         automaticCatalogTask = nil
         networkGeneration &+= 1
         httpClient.cancel()
+    }
+
+    /// Called only by the registered BGTask handler. Cold launches open the
+    /// watch-only wallet metadata; no spending key or full Lightning journal.
+    func runBackgroundSync() async -> Bool {
+        guard !isActive, !changingNetwork, backgroundRun == nil else { return false }
+        let run = Task { @MainActor in
+            await networkShutdown?.value
+            guard !isActive, !Task.isCancelled else { return false }
+            backgroundRunning = true
+            if stage == .loading { await boot() }
+            var complete = false
+            if stage == .ready, !Task.isCancelled {
+                if httpClient.isCancelled { httpClient = RoutedHTTPClient() }
+                await buildStackIfNeeded()
+                if !Task.isCancelled {
+                    await stack?.pool.start()
+                    complete = await syncOnce()
+                }
+            }
+            backgroundSyncError = complete ? nil : status.lastSyncError ?? "Open Winnow to finish checking the chain."
+            await stopNetworking()
+            await backgroundMonitor?.finish()
+            backgroundMonitor = nil
+            backgroundRunning = false
+            e2e?.journal("background.completed", fields: ["complete": String(complete)])
+            return complete
+        }
+        backgroundRun = run
+        let complete = await run.value
+        backgroundRun = nil
+        return complete
+    }
+
+    func cancelBackgroundSync() async {
+        guard let run = backgroundRun else { return }
+        run.cancel()
+        // Closing sockets interrupts pending peer reads before the OS deadline.
+        await stack?.pool.stop()
+        _ = await run.value
     }
 
     /// Retries peer discovery after the pool reported exhaustion (the UI's
@@ -754,7 +820,7 @@ final class AppModel {
     }
 
     private func waitForStackBuild() async {
-        while stack == nil, buildingStack, !Task.isCancelled {
+        while buildingStack, !Task.isCancelled {
             try? await Task.sleep(for: .milliseconds(50))
         }
     }
@@ -763,9 +829,9 @@ final class AppModel {
         guard stack == nil else { return }
         if buildingStack {
             await waitForStackBuild()
-            return
+            guard stack == nil, !Task.isCancelled else { return }
         }
-        guard let dir = storageDirectory() else { return }
+        guard !Task.isCancelled, let dir = storageDirectory() else { return }
         let epoch = networkGeneration
         buildingStack = true
         defer { buildingStack = false }
@@ -785,7 +851,7 @@ final class AppModel {
             let chain = try await Task.detached(priority: .userInitiated) {
                 try Self.openOrRebuildChain(params: params, storageURL: headersURL, start: start)
             }.value
-            guard epoch == networkGeneration, isActive else { await pool.stop(); return }
+            guard epoch == networkGeneration, isActive || backgroundRunning else { await pool.stop(); return }
             let broadcaster = try makeBroadcaster(
                 pool: pool, storageURL: dir.appending(path: "broadcast.json"))
             var newStack = SyncStack(pool: pool, chain: chain, filters: nil, broadcaster: broadcaster)
@@ -793,7 +859,7 @@ final class AppModel {
                 newStack.filters = try await makeFilterSync(pool: pool, chain: chain,
                                                             startHeight: wallet.nextScanHeight)
             }
-            guard epoch == networkGeneration, isActive else {
+            guard epoch == networkGeneration, isActive || backgroundRunning else {
                 await pool.stop(); await broadcaster.shutdown(); return
             }
             stack = newStack
@@ -806,7 +872,11 @@ final class AppModel {
             // then scan on state already known to be stale, which is the one
             // thing every other damaged-state path in this app refuses to do.
             try await resumeInterruptedRollback()
-            try await lightning?.prepare(directory: dir, headers: chain)
+            if backgroundRunning {
+                backgroundMonitor = try lightning?.prepareBackground(directory: dir)
+            } else {
+                try await lightning?.prepare(directory: dir, headers: chain)
+            }
         } catch {
             status.lastSyncError = error.localizedDescription
             e2e?.journal("network.stackFailed", fields: ["error": error.localizedDescription])
@@ -989,8 +1059,10 @@ final class AppModel {
         await syncOnce()
     }
 
-    private func syncOnce() async {
-        guard !status.syncing, let wallet, let stack, let filters = stack.filters else { return }
+    @discardableResult
+    private func syncOnce() async -> Bool {
+        guard !status.syncing, let wallet, let stack, let filters = stack.filters else { return false }
+        var complete = false
         status.syncing = true
         defer { status.syncing = false }
         do {
@@ -999,7 +1071,7 @@ final class AppModel {
             let broadcaster = stack.broadcaster
             let network = network
             let vaultStore = vaultStore
-            try await syncWalletAndLightning(filters: filters, scripts: scripts,
+            complete = try await syncWalletAndLightning(filters: filters, scripts: scripts,
                                    onReorg: { [weak self] forkHeight in
                 guard let self else { return }
                 try await self.rollBackStores(to: forkHeight)
@@ -1031,7 +1103,12 @@ final class AppModel {
             // it redone at the next launch.
             finishRollback()
             status.lastSyncError = nil
+            if complete {
+                lastCompleteCheck = Date()
+                defaults.set(lastCompleteCheck, forKey: "sync.lastComplete.\(network.rawValue)")
+            }
         } catch {
+            complete = false
             // A later batch may have thrown after earlier ones persisted
             // in FilterSync. Those earlier batches each passed their own
             // checkpoint comparison before anything above ran for them, so
@@ -1042,6 +1119,7 @@ final class AppModel {
             e2e?.journal("wallet.syncFailed", fields: ["error": String(describing: error)])
         }
         await refresh()
+        return complete
     }
 
     /// Keep replaced originals beside the payment that superseded them.
@@ -1481,7 +1559,7 @@ final class AppModel {
         stage = .onboarding
         e2e?.journal("wallet.destroyed", fields: ["walletID": walletID])
 
-        if isActive { await activate() }
+        if isActive && !backgroundRunning { await activate() }
         await refresh()
     }
 
@@ -2551,6 +2629,8 @@ final class AppModel {
         let settings = Self.networkScopedSettings(defaults: defaults, network: network)
         manualPeers = settings.manualPeers
         esploraURLString = settings.esploraURL
+        lastCompleteCheck = defaults.object(forKey: "sync.lastComplete.\(network.rawValue)") as? Date
+        backgroundSyncError = nil
     }
 
     func switchNetwork(to newNetwork: BitcoinNetwork) async {
@@ -2558,6 +2638,7 @@ final class AppModel {
         guard newNetwork != network, !changingNetwork, operationsInFlight.isEmpty else { return }
         changingNetwork = true
         defer { changingNetwork = false }
+        await cancelBackgroundSync()
         cloudBackups.suspend()
         suspendNetworking()
         await stopNetworking()
@@ -2595,7 +2676,7 @@ final class AppModel {
         }
         await refresh()
         changingNetwork = false
-        if isActive { await activate() }
+        if isActive && !backgroundRunning { await activate() }
     }
 
     static func parsePeer(_ text: String) throws -> PeerEndpoint {
@@ -2630,11 +2711,16 @@ final class AppModel {
         await previous?.pool.stop()
         await previous?.broadcaster.shutdown()
         await previousSync?.value
+        // A manual Sync tap is not the periodic syncTask. Drain it, and any
+        // stack construction already in flight, before handing files/actors
+        // to a background monitor or a new foreground generation.
+        while status.syncing || buildingStack { await Task.yield() }
         await lightning?.stop()
     }
 
     /// Rebuilds the stack so changed peer settings take effect.
     func reconnect() async {
+        await cancelBackgroundSync()
         suspendNetworking()
         await stopNetworking()
         await activate()

@@ -4,7 +4,13 @@ import UIKit
 
 @main
 struct WinnowApp: App {
-    @State private var model = AppModel()
+    @State private var model: AppModel
+
+    init() {
+        let model = AppModel()
+        _model = State(initialValue: model)
+        BackgroundSyncScheduler.shared.register(model: model)
+    }
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
