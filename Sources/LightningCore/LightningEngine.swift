@@ -13,6 +13,8 @@ public actor LightningEngine {
         public let capacitySat: UInt64
         public let phase: ChannelPhase
         public let signedCommitment: Data?
+        /// Funding remains exposed until a cooperative close has six verified confirmations.
+        public let needsMonitoring: Bool
     }
     public struct Outbound: Codable, Sendable, Equatable {
         public let sequence: UInt64
@@ -73,7 +75,8 @@ public actor LightningEngine {
     }
     public func channels() -> [Channel] {
         state.channels.map { Channel(id: $0.id, peer: $0.peer, capacitySat: $0.capacity, phase: $0.phase,
-                                     signedCommitment: $0.dataLossDetected ? nil : $0.signedCommitment) }
+                                     signedCommitment: $0.dataLossDetected ? nil : $0.signedCommitment,
+                                     needsMonitoring: $0.fundingTxid != nil && $0.phase != .closed) }
     }
     public func chainHash() -> Data { state.chain }
     /// The adapter calls this only after its verified header/filter scan has

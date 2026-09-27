@@ -24,5 +24,6 @@ struct BackgroundSyncStatusView: View {
             }
             .font(.footnote)
         }
+        if !model.channelProtection.records.isEmpty { ChannelProtectionDetails() }
     }
 }

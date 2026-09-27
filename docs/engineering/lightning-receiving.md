@@ -54,3 +54,27 @@ Primary contracts:
 - [Olympus](https://docs.zeusln.app/lsp/services/lsps1/)
 - [Megalith](https://docs.megalithic.me/lightning-services/lsp1-get-inbound-liquidity-for-mobile-clients/)
 - [LNServer](https://lnserver.com/)
+# Channel check warnings
+
+Funded channels retain a per-network last-complete-check record on this device.
+A warning is visible in both Simple and Advanced modes before the first complete
+channel check, after a failed scan or recovery relay, after one hour without a
+complete check, and with stronger wording after six hours. Switching networks
+does not erase another network's warning. Only a complete verified channel scan
+refreshes the record; peer connectivity does not. Recovery broadcasts must be
+requested by a Bitcoin peer before that scan can count as complete.
+
+Reminders require an explicit tap and Apple's notification permission. Two local
+notifications are queued while the app is running, so delivery does not require
+a later background execution. Rechecking replaces old requests; a verified
+cooperative close cancels that network's reminders. Reopening the app does not
+repeat a notification already queued for the same check. Permission denial and
+scheduling errors retain the in-app warning. Notification text excludes balances,
+payment details and node identity.
+
+One and six hours are reminder intervals, never promises about safe offline time.
+Deadlines depend on channel timelocks measured in blocks. iOS can silence or delay
+notifications and does not guarantee background checks. These reminders are not
+a watchtower and cannot scan, sign, or relay a justice transaction by themselves.
+Other networks remain warned but automatic background scans still cover only the
+selected network; the warning's Check action opens the network that is overdue.

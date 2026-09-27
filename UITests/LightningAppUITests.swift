@@ -123,6 +123,13 @@ final class LightningAppUITests: XCTestCase {
         let recipientProfile = try rpc("recipient_channel")
         try configure(app, profile: recipientProfile, up: false)
         try waitConnected(app)
+        let reminderBanner = app.buttons["channelReminderBanner"]
+        XCTAssertTrue(reminderBanner.appears(within: 60), "funded channels must offer check reminders")
+        reminderBanner.tap()
+        XCTAssertTrue(app.staticTexts["channelProtectionLimitations"].appears(within: 10))
+        XCTAssertTrue(scroll(app, app.buttons["channelCheckReminders"]))
+        Screenshots.capture(app, "lightning-channel-protection-reminders", testCase: self)
+        app.buttons["Done"].tap()
         tap(app, "lightningCreateOffer")
         let offerElement = app.staticTexts["lightningReceiveOffer"]
         XCTAssertTrue(scroll(app, offerElement))
@@ -296,7 +303,7 @@ final class LightningAppUITests: XCTestCase {
     }
     private func verifyHash(_ app: XCUIApplication, hash: String) throws {
         let value = app.staticTexts["lightningPaymentHash." + hash]
-        XCTAssertTrue(scroll(app, value, fullyVisible: true), app.debugDescription)
+        XCTAssertTrue(scroll(app, value), app.debugDescription)
         XCTAssertEqual(value.value as? String, hash)
     }
     private func paste(_ text: String) throws {

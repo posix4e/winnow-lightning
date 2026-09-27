@@ -31,6 +31,8 @@ final class LightningAppController {
     @ObservationIgnored private var backgroundStore: LightningBackgroundStore?
     @ObservationIgnored private var directory: URL?
     @ObservationIgnored private var connecting = false
+    @ObservationIgnored var monitoringChanged: ((Bool) -> Void)?
+    @ObservationIgnored var recoveryRelayFailed: (() -> Void)?
     @ObservationIgnored private(set) var generation: UInt64 = 0
     #if DEBUG
     @ObservationIgnored var fixtureNodeSecret: Data?
@@ -171,6 +173,7 @@ final class LightningAppController {
         guard let engine else { return }
         nodeID = try await engine.nodeID().hex
         channels = await engine.channels(); payments = await engine.payments()
+        monitoringChanged?(channels.contains(where: \.needsMonitoring))
         balances = try await engine.channelBalances(); funding = try await engine.fundingRequests()
         offers = try await engine.receiveOffers(now: Self.now)
         if let profile { invoiceCapacities = try await engine.invoiceCapacities(peer: profile.peerKey) }
@@ -197,8 +200,9 @@ final class LightningAppController {
                 try requireNetwork(model, generation: epoch)
                 _ = try await stack.broadcaster.broadcast(raw, feeRateSatPerVByte: reservation.feeRateSatPerVByte)
                 try await wallet.commitFundingBroadcast(requestID: reservation.requestID, rawTransaction: raw)
-            case .broadcastClose(_, let raw), .broadcastRecovery(_, let raw):
-                _ = try await stack.broadcaster.broadcast(raw)
+            case .broadcastClose, .broadcastRecovery:
+                do { try await relayBackgroundRecovery([event], broadcaster: stack.broadcaster) }
+                catch { recoveryRelayFailed?(); throw error }
             case .channelReady: try await configureRecovery(model: model)
             case .fundingRequired, .paymentChanged: break
             }

@@ -33,6 +33,9 @@ struct WinnowApp: App {
                     StorageDamagedView(message: message)
                 }
             }
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if model.stage == .ready { ChannelProtectionBanner() }
+            }
             .alert("Tor is no longer part of Winnow", isPresented: Binding(
                 get: { model.torRemovedNotice }, set: { model.torRemovedNotice = $0 }
             )) {

@@ -33,6 +33,8 @@ final class ChannelEngineTests: XCTestCase, @unchecked Sendable {
         let aliceKey = try key(1), bobKey = try key(2), aStore = JournalMemory(), bStore = JournalMemory()
         let alice = try await engine(aStore, peer: bobKey, secret: Data(repeating: 1, count: 32)), bob = try await engine(bStore, peer: aliceKey, secret: Data(repeating: 2, count: 32))
         let id = try await alice.openChannel(peer: bobKey, capacitySat: 100_000, feePerKW: 1000)
+        let opening = await alice.channels()
+        XCTAssertFalse(try XCTUnwrap(opening.first).needsMonitoring)
         let open = try await alice.pendingMessages(peer: bobKey)[0].message
         _ = try await bob.receive(peer: aliceKey, message: open)
         let accept = try await bob.pendingMessages(peer: aliceKey)[0].message
@@ -47,6 +49,7 @@ final class ChannelEngineTests: XCTestCase, @unchecked Sendable {
         let signed = try await bob.pendingMessages(peer: aliceKey)[0].message
         let bobChannels = await bob.channels()
         XCTAssertNotNil(bobChannels.first?.signedCommitment)
+        XCTAssertTrue(try XCTUnwrap(bobChannels.first).needsMonitoring)
         let beforeInvalid = aStore.load()
         var invalid = Array(signed.payload); invalid[invalid.count - 1] ^= 1
         do {
@@ -72,6 +75,7 @@ final class ChannelEngineTests: XCTestCase, @unchecked Sendable {
         let restored = try LightningEngine(chain: chain, journal: MemoryJournal(aStore))
         let restoredChannels = await restored.channels()
         XCTAssertEqual(restoredChannels.first?.signedCommitment, aChannels.first?.signedCommitment)
+        XCTAssertTrue(try XCTUnwrap(restoredChannels.first).needsMonitoring)
         do { _ = try await restored.pendingMessages(peer: bobKey); XCTFail("Restart must wait for verified chain catch-up") } catch {}
     }
     func testDiskFailureStopsSignaturePublicationAndFurtherActions() async throws {

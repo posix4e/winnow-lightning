@@ -384,6 +384,7 @@ final class AppModel {
     var backgroundMonitor: LightningBackgroundMonitor?
     private(set) var lastCompleteCheck: Date?
     private(set) var backgroundSyncError: String?
+    let channelProtection: ChannelProtection
 
     private var buildingStack = false
     /// Prevents the E2E journal from repeating an identical wallet/vault
@@ -450,6 +451,7 @@ final class AppModel {
         let defaults = e2e?.defaults ?? defaults ?? (LightningResearch.isResearchApp
             ? UserDefaults(suiteName: LightningResearch.keychainService + ".preferences")! : .standard)
         self.defaults = defaults
+        channelProtection = ChannelProtection(defaults: defaults)
         // 0.7.0 and earlier shipped an opt-in Tor route (`torEnabled`). It
         // is gone with 0.7.1; an installation that had it on is told once
         // rather than silently connecting directly.
@@ -495,6 +497,12 @@ final class AppModel {
             defaults.set(manualPeers, forKey: DefaultsKey.manualPeers(selectedNetwork))
         }
         e2e?.journal("app.initialized", fields: ["network": network.rawValue, "processID": String(ProcessInfo.processInfo.processIdentifier)])
+        for (network, controller) in lightningControllers {
+            controller.monitoringChanged = { [weak self] funded in
+                self?.channelProtection.channelState(network: network, funded: funded)
+            }
+            controller.recoveryRelayFailed = { [weak self] in self?.channelProtection.scanFailed(network: network) }
+        }
     }
 
     /// What a Paste button reads: the runner's control file under the UI
@@ -603,6 +611,7 @@ final class AppModel {
             await cancelBackgroundSync()
             await networkShutdown?.value
             lastCompleteCheck = defaults.object(forKey: "sync.lastComplete.\(network.rawValue)") as? Date
+            await channelProtection.refreshPermission()
             await activate()
         case .background:
             isActive = false
@@ -1102,6 +1111,7 @@ final class AppModel {
             if complete {
                 lastCompleteCheck = Date()
                 defaults.set(lastCompleteCheck, forKey: "sync.lastComplete.\(network.rawValue)")
+                channelProtection.scanCompleted(network: network)
             }
         } catch {
             complete = false
@@ -1112,6 +1122,7 @@ final class AppModel {
             // threw applied nothing. Keep WalletState from lagging it.
             try? await wallet.recordScanHeight(await filters.nextScanHeight)
             status.lastSyncError = error.localizedDescription
+            channelProtection.scanFailed(network: network)
             e2e?.journal("wallet.syncFailed", fields: ["error": String(describing: error)])
         }
         await refresh()

@@ -542,5 +542,7 @@ extension ChainRecoveryTests {
         let restored = try LightningEngine(chain: genesis.hash, journal: RecoveryJournal(full), backgroundStore: store)
         try await restored.resumeFromBackground()
         XCTAssertEqual(try state(full).channels.first?.phase, .closed)
+        let channels = await restored.channels()
+        XCTAssertFalse(try XCTUnwrap(channels.first).needsMonitoring)
     }
 }
