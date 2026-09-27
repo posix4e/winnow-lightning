@@ -27,8 +27,7 @@ final class LightningAppUITests: XCTestCase {
             "WINNOW_E2E_PEER": "127.0.0.1:1", "WINNOW_E2E_PEER_COUNT": "1",
         ]
         app.launch()
-        XCTAssertTrue(app.buttons["createWalletButton"].appears(within: 30))
-        app.buttons["createWalletButton"].tap()
+        tap(app, "createWalletButton")
         selectTab(app, "Lightning")
         let node = app.staticTexts["lightningNodeID"]
         XCTAssertTrue(scroll(app, node))
@@ -44,7 +43,8 @@ final class LightningAppUITests: XCTestCase {
             .matching(NSPredicate(format: "label == %@", "Advanced")).firstMatch.appears(within: 10),
             "Simple must replace the advanced tab layout")
         XCTAssertFalse(app.buttons["Lightning"].exists)
-        XCTAssertTrue(app.buttons["openSendButton"].exists)
+        XCTAssertTrue(scroll(app, app.buttons["openSendButton"]))
+        XCTAssertTrue(scroll(app, app.staticTexts["networkTag"], up: true))
         XCTAssertEqual(app.staticTexts["networkTag"].label, "Signet · test coins")
         Screenshots.capture(app, "lightning-simple-mode", testCase: self)
 
@@ -54,7 +54,7 @@ final class LightningAppUITests: XCTestCase {
         XCTAssertTrue(mode.appears(within: 30))
         XCTAssertEqual(mode.label, "Advanced", "relaunch must keep Simple mode")
         XCTAssertFalse(app.buttons["Lightning"].exists)
-        XCTAssertTrue(app.buttons["receiveButton"].exists)
+        XCTAssertTrue(scroll(app, app.buttons["receiveButton"]))
         mode.tap()
         let confirmation = app.alerts["Turn on Advanced mode?"]
         XCTAssertTrue(confirmation.appears(within: 10))
