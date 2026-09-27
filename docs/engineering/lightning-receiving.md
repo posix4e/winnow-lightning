@@ -66,7 +66,9 @@ requested by a Bitcoin peer before that scan can count as complete.
 
 Reminders require an explicit tap and Apple's notification permission. Two local
 notifications are queued while the app is running, so delivery does not require
-a later background execution. Rechecking replaces old requests; a verified
+a later background execution. A failed check or recovery relay also queues a
+single immediate reminder for that check, without repeating on every retry.
+Rechecking replaces old requests; a verified
 cooperative close cancels that network's reminders. Reopening the app does not
 repeat a notification already queued for the same check. Permission denial and
 scheduling errors retain the in-app warning. Notification text excludes balances,

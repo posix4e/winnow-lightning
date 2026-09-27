@@ -677,6 +677,8 @@ final class AppModel {
                 }
             }
             backgroundSyncError = complete ? nil : status.lastSyncError ?? "Open Winnow to finish checking the chain."
+            if !complete { channelProtection.scanFailed(network: network) }
+            await channelProtection.flushReminders()
             await stopNetworking()
             await backgroundMonitor?.finish()
             backgroundMonitor = nil

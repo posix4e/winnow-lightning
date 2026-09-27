@@ -56,7 +56,7 @@ struct ChannelProtectionDetails: View {
         Button("Check channels now") { Task { await checkChannels() } }
             .disabled(busy).accessibilityIdentifier("checkChannelsNow")
         reminderControls
-        Text("Reminders arrive after 1 hour and again after 6 hours without a complete channel check. These are reminders, not safe offline limits: channel deadlines are measured in blocks. Notifications can be silenced or delayed and do not protect funds. iOS background checks are not guaranteed; a watchtower is not configured by these reminders.")
+        Text("Reminders arrive after 1 hour and again after 6 hours without a complete channel check, and when a check or recovery relay fails. These are reminders, not safe offline limits: channel deadlines are measured in blocks. Notifications can be silenced or delayed and do not protect funds. iOS background checks are not guaranteed; a watchtower is not configured by these reminders.")
             .font(.footnote).foregroundStyle(.secondary)
             .accessibilityIdentifier("channelProtectionLimitations")
     }

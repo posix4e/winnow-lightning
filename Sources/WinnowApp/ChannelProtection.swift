@@ -124,10 +124,15 @@ final class ChannelProtection {
     }
     private func requests() -> [ChannelReminder] {
         records.flatMap { name, record in
-            [("overdue", Self.overdue), ("urgent", Self.urgent)].map { level, delay in
+            var reminders = [("overdue", Self.overdue), ("urgent", Self.urgent)].map { level, delay in
                 ChannelReminder(id: "\(ChannelReminder.prefix)\(name).\(record.generation).\(level)",
                     date: record.anchor.addingTimeInterval(delay), urgent: level == "urgent")
             }
+            if record.failed {
+                reminders.append(ChannelReminder(id: "\(ChannelReminder.prefix)\(name).\(record.generation).failed",
+                                                 date: .now, urgent: true))
+            }
+            return reminders
         }
     }
 }

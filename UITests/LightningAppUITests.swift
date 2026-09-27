@@ -40,7 +40,7 @@ final class LightningAppUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["lightningReceivable"].exists)
         XCTAssertFalse(app.staticTexts["lightningReceiveInvoice"].exists, "fresh install must not pretend to have receiving capacity")
         Screenshots.capture(app, "lightning-simple-receive-setup", testCase: self)
-        app.buttons["lightningReceiveSetup"].tap()
+        tap(app, "lightningReceiveSetup")
         for provider in ["olympus", "megalith", "lnserver"] {
             XCTAssertTrue(scroll(app, app.buttons["lightningProvider.\(provider)"]))
         }
@@ -297,9 +297,12 @@ final class LightningAppUITests: XCTestCase {
     }
     private func tap(_ app: XCUIApplication, _ identifier: String, up: Bool = false) {
         let button = app.buttons[identifier]
-        XCTAssertTrue(scroll(app, button, up: up, fullyVisible: true))
+        XCTAssertTrue(scroll(app, button, up: up), app.debugDescription)
         XCTAssertTrue(button.isEnabled)
-        XCTAssertTrue(tapVisibleCenter(app, button))
+        // XCTest scrolls the identified button to its activation point. A
+        // form's last row can be tappable without fitting the helper's extra
+        // home-indicator margin, especially with iPad's tab bar at the top.
+        button.tap()
     }
     private func verifyHash(_ app: XCUIApplication, hash: String) throws {
         let value = app.staticTexts["lightningPaymentHash." + hash]

@@ -115,6 +115,25 @@ import XCTest
             XCTAssertEqual(request.content.badge, nil)
         }
     }
+    func testFailedCheckQueuesOneImmediateReminderWithoutRepeatedAlerts() async throws {
+        let notifications = TestChannelNotifications(), protection = ChannelProtection(defaults: preferences(), notifications: notifications)
+        notifications.status = .authorized
+        protection.channelState(network: .mainnet, funded: true)
+        protection.scanCompleted(network: .mainnet)
+        await protection.setReminders(true)
+        protection.scanFailed(network: .mainnet)
+        await protection.flushReminders()
+        let failed = try XCTUnwrap(notifications.requests.values.first { $0.id.hasSuffix(".failed") })
+        XCTAssertLessThan(abs(failed.date.timeIntervalSinceNow), 2)
+        XCTAssertEqual(notifications.added, 3)
+        protection.scanFailed(network: .mainnet)
+        await protection.flushReminders()
+        XCTAssertEqual(notifications.added, 3)
+        protection.scanCompleted(network: .mainnet)
+        await protection.flushReminders()
+        XCTAssertEqual(notifications.requests.count, 2)
+        XCTAssertFalse(notifications.requests.keys.contains { $0.hasSuffix(".failed") })
+    }
 }
 
 @MainActor private final class TestChannelNotifications: ChannelNotifications {
