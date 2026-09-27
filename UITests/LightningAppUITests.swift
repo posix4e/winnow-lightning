@@ -258,7 +258,10 @@ final class LightningAppUITests: XCTestCase {
         XCTAssertTrue(app.buttons["lightningConfirm"].disappears(within: 30), app.debugDescription)
         let button = app.buttons[done]
         XCTAssertTrue(poll(timeout: 15, interval: 0.2, "input sheet is visible after approval") { button.isHittable })
-        XCTAssertTrue(tapVisibleCenter(app, button))
+        if !tapVisibleCenter(app, button) {
+            XCTAssertTrue(scroll(app, button, up: up, fullyVisible: true), app.debugDescription)
+            XCTAssertTrue(tapVisibleCenter(app, button))
+        }
         XCTAssertTrue(button.disappears(within: 15))
     }
     private func waitConnected(_ app: XCUIApplication) throws {

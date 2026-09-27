@@ -171,9 +171,14 @@ extension XCTestCase {
     @MainActor
     func tapVisibleCenter(_ app: XCUIApplication, _ element: XCUIElement) -> Bool {
         guard let appFrame = usableFrame(app), let frame = usableFrame(element),
-              appFrame.contains(frame) else { return false }
+              let band = clearBand(app, in: appFrame) else { return false }
+        let viewport = CGRect(x: appFrame.minX, y: band.lowerBound,
+                              width: appFrame.width, height: band.upperBound - band.lowerBound)
+        let visible = frame.intersection(viewport)
+        guard !visible.isNull, visible.width > 0,
+              visible.height >= min(frame.height, 24) else { return false }
         app.coordinate(withNormalizedOffset: .zero)
-            .withOffset(CGVector(dx: frame.midX - appFrame.minX, dy: frame.midY - appFrame.minY))
+            .withOffset(CGVector(dx: visible.midX - appFrame.minX, dy: visible.midY - appFrame.minY))
             .tap()
         return true
     }

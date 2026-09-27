@@ -29,6 +29,11 @@ final class ChannelProtection {
     }
     static let overdue: TimeInterval = 60 * 60
     static let urgent: TimeInterval = 6 * 60 * 60
+    /// Suspending foreground networking is expected when closing the app or
+    /// switching networks. Only an actual failed check should trigger an alert.
+    static func isFailedCheck(_ error: any Error, cancelled: Bool) -> Bool {
+        !cancelled && !(error is CancellationError)
+    }
     private(set) var records: [String: Record]
     private(set) var remindersEnabled: Bool
     private(set) var notificationPermission = UNAuthorizationStatus.notDetermined

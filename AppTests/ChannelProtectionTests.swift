@@ -25,6 +25,12 @@ import XCTest
         XCTAssertEqual(reopened.warning(now: now.addingTimeInterval(21621))?.severity, .urgent)
         await protection.flushReminders(); await reopened.flushReminders()
     }
+    func testNormalSuspensionDoesNotTriggerFailureAlerts() {
+        let error = POSIXError(.ECONNRESET)
+        XCTAssertFalse(ChannelProtection.isFailedCheck(CancellationError(), cancelled: false))
+        XCTAssertFalse(ChannelProtection.isFailedCheck(error, cancelled: true), "closing sockets while suspending is expected")
+        XCTAssertTrue(ChannelProtection.isFailedCheck(error, cancelled: false), "an unexpected lost connection must still warn")
+    }
     func testReminderConsentAndDeniedPermissionNeverHideInAppWarning() async {
         let notifications = TestChannelNotifications(), protection = ChannelProtection(defaults: preferences(), notifications: notifications)
         protection.channelState(network: .mainnet, funded: true)

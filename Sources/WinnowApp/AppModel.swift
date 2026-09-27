@@ -677,7 +677,7 @@ final class AppModel {
                 }
             }
             backgroundSyncError = complete ? nil : status.lastSyncError ?? "Open Winnow to finish checking the chain."
-            if !complete { channelProtection.scanFailed(network: network) }
+            if !complete, !isActive, !changingNetwork { channelProtection.scanFailed(network: network) }
             await channelProtection.flushReminders()
             await stopNetworking()
             await backgroundMonitor?.finish()
@@ -1124,7 +1124,9 @@ final class AppModel {
             // threw applied nothing. Keep WalletState from lagging it.
             try? await wallet.recordScanHeight(await filters.nextScanHeight)
             status.lastSyncError = error.localizedDescription
-            channelProtection.scanFailed(network: network)
+            if ChannelProtection.isFailedCheck(error, cancelled: Task.isCancelled) {
+                channelProtection.scanFailed(network: network)
+            }
             e2e?.journal("wallet.syncFailed", fields: ["error": String(describing: error)])
         }
         await refresh()
