@@ -7,7 +7,7 @@ public enum LightningChainError: Error, Equatable {
 
 struct LightningChainState: Codable {
     struct Position: Codable { let height: UInt32; let hash: Data }
-    struct Observed: Codable { let height: UInt32; let blockHash: Data; let raw: Data }
+    struct Observed: Codable { let height: UInt32; let blockHash: Data; let raw: Data; var transactionIndex: UInt32? }
     var nextHeight: UInt32 = 1
     // Nil in existing journals means genesis. Once a channel exists this
     // birthday never advances: newly learned funding may already be mined.
@@ -96,11 +96,11 @@ extension LightningEngine {
     private func observe(_ block: Block, height: UInt32, in next: inout State) throws {
         var watchedTxids = Set(next.channels.compactMap(\.fundingTxid))
         for transaction in next.scan.transactions { watchedTxids.insert(try Transaction.decode(transaction.raw).txid) }
-        for transaction in block.transactions {
+        for (transactionIndex, transaction) in block.transactions.enumerated() {
             guard watchedTxids.contains(transaction.txid) || transaction.inputs.contains(where: { watchedTxids.contains($0.previousOutput.txid) }) else { continue }
             guard next.scan.transactions.count < 8192 else { throw LightningChainError.recoveryRequired }
             if !next.scan.transactions.contains(where: { (try? Transaction.decode($0.raw).txid) == transaction.txid }) {
-                next.scan.transactions.append(.init(height: height, blockHash: block.hash, raw: transaction.serialized(includeWitness: true)))
+                next.scan.transactions.append(.init(height: height, blockHash: block.hash, raw: transaction.serialized(includeWitness: true), transactionIndex: UInt32(transactionIndex)))
             }
             // A child in the same block must be considered immediately.
             watchedTxids.insert(transaction.txid)

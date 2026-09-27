@@ -28,6 +28,7 @@ struct LightningProfile: Codable, Equatable, Sendable {
     let port: UInt16
     let route: Route?
     let receive: Receive?
+    var liquidityProvider: String? = nil
 
     var peerKey: Data { Data(hex: peer)! } // validated on every import and load
     var endpoint: String { "\(host):\(port)" }
@@ -45,6 +46,10 @@ struct LightningProfile: Codable, Equatable, Sendable {
               host.unicodeScalars.allSatisfy({ CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-:").contains($0) }),
               let key = Data(hex: peer), key.count == 33 else { throw LightningError.invalidMessage }
         _ = try P256K.Signing.PublicKey(dataRepresentation: key, format: .compressed)
+        if let liquidityProvider {
+            guard let provider = LightningProviders.available(network: .mainnet).first(where: { $0.id == liquidityProvider }),
+                  network == "mainnet", peer == provider.peer, host == provider.host, port == provider.port else { throw LightningError.invalidMessage }
+        }
         _ = try paymentRoute()
         if let receive { _ = try receiveConfiguration(id: Data(repeating: 0, count: 32), receive: receive) }
     }

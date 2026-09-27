@@ -417,7 +417,7 @@ final class AppModel {
     }
 
     init(deviceAuthenticator: (any DeviceAuthenticating)? = nil,
-         e2e: E2EMode? = E2EMode.current, defaults: UserDefaults = .standard,
+         e2e: E2EMode? = E2EMode.current, defaults: UserDefaults? = nil,
          storeKeys: (any StoreKeyVault)? = nil, keyStore: (any KeyStore)? = nil,
          cloudBackups: CloudBackupController? = nil) {
         self.cloudBackups = cloudBackups ?? CloudBackupController()
@@ -447,8 +447,8 @@ final class AppModel {
         let storeKeys = storeKeys ?? KeychainStoreKeyVault(service: keychainService)
         vaultStore = VaultStore(keys: storeKeys)
         peopleStore = PeopleStore(keys: storeKeys)
-        let defaults = e2e?.defaults ?? (LightningResearch.isResearchApp
-            ? UserDefaults(suiteName: LightningResearch.keychainService + ".preferences")! : defaults)
+        let defaults = e2e?.defaults ?? defaults ?? (LightningResearch.isResearchApp
+            ? UserDefaults(suiteName: LightningResearch.keychainService + ".preferences")! : .standard)
         self.defaults = defaults
         // 0.7.0 and earlier shipped an opt-in Tor route (`torEnabled`). It
         // is gone with 0.7.1; an installation that had it on is told once

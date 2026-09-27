@@ -152,7 +152,7 @@ struct HomeView: View {
                 }
             }
             .sheet(isPresented: $showReceive) {
-                ReceiveView()
+                ReceiveEntryView()
             }
             .sheet(isPresented: $showSharedSavings) { SharedSavingsCreateView() }
             .sheet(isPresented: $showAddSavings) { AddSharedSavingsView() }

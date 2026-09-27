@@ -16,6 +16,46 @@ final class LightningAppUITests: XCTestCase {
     private var control: URL!
     private var setup: [String: Any] = [:]
 
+    func testFreshSimpleModeOffersBothReceiveMethodsAndThreeProviders() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        defer { app.terminate() }
+        app.launchEnvironment = [
+            "WINNOW_E2E": "1", "WINNOW_E2E_RUN": "lightning-receive-\(UUID())", "WINNOW_E2E_RESET": "1",
+            "WINNOW_E2E_NETWORK": "mainnet", "WINNOW_E2E_ENTROPY": String(repeating: "04", count: 16), "WINNOW_E2E_ADVANCED": "1",
+            "WINNOW_E2E_PEER": "127.0.0.1:1", "WINNOW_E2E_PEER_COUNT": "1",
+        ]
+        app.launch()
+        tap(app, "createWalletButton")
+        selectTab(app, "Wallet")
+        app.buttons["advancedModeButton"].tap()
+        tap(app, "receiveButton")
+        XCTAssertTrue(app.buttons["receiveLightning"].appears(within: 10))
+        XCTAssertTrue(app.buttons["receiveBitcoin"].exists)
+        Screenshots.capture(app, "lightning-simple-receive-methods", testCase: self)
+        app.buttons["receiveLightning"].tap()
+        let providerName = app.staticTexts["lightningReceiveProvider"]
+        XCTAssertTrue(providerName.appears(within: 10), app.debugDescription)
+        XCTAssertEqual(providerName.value as? String, "Olympus by ZEUS")
+        XCTAssertTrue(app.staticTexts["lightningReceivable"].exists)
+        XCTAssertFalse(app.staticTexts["lightningReceiveInvoice"].exists, "fresh install must not pretend to have receiving capacity")
+        Screenshots.capture(app, "lightning-simple-receive-setup", testCase: self)
+        app.buttons["lightningReceiveSetup"].tap()
+        for provider in ["olympus", "megalith", "lnserver"] {
+            XCTAssertTrue(scroll(app, app.buttons["lightningProvider.\(provider)"]))
+        }
+        Screenshots.capture(app, "lightning-three-providers", testCase: self)
+        app.buttons["lightningSetupDone"].tap()
+        XCTAssertTrue(scroll(app, app.buttons["Receive Bitcoin instead"]))
+        app.buttons["Receive Bitcoin instead"].tap()
+        let skip = app.buttons["skipReceiveAddressLabelButton"]
+        if skip.appears(within: 10) { skip.tap() }
+        let address = app.staticTexts["receiveAddress"]
+        XCTAssertTrue(address.appears(within: 15))
+        XCTAssertTrue((address.value as? String ?? "").hasPrefix("bc1p"))
+        Screenshots.capture(app, "lightning-simple-bitcoin-receive", testCase: self)
+    }
+
     func testSimpleModePersistsAndKeepsLightningIdentity() throws {
         continueAfterFailure = false
         let app = XCUIApplication()

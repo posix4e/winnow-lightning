@@ -8,6 +8,7 @@ struct LightningView: View {
     let controller: LightningAppController
     @State private var setup = false
     @State private var send = false
+    @State private var receive = false
     @State private var capacity = "100000"
     @State private var review: LightningReview?
     @State private var busy = false
@@ -52,6 +53,7 @@ struct LightningView: View {
             .disabled(busy)
             .sheet(isPresented: $setup) { LightningSetupView(controller: controller) }
             .sheet(isPresented: $send) { LightningSendView(controller: controller) }
+            .sheet(isPresented: $receive) { LightningReceiveView(controller: controller) }
             .sheet(item: $review) { LightningReviewView(controller: controller, review: $0) }
             .task {
                 while !Task.isCancelled {
@@ -111,6 +113,7 @@ struct LightningView: View {
     }
     private var receiveSection: some View {
         Section("Receive") {
+            Button("Receive Lightning") { receive = true }.accessibilityIdentifier("lightningReceive")
             Button("Create receive offer") { run { try await controller.registerOffer(model: model) } }
                 .disabled(controller.profile?.receive == nil).accessibilityIdentifier("lightningCreateOffer")
             ForEach(controller.offers, id: \.id) { offer in

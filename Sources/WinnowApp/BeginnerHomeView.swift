@@ -145,7 +145,7 @@ struct BeginnerHomeView: View {
                     ? "The app changes to three tabs — Wallet, Send and Settings — with fee controls, network settings, signing tools and technical details. Simple, on the Wallet tab, brings this screen back and keeps every setting you changed."
                     : "The app changes to four tabs — Lightning, Wallet, Send and Settings — with Lightning payments, fee controls, network settings, signing tools and technical details. Simple, on the Wallet tab, brings this screen back and keeps every setting you changed.")
             }
-            .sheet(isPresented: $showReceive) { ReceiveView() }
+            .sheet(isPresented: $showReceive) { ReceiveEntryView() }
             .sheet(isPresented: $showSend, onDismiss: {
                 sendAccountID = nil
                 sendPersonID = nil

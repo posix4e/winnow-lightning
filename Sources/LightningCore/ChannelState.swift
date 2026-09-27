@@ -57,6 +57,7 @@ struct ChannelState: Codable {
     var dataLossDetected = false
     var recovery: ChannelResolution.Policy?
     var resolutions: [ChannelResolution.Spend] = []
+    var invoicePolicy: LightningEngine.InvoicePolicy?
 
     var id: Data {
         guard let fundingTxid, let fundingOutput else { return temporaryID }

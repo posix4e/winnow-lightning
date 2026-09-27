@@ -12,6 +12,22 @@ struct LightningSetupView: View {
     var body: some View {
         NavigationStack {
             Form {
+                if !LightningProviders.available(network: controller.network).isEmpty {
+                    Section("Choose a provider") {
+                        ForEach(LightningProviders.available(network: controller.network)) { provider in
+                            Button(provider.name + (provider.id == "olympus" ? " · Recommended" : "")) {
+                                review = .profile(provider.profile)
+                            }
+                            .disabled(controller.channels.contains(where: { $0.phase != .closed }) || controller.liquidityQuote?.accepted == true)
+                            .accessibilityIdentifier("lightningProvider.\(provider.id)")
+                            if provider.manualSetup { Text("Setup on provider website").font(.caption).foregroundStyle(.secondary) }
+                            Link("\(provider.name) terms and fees", destination: provider.website).font(.caption)
+                        }
+                        Text("Connect to one provider. Changing providers can require another channel and setup fee. Existing channels or an approved setup order must finish before changing provider.")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    }
+                }
+                Section("Advanced profile import") {
                 Text("Paste a \(controller.network.rawValue) provider profile. Verify its node ID and endpoint before connecting. Receive offers and offline payments require a provider supporting the async Lightning protocol.")
                 TextEditor(text: $text).frame(height: 160).autocorrectionDisabled().textInputAutocapitalization(.never)
                     .focused($editing)
@@ -23,6 +39,7 @@ struct LightningSetupView: View {
                     do { review = .profile(try LightningProfile.parse(text, network: controller.network)); error = nil }
                     catch { self.error = error.localizedDescription }
                 }.accessibilityIdentifier("lightningReviewProfile")
+                }
             }
             .navigationTitle("Provider setup")
             .toolbar {

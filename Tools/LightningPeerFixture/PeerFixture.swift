@@ -13,6 +13,7 @@ struct PeerFixture {
     }
     static func run() async throws {
         let args = Array(CommandLine.arguments.dropFirst())
+        if ["probe-lsp", "probe-lsp-quote"].contains(args.first) { try await probeLSP(args); return }
         if args.first == "inspect-held" { try inspectHeld(args); return }
         guard [5, 7].contains(args.count), let port = UInt16(args[1]), let peer = Data(hex: args[2]), let chain = Data(hex: args[3])
         else { throw LightningError.invalidMessage }
@@ -78,7 +79,17 @@ struct PeerFixture {
             guard let id = Data(hex: input["id"] ?? ""), let amount = UInt64(input["amount"] ?? ""),
                   let expiry = UInt32(input["expiry"] ?? "") else { throw LightningError.invalidMessage }
             let invoice = try await engine.registerReceive(id: id, amountMsat: amount, expiry: expiry)
-            return ["id": invoice.id.hex, "hash": invoice.paymentHash.hex, "secret": invoice.paymentSecret.hex]
+            var result = ["id": invoice.id.hex, "hash": invoice.paymentHash.hex, "secret": invoice.paymentSecret.hex]
+            if let scid = input["scid"] {
+                let parts = scid.split(separator: "x").compactMap { UInt64($0) }
+                guard parts.count == 3, parts[0] < 1 << 24, parts[1] < 1 << 24, parts[2] < 1 << 16 else { throw LightningError.invalidMessage }
+                let route = Bolt11Invoice.Route(peer: peer, shortChannelID: parts[0] << 40 | parts[1] << 16 | parts[2],
+                    baseMsat: 0, proportionalMillionths: 0, expiryDelta: 18)
+                result["bolt11"] = try Bolt11Invoice.encode(network: .regtest, amountMsat: amount,
+                    hash: invoice.paymentHash, secret: invoice.paymentSecret, nodeSecret: Data(repeating: 1, count: 32),
+                    route: route, timestamp: UInt64(Date().timeIntervalSince1970))
+            }
+            return result
         case "payment":
             guard let id = Data(hex: input["id"] ?? ""), let payment = await engine.payments().first(where: { $0.id == id }) else {
                 return ["phase": "missing"]

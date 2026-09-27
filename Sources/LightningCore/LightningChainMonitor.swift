@@ -83,10 +83,10 @@ public actor LightningBackgroundMonitor: LightningChainMonitor {
     private func observe(_ body: Block, height: UInt32, in next: inout LightningBackgroundSnapshot) throws {
         var watched = Set(next.channels.map { $0.funding.txid })
         watched.formUnion(try next.scan.transactions.map { try Transaction.decode($0.raw).txid })
-        for tx in body.transactions where watched.contains(tx.txid) || tx.inputs.contains(where: { watched.contains($0.previousOutput.txid) }) {
+        for (transactionIndex, tx) in body.transactions.enumerated() where watched.contains(tx.txid) || tx.inputs.contains(where: { watched.contains($0.previousOutput.txid) }) {
             guard next.scan.transactions.count < 8192 else { throw LightningChainError.recoveryRequired }
             if !next.scan.transactions.contains(where: { (try? Transaction.decode($0.raw).txid) == tx.txid }) {
-                next.scan.transactions.append(.init(height: height, blockHash: body.hash, raw: tx.serialized(includeWitness: true)))
+                next.scan.transactions.append(.init(height: height, blockHash: body.hash, raw: tx.serialized(includeWitness: true), transactionIndex: UInt32(transactionIndex)))
             }
             watched.insert(tx.txid)
         }

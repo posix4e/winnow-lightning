@@ -15,6 +15,11 @@ final class LightningAppController {
     private(set) var payments: [LightningEngine.Payment] = []
     private(set) var funding: [LightningEngine.FundingRequest] = []
     private(set) var offers: [LightningEngine.ReceiveOffer] = []
+    var invoiceCapacities: [LightningEngine.InvoiceCapacity] = []
+    var liquidityQuote: LiquidityQuote?
+    var liquidityInfo: LightningLiquidity.Info?
+    var liquidityRequestInFlight = false
+    var liquiditySession: LightningPeerSession? { session }
     private(set) var connection = "Waiting for verified chain"
     private(set) var chainCurrent = false
     var error: String?
@@ -78,12 +83,14 @@ final class LightningAppController {
             let opened = try LightningEngine(chain: NetworkParams.params(for: network).genesisHash, nodeSecret: nodeSecret,
                 journal: journal, backgroundStore: openBackgroundStore(root: root, create: true))
             directory = dir
-            let loaded = try loadProfile()
+            let loaded = try loadProfile() ?? LightningProviders.recommended(network: network)
             engine = opened; profile = loaded
+            liquidityQuote = try loadLiquidityQuote()
         }
         guard let engine else { throw LightningError.storageFailed }
         try await engine.resumeFromBackground()
         try await engine.persistIdentity()
+        try await engine.prepareInvoiceRouting()
         driver = LightningChainDriver(engine: engine, headers: headers)
         try await refresh()
     }
@@ -97,21 +104,26 @@ final class LightningAppController {
         try requireNetwork(model)
         try proposed.validate(network: network)
         guard let directory, let engine else { throw AppModel.AppError.noStack }
+        guard liquidityQuote?.accepted != true || proposed == profile else { throw LightningError.invalidState }
         if let current = profile, current.peerKey != proposed.peerKey {
-            guard await engine.channels().isEmpty else { throw LightningError.invalidState }
+            guard await engine.channels().allSatisfy({ $0.phase == .closed }),
+                  liquidityQuote?.accepted != true else { throw LightningError.invalidState }
         }
         let epoch = generation
         try await model.authenticateSensitiveAction(reason: "Approve this \(network.rawValue) Lightning provider and recovery policy")
         defer { model.keychainAuthentication.revoke() }
         try Task.checkCancellation()
         try requireNetwork(model, generation: epoch)
+        let sameEndpoint = profile?.peer == proposed.peer && profile?.host == proposed.host && profile?.port == proposed.port
+        // Drop only an unapproved stale quote before changing its binding.
+        // A crash between these writes retains the old valid provider.
+        if profile != proposed { try storeLiquidityQuote(nil); liquidityQuote = nil; liquidityInfo = nil }
         try StoreSeal(store: "lightning-profile", keys: keys).write(JSONEncoder().encode(proposed), network: network,
             to: directory.appending(path: "profile.json")) { data, file in
                 try data.write(to: file, options: [.atomic, .completeFileProtection])
             }
         // Receiving-path or fee updates do not change the authenticated TCP
         // peer. Keep that session while the new profile becomes durable.
-        let sameEndpoint = profile?.peer == proposed.peer && profile?.host == proposed.host && profile?.port == proposed.port
         if !sameEndpoint { await stop() }
         profile = proposed
         try requireNetwork(model)
@@ -161,6 +173,8 @@ final class LightningAppController {
         channels = await engine.channels(); payments = await engine.payments()
         balances = try await engine.channelBalances(); funding = try await engine.fundingRequests()
         offers = try await engine.receiveOffers(now: Self.now)
+        if let profile { invoiceCapacities = try await engine.invoiceCapacities(peer: profile.peerKey) }
+        else { invoiceCapacities = [] }
         chainCurrent = await engine.isChainCurrent()
         switch await session?.status {
         case .connected: connection = chainCurrent ? "Connected" : "Verifying chain"
@@ -202,5 +216,21 @@ final class LightningAppController {
             let destination = try AddressDecoder.scriptPubKey(for: address, network: network)
             try await engine.configureRecovery(channelID: channel.id, peer: channel.peer, destination: destination, feeSat: Self.recoveryFeeSat)
         }
+    }
+    func loadLiquidityQuote() throws -> LiquidityQuote? {
+        guard let file = directory?.appending(path: "liquidity.json"), FileManager.default.fileExists(atPath: file.path) else { return nil }
+        let sealed = try StoreSeal(store: "lightning-liquidity", keys: keys).read(Data(contentsOf: file), network: network)
+        guard !sealed.predatesSealing else { throw LightningError.storageFailed }
+        let quote = try JSONDecoder().decode(LiquidityQuote.self, from: sealed.payload)
+        guard quote.profile == profile else { throw LightningError.storageFailed }
+        return quote
+    }
+    func storeLiquidityQuote(_ quote: LiquidityQuote?) throws {
+        guard let file = directory?.appending(path: "liquidity.json") else { throw LightningError.storageFailed }
+        if let quote {
+            try StoreSeal(store: "lightning-liquidity", keys: keys).write(JSONEncoder().encode(quote), network: network, to: file) { data, path in
+                try data.write(to: path, options: [.atomic, .completeFileProtection])
+            }
+        } else if FileManager.default.fileExists(atPath: file.path) { try FileManager.default.removeItem(at: file) }
     }
 }

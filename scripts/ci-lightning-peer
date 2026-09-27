@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 ROOT = Path(__file__).resolve().parent.parent
 CLN_COMMIT = '6f741afc395c66d200429ea477d29df4d974748d'
@@ -78,11 +79,14 @@ def check_payments(ln, swift, channel, height):
     paid = ln('listinvoices', 'swift-outbound')['invoices'][0]
     assert paid['status'] == 'paid' and paid['amount_received_msat'] == 5_000_000
     assert paid['payment_hash'] == outgoing['hash']
-    incoming = swift.call('invoice', id='52' * 32, amount='2000000', expiry=str(height + 288))
-    route = [{'id': swift.initialization['node_id'], 'channel': channel['short_channel_id'], 'amount_msat': 2_000_000, 'delay': 144}]
-    ln('-k', 'sendpay', 'route=' + json.dumps(route), 'payment_hash=' + incoming['hash'], 'payment_secret=' + incoming['secret'])
-    received = settle(swift, incoming['id'])
-    completed = ln('waitsendpay', incoming['hash'])
+    incoming = swift.call('invoice', id='52' * 32, amount='2000000', expiry=str(height + 288), scid=channel['short_channel_id'])
+    decoded = ln('decode', incoming['bolt11'])
+    assert decoded['payment_hash'] == incoming['hash'] and decoded['payment_secret'] == incoming['secret']
+    assert decoded['amount_msat'] == 2_000_000 and decoded['payee'] == swift.initialization['node_id']
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        payment = pool.submit(ln, '-k', 'pay', 'bolt11=' + incoming['bolt11'], 'retry_for=30', 'label=winnow-bolt11')
+        received = settle(swift, incoming['id'])
+        completed = payment.result(timeout=30)
     assert completed['status'] == 'complete' and completed['amount_msat'] == 2_000_000
     assert completed['amount_sent_msat'] == 2_000_000 and completed['payment_preimage'] == received['preimage']
     return {'swift_to_cln': outgoing, 'cln_to_swift': received}
@@ -197,7 +201,7 @@ def run_peer(close_mode, evidence):
                 return value
 
         def ln(method, *args):
-            value = subprocess.check_output([str(cln / 'cli/lightning-cli'), f'--lightning-dir={cln_dir}', '--network=regtest',
+            value = subprocess.check_output([str(cln / 'cli/lightning-cli'), '-J', '--notifications=none', f'--lightning-dir={cln_dir}', '--network=regtest',
                                              method, *map(str, args)], text=True, stderr=subprocess.PIPE, timeout=20)
             return json.loads(value)
 

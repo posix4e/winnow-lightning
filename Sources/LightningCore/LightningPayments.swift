@@ -34,6 +34,7 @@ extension LightningEngine {
         let id: Data, preimage: Data, secret: Data
         let amountMsat: UInt64
         let expiry: UInt32
+        var expiresAt: UInt64? = nil
     }
     public struct ReceiveInvoice: Sendable {
         public let id: Data, paymentHash: Data, paymentSecret: Data
@@ -65,16 +66,16 @@ extension LightningEngine {
         try persist(next)
         return payment
     }
-    public func registerReceive(id: Data, amountMsat: UInt64, expiry: UInt32) throws -> ReceiveInvoice {
+    public func registerReceive(id: Data, amountMsat: UInt64, expiry: UInt32, expiresAt: UInt64? = nil) throws -> ReceiveInvoice {
         try healthy()
         guard id.count == 32, amountMsat > 0, amountMsat <= 16_777_215_000, expiry > chainHeight,
               state.incoming.count < 4096 else { throw LightningError.invalidMessage }
         if let existing = state.incoming.first(where: { $0.id == id }) {
-            guard existing.amountMsat == amountMsat, existing.expiry == expiry else { throw LightningError.invalidMessage }
+            guard existing.amountMsat == amountMsat, existing.expiry == expiry, existing.expiresAt == expiresAt else { throw LightningError.invalidMessage }
             return invoice(existing)
         }
         let request = try ReceiveRequest(id: id, preimage: P256K.Signing.PrivateKey().dataRepresentation,
-            secret: P256K.Signing.PrivateKey().dataRepresentation, amountMsat: amountMsat, expiry: expiry)
+            secret: P256K.Signing.PrivateKey().dataRepresentation, amountMsat: amountMsat, expiry: expiry, expiresAt: expiresAt)
         var next = state; next.incoming.append(request)
         try persist(next)
         return invoice(request)
@@ -143,6 +144,7 @@ extension LightningEngine {
     private func validReceive(_ htlc: ChannelTransactions.HTLC, peeled: OnionPacket.Peeled, state: State) -> ReceiveRequest? {
         guard peeled.next == nil, let request = state.incoming.first(where: { ChannelKeys.hash($0.preimage) == htlc.paymentHash }),
               !state.payments.contains(where: { $0.payment.hash == htlc.paymentHash }), htlc.expiry <= request.expiry,
+              request.expiresAt.map({ $0 > UInt64(Date().timeIntervalSince1970) }) ?? true,
               let payload = try? PaymentPayload(bytes: peeled.payload) else { return nil }
         do {
             try payload.validate(expectedSecret: request.secret, expectedAmount: request.amountMsat, receivedAmount: htlc.amountMsat,

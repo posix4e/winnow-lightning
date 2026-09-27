@@ -20,7 +20,8 @@ let package = Package(
     ],
     targets: [
         .target(name: "LightningCore", dependencies: ["WalletCore",
-            .product(name: "P256K", package: "swift-secp256k1")], exclude: ["README.md"]),
+            .product(name: "P256K", package: "swift-secp256k1"),
+            .product(name: "libsecp256k1", package: "swift-secp256k1")], exclude: ["README.md"]),
         .testTarget(name: "LightningCoreTests", dependencies: ["LightningCore", "TestSupport",
             .product(name: "P256K", package: "swift-secp256k1")], resources: [.copy("Vectors")]),
         .executableTarget(name: "LightningFixture", dependencies: ["LightningCore", "WalletCore"],

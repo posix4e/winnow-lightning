@@ -15,6 +15,8 @@ public actor LightningPeerSession {
     private var flushing = false
     private var stopping = false
     private var starting = false
+    var liquidityRequests: [String: CheckedContinuation<Data, any Error>] = [:]
+    var peerFeatures: LightningFeatures?
     public private(set) var status: Status = .stopped
 
     public init(engine: LightningEngine, peer: Data, host: String, port: UInt16,
@@ -36,6 +38,7 @@ public actor LightningPeerSession {
             let features = try LightningFeatures.readInitialization(await transport.receive())
             guard epoch == generation else { throw CancellationError() }
             try await engine.peerInitialized(peer, features: features)
+            peerFeatures = features
             status = .connected
             reader = Task { await receiveLoop(transport, epoch: epoch) }
             timer = Task { await publicationLoop(epoch: epoch) }
@@ -48,6 +51,7 @@ public actor LightningPeerSession {
         generation &+= 1
         guard let transport = connection else { status = .stopped; return }
         stopping = true; defer { stopping = false }
+        cancelLiquidityRequests()
         reader?.cancel(); timer?.cancel()
         await transport.close(); await engine.peerDisconnected(peer)
         connection = nil; reader = nil; timer = nil; status = .stopped
@@ -66,6 +70,10 @@ public actor LightningPeerSession {
         } catch LightningError.invalidState {
             if await engine.chainIsCurrent { throw LightningError.invalidState }
         }
+    }
+    func sendLiquidity(_ message: LightningWire.Message) async throws {
+        guard status == .connected, let connection else { throw LightningLiquidityError.unavailable }
+        try await connection.send(message)
     }
     private func publishChannel(_ transport: LightningConnection, epoch: UInt64) async throws {
         for item in try await engine.pendingMessages(peer: peer) where !sent.contains(item.sequence) {
@@ -90,7 +98,10 @@ public actor LightningPeerSession {
                 while !(await engine.chainIsCurrent) { try await Task.sleep(for: .milliseconds(100)) }
                 try Task.checkCancellation()
                 guard epoch == generation else { return }
-                try await handle(message, transport: transport)
+                do { try await handle(message, transport: transport) }
+                catch LightningError.invalidMessage {
+                    throw LightningLiquidityError.provider("Unsupported Lightning message \(message.type).")
+                }
                 try await flush()
             }
         } catch { await finish(epoch: epoch, error: error) }
@@ -117,9 +128,13 @@ public actor LightningPeerSession {
             }
         case 513:
             try await onEvents(engine.receiveOnionMessage(message, now: Self.now))
+        case LightningLiquidity.messageType:
+            let response = try LightningLiquidity.response(message)
+            liquidityRequests.removeValue(forKey: response.id)?.resume(with: response.result.mapError { $0 as any Error })
         case 32, 33, 34, 35, 36, 38, 39, 128, 130, 131, 132, 133, 134, 135, 136:
             try await onEvents(engine.receive(peer: peer, message: message))
-        case 256, 257, 258: break // Gossip is not used by this configured-route client.
+        case 258: try await engine.receiveChannelPolicy(peer: peer, message: message)
+        case 256, 257: break // General gossip is not used by this configured-route client.
         case 1, 17: throw LightningError.closed
         default:
             guard message.type % 2 == 1 else { throw LightningError.invalidMessage }
