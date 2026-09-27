@@ -173,7 +173,7 @@ class Journey:
         info = peer['wait_for'](lambda: self.ln('getinfo'))
         self.run = 'bolt11-' + secrets.token_hex(5); self.clients = {}
         profile = dict(network='regtest', name='Stock Core Lightning', peer=info['id'], host='127.0.0.1', port=peer_port)
-        return dict(bitcoin_peer=f'127.0.0.1:{self.fixture.p2p_port}', run=self.run, sender=profile)
+        return dict(bitcoin_peer=f'127.0.0.1:{self.fixture.p2p_port}', run=self.run, sender=profile, sender_entropy='05')
 
     def ln(self, method, *args):
         value = subprocess.check_output([str(self.cln_cli), '-J', '--notifications=none', f'--lightning-dir={self.cln_dir}',

@@ -344,7 +344,7 @@ final class LightningAppUITests: XCTestCase {
     private func launch(_ app: XCUIApplication, role: String, fresh: Bool) throws {
         let run = try XCTUnwrap(setup["run"] as? String)
         app.launchEnvironment = ["WINNOW_E2E": "1", "WINNOW_E2E_RUN": run + "-" + role,
-            "WINNOW_E2E_NETWORK": "regtest", "WINNOW_E2E_ENTROPY": String(repeating: role == "recipient" ? "02" : "01", count: 16),
+            "WINNOW_E2E_NETWORK": "regtest", "WINNOW_E2E_ENTROPY": String(repeating: role == "recipient" ? "02" : (setup["sender_entropy"] as? String ?? "01"), count: 16),
             "WINNOW_E2E_PEER": try XCTUnwrap(setup["bitcoin_peer"] as? String), "WINNOW_E2E_PEER_COUNT": "1",
             "WINNOW_E2E_SYNC_INTERVAL": "3", "WINNOW_E2E_TAB": "lightning", "WINNOW_E2E_CONTROL_FILE": control.path]
         if fresh { app.launchEnvironment["WINNOW_E2E_RESET"] = "1" }

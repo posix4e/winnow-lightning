@@ -29,13 +29,7 @@ extension LightningRoutingGraph {
     }
     func route(from peer: Data, invoice: Bolt11Invoice.Decoded, amountMsat: UInt64,
                feeLimitMsat: UInt64, maximumDelta: UInt32) throws -> Bolt11PaymentRoute {
-        var incoming: [Data: [(Data, Policy)]] = [:]
-        for channel in channels.values {
-            for (direction, policy) in channel.policies where !policy.disabled {
-                let source = channel.nodes[direction], target = channel.nodes[direction ^ 1]
-                if !blockedNodes.contains(source) { incoming[target, default: []].append((source, policy)) }
-            }
-        }
+        let incoming = incomingPolicies()
         var queue = Queue(), seen: [Data: [Candidate]] = [:]
         func candidate(node: Data, hops: [Bolt11Invoice.Route]) throws -> Candidate {
             let route = try Bolt11PaymentRoute(hops: hops)
@@ -43,9 +37,7 @@ extension LightningRoutingGraph {
             return Candidate(node: node, amount: quote.amountMsat, delta: quote.delta, hops: hops)
         }
         queue.push(try candidate(node: invoice.payee, hops: []))
-        for hint in invoice.routes where !hint.contains(where: { blockedNodes.contains($0.peer) }) {
-            if let first = hint.first, let seed = try? candidate(node: first.peer, hops: hint) { queue.push(seed) }
-        }
+        for seed in hintedCandidates(invoice: invoice, amountMsat: amountMsat, feeLimitMsat: feeLimitMsat, maximumDelta: maximumDelta) { queue.push(seed) }
         var explored = 0
         while let current = queue.pop(), explored < 500_000 {
             explored += 1
@@ -61,4 +53,23 @@ extension LightningRoutingGraph {
         }
         throw LightningInvoiceError.noRoute
     }
+    private func incomingPolicies() -> [Data: [(Data, Policy)]] {
+        var incoming: [Data: [(Data, Policy)]] = [:]
+        for channel in channels.values {
+            for (direction, policy) in channel.policies where !policy.disabled {
+                let source = channel.nodes[direction], target = channel.nodes[direction ^ 1]
+                if !blockedNodes.contains(source) { incoming[target, default: []].append((source, policy)) }
+            }
+        }
+        return incoming
+    }
+    private func hintedCandidates(invoice: Bolt11Invoice.Decoded, amountMsat: UInt64, feeLimitMsat: UInt64, maximumDelta: UInt32) -> [Candidate] {
+        invoice.routes.compactMap { hint in
+            guard !hint.contains(where: { blockedNodes.contains($0.peer) }), let first = hint.first,
+                  let route = try? Bolt11PaymentRoute(hops: hint),
+                  let quote = try? route.quote(invoice: invoice, amountMsat: amountMsat, feeLimitMsat: feeLimitMsat, height: 0, maximumDelta: maximumDelta) else { return nil }
+            return Candidate(node: first.peer, amount: quote.amountMsat, delta: quote.delta, hops: hint)
+        }
+    }
+
 }
