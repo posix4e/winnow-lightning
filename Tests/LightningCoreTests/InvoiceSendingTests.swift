@@ -29,7 +29,7 @@ final class InvoiceSendingTests: XCTestCase {
         XCTAssertThrowsError(try Bolt11Invoice.decode(invoice(), network: .regtest))
         let fixed = try Bolt11Invoice.decode(invoice(), network: .mainnet)
         XCTAssertThrowsError(try fixed.validatePayment(amountMsat: 5_000_002, now: 101))
-        for unsupported in [Set([9, 14, 30]), Set([14]), Set([9, 14, 48])] {
+        for unsupported in [Set([9, 14, 30]), Set([14]), Set([9, 14, 48]), Set([8, 9, 14])] {
             let value = try Bolt11Invoice.decode(invoice(features: unsupported), network: .mainnet)
             XCTAssertThrowsError(try value.validatePayment(amountMsat: 5_000_001, now: 101))
         }

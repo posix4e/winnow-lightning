@@ -56,7 +56,7 @@ struct LightningRoutingGraph: Sendable {
         var r = LightningWire.Reader(message.payload)
         let signature = try r.take(64), length = try r.u16(), features = LightningFeatures(bytes: try r.take(Int(length)))
         let timestamp = try r.u32(), key = try r.take(33)
-        guard UInt64(timestamp) <= now + 300, UInt64(timestamp) + 14 * 86_400 >= now,
+        guard UInt64(timestamp) <= now + 300,
               nodeTimestamps[key].map({ timestamp > $0 }) ?? (nodeTimestamps.count < Self.limit * 2) else { return }
         let digest = ChannelKeys.hash(ChannelKeys.hash(Data(message.payload.dropFirst(64))))
         guard ChannelKeys.verify(signature: try ChannelKeys.derSignature(signature), digest: digest, publicKey: key) else { return }

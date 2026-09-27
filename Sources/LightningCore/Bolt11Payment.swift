@@ -48,7 +48,9 @@ extension Bolt11Invoice.Decoded {
         guard now < expiresAt else { throw LightningInvoiceError.expired }
         guard amountMsat > 0, amountMsat <= 16_777_215_000,
               self.amountMsat == nil || self.amountMsat == amountMsat else { throw LightningError.invalidAmount }
-        guard paymentSecret?.count == 32, features.bits.filter({ $0 % 2 == 0 }).allSatisfy({ [8, 14, 16, 48].contains($0) }),
+        do { try features.validateRequired(supported: [8, 14, 16, 48]) }
+        catch { throw LightningInvoiceError.unsupported }
+        guard paymentSecret?.count == 32,
               !features.supports(16) || features.supports(14), !features.supports(14) || features.supports(8),
               !features.supports(48) || metadata != nil else { throw LightningInvoiceError.unsupported }
     }

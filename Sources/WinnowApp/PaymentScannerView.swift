@@ -19,7 +19,7 @@ struct PaymentScannerView: View {
                 }
             }
             .navigationTitle("Scan invoice")
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() }.accessibilityIdentifier("lightningScanCancel") } }
             .task {
                 guard DataScannerViewController.isSupported else { return }
                 authorized = await AVCaptureDevice.requestAccess(for: .video)

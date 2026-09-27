@@ -7,7 +7,8 @@ extension LightningRoutingGraph {
     }
     private struct Queue {
         var values: [Candidate] = []
-        mutating func push(_ value: Candidate) {
+        mutating func push(_ value: Candidate) throws {
+            guard values.count < 100_000 else { throw LightningInvoiceError.noRoute }
             values.append(value); var index = values.count - 1
             while index > 0 {
                 let parent = (index - 1) / 2
@@ -36,8 +37,8 @@ extension LightningRoutingGraph {
             let quote = try route.quote(invoice: invoice, amountMsat: amountMsat, feeLimitMsat: feeLimitMsat, height: 0, maximumDelta: maximumDelta)
             return Candidate(node: node, amount: quote.amountMsat, delta: quote.delta, hops: hops)
         }
-        queue.push(try candidate(node: invoice.payee, hops: []))
-        for seed in hintedCandidates(invoice: invoice, amountMsat: amountMsat, feeLimitMsat: feeLimitMsat, maximumDelta: maximumDelta) { queue.push(seed) }
+        try queue.push(candidate(node: invoice.payee, hops: []))
+        for seed in hintedCandidates(invoice: invoice, amountMsat: amountMsat, feeLimitMsat: feeLimitMsat, maximumDelta: maximumDelta) { try queue.push(seed) }
         var explored = 0
         while let current = queue.pop(), explored < 500_000 {
             explored += 1
@@ -48,7 +49,7 @@ extension LightningRoutingGraph {
             for (source, policy) in incoming[current.node] ?? [] {
                 guard (policy.minimum...policy.maximum).contains(current.amount), !current.hops.contains(where: { $0.peer == source }), source != invoice.payee,
                       let next = try? candidate(node: source, hops: [policy.hop] + current.hops) else { continue }
-                queue.push(next)
+                try queue.push(next)
             }
         }
         throw LightningInvoiceError.noRoute

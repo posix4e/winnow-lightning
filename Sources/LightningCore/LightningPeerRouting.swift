@@ -61,7 +61,7 @@ extension LightningPeerSession {
         }
     }
     func checkRoutingTimeout(now: UInt64) async {
-        if let query = gossipQuery, now > query.lastProgress, (now - query.lastProgress > 90 || now - query.startedAt > 600) {
+        if let query = gossipQuery, now >= query.lastProgress, (now - query.lastProgress > 90 || now - query.startedAt > 600) {
             failRouting(LightningInvoiceError.unavailable)
             // A timed-out query cannot be overlapped with a new one on this
             // transport. Reconnection retains every durable funded record.

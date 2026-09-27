@@ -172,11 +172,17 @@ extension PeerSessionTests {
             try await engine.chainCaughtUp(height: 100)
             let second = Task { try await session.invoiceRoute(invoice: invoice, network: .regtest, amountMsat: 5000, feeLimitMsat: 1000) }
             let next = try await remote.receive(); XCTAssertEqual(next.type, 263)
-            await session.checkRoutingTimeout(now: now + 100)
+            let deadlineTime = UInt64(Date().timeIntervalSince1970) + 700
+            await session.testRoutingProgress(now: deadlineTime)
+            await session.checkRoutingTimeout(now: deadlineTime)
             do { _ = try await second.value; XCTFail("Timeout kept continuation alive") } catch {}
             let status = await session.status, channels = await engine.channels(), payments = await engine.payments()
             XCTAssertEqual(status, .stopped); XCTAssertTrue(channels.isEmpty); XCTAssertTrue(payments.isEmpty)
             await remote.close()
         } catch { await session.stop(); await remote.close(); handshake.cancel(); throw error }
     }
+}
+
+private extension LightningPeerSession {
+    func testRoutingProgress(now: UInt64) { gossipQuery?.lastProgress = now }
 }

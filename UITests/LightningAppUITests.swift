@@ -241,7 +241,7 @@ final class LightningAppUITests: XCTestCase {
         XCTAssertTrue(scroll(app, app.textFields["lightningAmount"], fullyVisible: true))
         app.typeInto("lightningAmount", "5000")
         tap(app, "lightningReviewPayment")
-        XCTAssertTrue(app.navigationBars["Review Lightning"].appears(within: 15))
+        XCTAssertTrue(app.navigationBars["Review Lightning"].appears(within: 15), app.debugDescription)
         for row in ["Amount, 5000 sats", "Maximum fee, 50 sats", "Maximum expiry, 2016 blocks"] {
             XCTAssertTrue(scroll(app, app.staticTexts[row], fullyVisible: true))
         }
@@ -311,7 +311,7 @@ final class LightningAppUITests: XCTestCase {
         tap(app, "openSendButton"); tap(app, "sendLightning")
         tap(app, "lightningScanInvoice")
         XCTAssertTrue(app.staticTexts["Camera scanning unavailable"].appears(within: 15))
-        app.buttons["Cancel"].tap()
+        tap(app, "lightningScanCancel")
         try paste("LIGHTNING:" + text); tap(app, "lightningPasteInvoice")
         tap(app, "lightningReviewInvoice")
         XCTAssertTrue(app.navigationBars["Review Lightning"].appears(within: 30), app.debugDescription)
