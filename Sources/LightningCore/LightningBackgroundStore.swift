@@ -80,61 +80,76 @@ struct LightningBackgroundSnapshot: Codable {
         let confirmed = try state.scan.transactions.map {
             try ChannelResolution.Confirmed(height: $0.height, tx: Transaction.decode($0.raw))
         }
-        let channels = try state.channels.compactMap { channel -> Channel? in
-            guard let txid = channel.fundingTxid, let vout = channel.fundingOutput,
-                  let policy = channel.recovery, channel.signedCommitment != nil else { return nil }
-            let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
-            let fingerprint = ChannelKeys.hash(try encoder.encode(channel) + encoder.encode(preimages))
-            if let cached = cache.channels[channel.id], cached.fingerprint == fingerprint { return cached.value }
-            var parents: [Transaction] = []
-            var synthetic = confirmed
-            // Segwit HTLC second-stage txids are fixed before witnesses exist.
-            // Pre-sign both direct claims and descendants, so a peer racing a
-            // penalty with its second stage cannot defeat the locked monitor.
-            if !channel.dataLossDetected {
-                let local = try channel.commitment(localOwner: true)
-                parents.append(try Transaction.decode(channel.signedCommitment!))
-                synthetic += try local.htlcOutputs.map {
-                    try .init(height: 0, tx: ChannelTransactions.htlcTransaction(commitment: local, output: $0))
-                }
-            }
-            let last = channel.remoteNumber + (channel.awaitingRevocation ? 1 : 0)
-            for number in 0...last {
-                let remote = try channel.commitment(localOwner: false, number: number)
-                parents.append(remote.transaction)
-                synthetic += try remote.htlcOutputs.map {
-                    try .init(height: 0, tx: ChannelTransactions.htlcTransaction(commitment: remote, output: $0))
-                }
-            }
-            if let raw = channel.observedFundingSpend { parents.append(try Transaction.decode(raw)) }
-            if let raw = channel.closingTransaction { parents.append(try Transaction.decode(raw)) }
-            let context = ChannelResolution.Context(channel: channel, policy: policy,
-                                                    confirmed: synthetic, preimages: preimages)
-            var spends = channel.resolutions
-            for parent in parents { spends += try context.candidates(parent: parent) }
-            var seen = Set<Data>()
-            spends = try spends.filter { seen.insert(try Transaction.decode($0.transaction).txid).inserted }
-            var scripts = Set([try channel.fundingScript()])
-            for parent in parents + synthetic.map(\.tx) {
-                scripts.formUnion(parent.outputs.map(\.scriptPubKey))
-            }
-            for spend in spends { scripts.formUnion(try Transaction.decode(spend.transaction).outputs.map(\.scriptPubKey)) }
-            let deadlines: [UInt32] = try channel.view(localOwner: true, number: channel.localNumber).htlcs.compactMap { htlc in
-                if htlc.offered { return htlc.expiry }
-                if preimages.contains(where: { ChannelKeys.hash($0) == htlc.paymentHash }) {
-                    return htlc.expiry > 6 ? htlc.expiry - 6 : 0
-                }
-                return nil
-            }
-            let plan = Channel(id: channel.id, fundingTxid: txid, fundingOutput: UInt32(vout),
-                scripts: Array(scripts), spends: spends,
-                forceClose: channel.dataLossDetected ? nil : channel.signedCommitment,
-                forceCloseHeight: channel.phase == .ready ? deadlines.min() : nil,
-                closingIntent: channel.dataLossDetected ? nil : channel.closingTransaction)
-            cache.channels[channel.id] = (fingerprint, plan)
-            return plan
+        let channels = try state.channels.compactMap {
+            try makeChannel($0, preimages: preimages, confirmed: confirmed, cache: &cache)
         }
         return Self(version: 1, chain: state.chain, revision: state.revision, scan: state.scan,
                     channelCount: state.channels.filter { $0.fundingTxid != nil }.count, channels: channels)
     }
+    private static func makeChannel(_ channel: ChannelState, preimages: [Data], confirmed: [ChannelResolution.Confirmed],
+                                    cache: inout Cache) throws -> Channel? {
+        guard let txid = channel.fundingTxid, let vout = channel.fundingOutput,
+              let policy = channel.recovery, channel.signedCommitment != nil else { return nil }
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        let fingerprint = ChannelKeys.hash(try encoder.encode(channel) + encoder.encode(preimages))
+        if let cached = cache.channels[channel.id], cached.fingerprint == fingerprint { return cached.value }
+        let (parents, synthetic) = try recoveryParents(channel, confirmed: confirmed)
+        let context = ChannelResolution.Context(channel: channel, policy: policy,
+                                                confirmed: synthetic, preimages: preimages)
+        var spends = channel.resolutions
+        for parent in parents { spends += try context.candidates(parent: parent) }
+        var seen = Set<Data>()
+        spends = try spends.filter { seen.insert(try Transaction.decode($0.transaction).txid).inserted }
+        var scripts = Set([try channel.fundingScript()])
+        for parent in parents + synthetic.map(\.tx) {
+            scripts.formUnion(parent.outputs.map(\.scriptPubKey))
+        }
+        for spend in spends { scripts.formUnion(try Transaction.decode(spend.transaction).outputs.map(\.scriptPubKey)) }
+        let plan = Channel(id: channel.id, fundingTxid: txid, fundingOutput: UInt32(vout),
+            scripts: Array(scripts), spends: spends,
+            forceClose: channel.dataLossDetected ? nil : channel.signedCommitment,
+            forceCloseHeight: try forceCloseHeight(channel, preimages: preimages),
+            closingIntent: channel.dataLossDetected ? nil : channel.closingTransaction)
+        cache.channels[channel.id] = (fingerprint, plan)
+        return plan
+    }
+
+    private static func recoveryParents(_ channel: ChannelState, confirmed: [ChannelResolution.Confirmed]) throws
+        -> ([Transaction], [ChannelResolution.Confirmed]) {
+        var parents: [Transaction] = []
+        var synthetic = confirmed
+        // Segwit HTLC second-stage txids are fixed before witnesses exist.
+        // Pre-sign both direct claims and descendants, so a peer racing a
+        // penalty with its second stage cannot defeat the locked monitor.
+        if !channel.dataLossDetected {
+            let local = try channel.commitment(localOwner: true)
+            parents.append(try Transaction.decode(channel.signedCommitment!))
+            synthetic += try local.htlcOutputs.map {
+                try .init(height: 0, tx: ChannelTransactions.htlcTransaction(commitment: local, output: $0))
+            }
+        }
+        let last = channel.remoteNumber + (channel.awaitingRevocation ? 1 : 0)
+        for number in 0...last {
+            let remote = try channel.commitment(localOwner: false, number: number)
+            parents.append(remote.transaction)
+            synthetic += try remote.htlcOutputs.map {
+                try .init(height: 0, tx: ChannelTransactions.htlcTransaction(commitment: remote, output: $0))
+            }
+        }
+        if let raw = channel.observedFundingSpend { parents.append(try Transaction.decode(raw)) }
+        if let raw = channel.closingTransaction { parents.append(try Transaction.decode(raw)) }
+        return (parents, synthetic)
+    }
+    private static func forceCloseHeight(_ channel: ChannelState, preimages: [Data]) throws -> UInt32? {
+        guard channel.phase == .ready else { return nil }
+        let deadlines: [UInt32] = try channel.view(localOwner: true, number: channel.localNumber).htlcs.compactMap { htlc in
+            if htlc.offered { return htlc.expiry }
+            if preimages.contains(where: { ChannelKeys.hash($0) == htlc.paymentHash }) {
+                return htlc.expiry > 6 ? htlc.expiry - 6 : 0
+            }
+            return nil
+        }
+        return deadlines.min()
+    }
+
 }

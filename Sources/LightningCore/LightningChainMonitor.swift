@@ -72,21 +72,24 @@ public actor LightningBackgroundMonitor: LightningChainMonitor {
         var next = snapshot
         if let body = block.block {
             guard body.header == block.header, body.hasValidMerkleRoot else { throw LightningError.invalidCommitment }
-            var watched = Set(next.channels.map { $0.funding.txid })
-            watched.formUnion(try next.scan.transactions.map { try Transaction.decode($0.raw).txid })
-            for tx in body.transactions where watched.contains(tx.txid) || tx.inputs.contains(where: { watched.contains($0.previousOutput.txid) }) {
-                guard next.scan.transactions.count < 8192 else { throw LightningChainError.recoveryRequired }
-                if !next.scan.transactions.contains(where: { (try? Transaction.decode($0.raw).txid) == tx.txid }) {
-                    next.scan.transactions.append(.init(height: block.height, blockHash: body.hash, raw: tx.serialized(includeWitness: true)))
-                }
-                watched.insert(tx.txid)
-            }
+            try observe(body, height: block.height, in: &next)
         }
         next.scan.positions.append(.init(height: block.height, hash: block.header.hash))
         next.scan.positions = Array(next.scan.positions.suffix(2048))
         next.scan.nextHeight = block.height + 1
         try persist(next)
         return []
+    }
+    private func observe(_ body: Block, height: UInt32, in next: inout LightningBackgroundSnapshot) throws {
+        var watched = Set(next.channels.map { $0.funding.txid })
+        watched.formUnion(try next.scan.transactions.map { try Transaction.decode($0.raw).txid })
+        for tx in body.transactions where watched.contains(tx.txid) || tx.inputs.contains(where: { watched.contains($0.previousOutput.txid) }) {
+            guard next.scan.transactions.count < 8192 else { throw LightningChainError.recoveryRequired }
+            if !next.scan.transactions.contains(where: { (try? Transaction.decode($0.raw).txid) == tx.txid }) {
+                next.scan.transactions.append(.init(height: height, blockHash: body.hash, raw: tx.serialized(includeWitness: true)))
+            }
+            watched.insert(tx.txid)
+        }
     }
     func blocksDisconnected(to height: UInt32, hash: Data) throws {
         currentHeight = nil

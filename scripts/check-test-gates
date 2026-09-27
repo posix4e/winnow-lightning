@@ -13,8 +13,10 @@ SETTERS=(.github/workflows scripts)
 ALLOW_UNSET="WINNOW_BITCOIN_CLI"
 # Conditional skips that are deliberate and documented.
 # Lightning's file-protection assertion uses the same measured OS capability
-# as WalletCore below. It remains a mandatory physical-device release check.
-ALLOW_XCTSKIP="AppTests/E2EModeTests.swift AppTests/LightningAppTests.swift"
+# as WalletCore below. The background recovery file checks both protection
+# classes, skipping only when a simulator records neither; hardware must enforce
+# both. These remain pending physical-device checks in the TestFlight evidence.
+ALLOW_XCTSKIP="AppTests/E2EModeTests.swift AppTests/LightningAppTests.swift AppTests/BackgroundSyncTests.swift"
 # Retired gates: node integration now runs through the one UI journey.
 DENY='WINNOW_DIFF|WINNOW_SIGNET|WINNOW_HEADERS_BIN|WINNOW_GENERATE_FALLBACK_PEERS'
 

@@ -2,6 +2,7 @@
 import CryptoKit
 import Foundation
 import LightningCore
+import Security
 import TestSupport
 import WalletCore
 import XCTest
@@ -167,4 +168,31 @@ private struct UnavailableSpendingKey: KeyStore {
     func store(_ secret: WalletSecret, for walletID: String) throws { throw KeyStoreError.notFound(walletID: walletID) }
     func load(walletID: String) throws -> WalletSecret { throw KeyStoreError.notFound(walletID: walletID) }
     func delete(walletID: String) throws { throw KeyStoreError.notFound(walletID: walletID) }
+}
+
+
+extension BackgroundSyncTests {
+    func testForegroundAndRecoveryKeysKeepSeparateDeviceOnlyAccessibility() async throws {
+        let service = "winnow-background-keys-\(UUID())"
+        let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer {
+            SecItemDelete([kSecClass: kSecClassGenericPassword, kSecAttrService: service] as CFDictionary)
+            try? FileManager.default.removeItem(at: root)
+        }
+        let controller = LightningAppController(network: .regtest,
+            keys: KeychainStoreKeyVault(service: service, protection: .whenUnlocked),
+            backgroundKeys: KeychainStoreKeyVault(service: service, protection: .afterFirstUnlock))
+        try await controller.prepare(directory: root, headers: HeaderChain(params: .regtest))
+        for (account, expected) in [("lightning-journal-v2", kSecAttrAccessibleWhenUnlockedThisDeviceOnly),
+                                    ("lightning-background-v1.regtest", kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly)] {
+            var result: CFTypeRef?
+            let status = SecItemCopyMatching([kSecClass: kSecClassGenericPassword, kSecAttrService: service,
+                kSecAttrAccount: "store-key.\(account)", kSecReturnAttributes: true,
+                kSecAttrSynchronizable: kSecAttrSynchronizableAny] as CFDictionary, &result)
+            XCTAssertEqual(status, errSecSuccess)
+            let attributes = try XCTUnwrap(result as? [String: Any])
+            XCTAssertEqual(attributes[kSecAttrAccessible as String] as? String, expected as String)
+            XCTAssertFalse(attributes[kSecAttrSynchronizable as String] as? Bool ?? false)
+        }
+    }
 }

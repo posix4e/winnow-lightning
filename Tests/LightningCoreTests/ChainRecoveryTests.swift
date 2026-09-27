@@ -527,3 +527,20 @@ extension ChainRecoveryTests {
         }
     }
 }
+
+extension ChainRecoveryTests {
+    func testBackgroundIntentReplayDoesNotReopenFinalizedCooperativeClose() async throws {
+        var (channel, _) = try fixture()
+        channel.localShutdown = Data([0x51, 32]) + Data(repeating: 7, count: 32)
+        channel.remoteShutdown = Data([0, 20]) + Data(repeating: 8, count: 20)
+        channel.closingFee = 500; channel.closingFeeLimit = 724
+        channel.closingTransaction = try channel.closeTransaction(fee: 500).serialized(includeWitness: true)
+        channel.observedFundingSpend = channel.closingTransaction
+        channel.phase = .closed
+        let full = RecoveryStore(), (store, _) = try backgroundFixture(channel)
+        _ = try engine(channel: channel, store: full)
+        let restored = try LightningEngine(chain: genesis.hash, journal: RecoveryJournal(full), backgroundStore: store)
+        try await restored.resumeFromBackground()
+        XCTAssertEqual(try state(full).channels.first?.phase, .closed)
+    }
+}

@@ -826,12 +826,8 @@ final class AppModel {
     }
 
     private func buildStackIfNeeded() async {
-        guard stack == nil else { return }
-        if buildingStack {
-            await waitForStackBuild()
-            guard stack == nil, !Task.isCancelled else { return }
-        }
-        guard !Task.isCancelled, let dir = storageDirectory() else { return }
+        await waitForStackBuild()
+        guard stack == nil, !Task.isCancelled, let dir = storageDirectory() else { return }
         let epoch = networkGeneration
         buildingStack = true
         defer { buildingStack = false }
