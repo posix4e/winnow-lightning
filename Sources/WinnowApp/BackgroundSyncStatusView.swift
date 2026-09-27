@@ -3,6 +3,7 @@ import UIKit
 
 struct BackgroundSyncStatusView: View {
     @Environment(AppModel.self) private var model
+    @State private var protection = false
     var body: some View {
         TimelineView(.periodic(from: .now, by: 60)) { context in
             VStack(alignment: .leading, spacing: 4) {
@@ -24,6 +25,15 @@ struct BackgroundSyncStatusView: View {
             }
             .font(.footnote)
         }
-        if !model.channelProtection.records.isEmpty { ChannelProtectionDetails() }
+        if !model.channelProtection.records.isEmpty {
+            Button("Channel protection and reminders") { protection = true }
+                .sheet(isPresented: $protection) {
+                    NavigationStack {
+                        Form { Section("Lightning channel protection") { ChannelProtectionDetails() } }
+                            .navigationTitle("Channel protection")
+                            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { protection = false } } }
+                    }
+                }
+        }
     }
 }

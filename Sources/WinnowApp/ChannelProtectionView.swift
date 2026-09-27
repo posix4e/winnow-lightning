@@ -8,8 +8,12 @@ struct ChannelProtectionBanner: View {
         TimelineView(.periodic(from: .now, by: 30)) { context in
             if let warning = model.channelProtection.warning(now: context.date) {
                 Button { details = true } label: {
-                    Label(warning.title, systemImage: "exclamationmark.shield")
-                        .font(.callout.weight(.semibold)).frame(maxWidth: .infinity, alignment: .leading)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Label(warning.title, systemImage: "exclamationmark.shield")
+                            .font(.callout.weight(.semibold))
+                        Text("Channel funds can be at risk. Connect and finish syncing.").font(.footnote)
+                    }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(12)
                         .foregroundStyle(warning.severity == .urgent ? Color.red : Color.orange)
                         .background(.background)

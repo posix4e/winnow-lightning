@@ -299,10 +299,10 @@ final class LightningAppUITests: XCTestCase {
         let button = app.buttons[identifier]
         XCTAssertTrue(scroll(app, button, up: up), app.debugDescription)
         XCTAssertTrue(button.isEnabled)
-        // XCTest scrolls the identified button to its activation point. A
-        // form's last row can be tappable without fitting the helper's extra
-        // home-indicator margin, especially with iPad's tab bar at the top.
-        button.tap()
+        // Use the real center: SwiftUI may expose an incorrect activation
+        // point for a button. iPad's last row can fit the window without
+        // fitting the helper's extra home-indicator margin.
+        XCTAssertTrue(tapVisibleCenter(app, button))
     }
     private func verifyHash(_ app: XCUIApplication, hash: String) throws {
         let value = app.staticTexts["lightningPaymentHash." + hash]
