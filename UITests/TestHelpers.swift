@@ -78,8 +78,13 @@ extension XCTestCase {
                 guard fullyVisible else { return true }
                 return reveal(app, element, fullyVisible: fullyVisible, dragX: dragX)
             }
-            let start = app.coordinate(withNormalizedOffset: CGVector(dx: dragX, dy: up ? 0.25 : 0.75))
-            let end = app.coordinate(withNormalizedOffset: CGVector(dx: dragX, dy: up ? 0.75 : 0.25))
+            guard let frame = usableFrame(app), let band = clearBand(app, in: frame) else { return false }
+            let reach = band.upperBound - band.lowerBound
+            let origin = app.coordinate(withNormalizedOffset: .zero)
+            let start = origin.withOffset(CGVector(dx: frame.width * dragX,
+                dy: band.lowerBound + reach * (up ? 0.25 : 0.75) - frame.minY))
+            let end = origin.withOffset(CGVector(dx: frame.width * dragX,
+                dy: band.lowerBound + reach * (up ? 0.75 : 0.25) - frame.minY))
             start.press(forDuration: 0.05, thenDragTo: end, withVelocity: .default, thenHoldForDuration: 0.25)
         }
         guard element.appears(within: 1.5) else { return false }
@@ -98,7 +103,7 @@ extension XCTestCase {
             XCTFail("could not snapshot the app's navigation bars")
             return nil
         }
-        let top = max(frame.minY, navigationBarBottom(snapshot) ?? frame.minY)
+        var top = max(frame.minY, navigationBarBottom(snapshot) ?? frame.minY)
         // A tall accessibility row can use the entire drag band. Keep its
         // starting point above the home indicator, where a swipe exits the
         // app instead of scrolling a modal sheet.
@@ -106,7 +111,8 @@ extension XCTestCase {
         // A sheet covers the underlying tab bar; that bar must not shrink
         // the sheet's usable area and cause repeated ineffective drags.
         for cover in [app.tabBars.firstMatch, app.keyboards.firstMatch] where cover.exists && cover.isHittable {
-            bottom = min(bottom, cover.frame.minY)
+            if cover.frame.maxY < frame.midY { top = max(top, cover.frame.maxY) }
+            else { bottom = min(bottom, cover.frame.minY) }
         }
         return top ... max(top, bottom)
     }
@@ -179,7 +185,10 @@ extension XCTestCase {
         }
         let visible = frame.intersection(viewport)
         guard !visible.isNull, visible.width > 0,
-              visible.height >= min(frame.height, 24) else { return false }
+              visible.height >= min(frame.height, 24) else {
+            print("Tap target outside visible area: app=\(appFrame), target=\(frame), viewport=\(viewport)")
+            return false
+        }
         app.coordinate(withNormalizedOffset: .zero)
             .withOffset(CGVector(dx: visible.midX - appFrame.minX, dy: visible.midY - appFrame.minY))
             .tap()

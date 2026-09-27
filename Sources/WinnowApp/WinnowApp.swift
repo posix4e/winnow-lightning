@@ -24,17 +24,17 @@ struct WinnowApp: App {
                 case .ready:
                     // Beginner mode is one screen; Advanced mode is the
                     // tab interface. The switch lives in each one's toolbar.
-                    if model.advancedMode {
-                        MainTabView()
-                    } else {
-                        BeginnerHomeView()
+                    VStack(spacing: 0) {
+                        ChannelProtectionBanner()
+                        if model.advancedMode {
+                            MainTabView()
+                        } else {
+                            BeginnerHomeView()
+                        }
                     }
                 case let .storageDamaged(message):
                     StorageDamagedView(message: message)
                 }
-            }
-            .safeAreaInset(edge: .top, spacing: 0) {
-                if model.stage == .ready { ChannelProtectionBanner() }
             }
             .alert("Tor is no longer part of Winnow", isPresented: Binding(
                 get: { model.torRemovedNotice }, set: { model.torRemovedNotice = $0 }

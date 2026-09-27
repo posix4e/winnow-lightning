@@ -3,15 +3,19 @@ import UIKit
 
 struct ChannelProtectionBanner: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.dynamicTypeSize) private var typeSize
     @State private var details = false
     var body: some View {
         TimelineView(.periodic(from: .now, by: 30)) { context in
             if let warning = model.channelProtection.warning(now: context.date) {
                 Button { details = true } label: {
                     VStack(alignment: .leading, spacing: 4) {
-                        Label(warning.title, systemImage: "exclamationmark.shield")
+                        Label(typeSize.isAccessibilitySize ? "Check Lightning channels" : warning.title,
+                              systemImage: "exclamationmark.shield")
                             .font(.callout.weight(.semibold))
-                        Text("Channel funds can be at risk. Connect and finish syncing.").font(.footnote)
+                        if !typeSize.isAccessibilitySize {
+                            Text("Channel funds can be at risk. Connect and finish syncing.").font(.footnote)
+                        }
                     }
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(12)
@@ -19,10 +23,11 @@ struct ChannelProtectionBanner: View {
                         .background(.background)
                 }
                 .accessibilityIdentifier("channelProtectionBanner")
+                .accessibilityLabel(warning.title + ". Channel funds can be at risk. Connect and finish syncing.")
                 .accessibilityHint("Review the last verified check and channel check reminders")
             } else if !model.channelProtection.records.isEmpty && !model.channelProtection.remindersEnabled {
                 Button { details = true } label: {
-                    Label("Enable Lightning channel check reminders", systemImage: "bell.badge")
+                    Label("Channel check reminders", systemImage: "bell.badge")
                         .font(.callout).frame(maxWidth: .infinity, alignment: .leading)
                         .padding(12).background(.background)
                 }
