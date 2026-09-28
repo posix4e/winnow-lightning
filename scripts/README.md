@@ -51,7 +51,7 @@ journey requires the signet fixture configuration described in
 
 [prepare-site-artifact](prepare-site-artifact) prepares a fresh static website
 from the current docs and either `--journey <results>` or `--media <bundle>`.
-`--media-output <directory>` saves the normalized movie, 16 checkpoint images,
+`--media-output <directory>` saves the normalized movie, 17 checkpoint images,
 and original recording provenance as a dedicated reusable bundle. The website
 job deploys the ready same-run artifact without checking out source or rebuilding.
 `--validate-media <bundle>` checks cached media before CI decides to skip wallet
