@@ -80,7 +80,17 @@ class Peer:
     def __init__(self, command, log, swift=False):
         self.command, self.log, self.swift = command, log, swift
         self.events, self.broadcasts = [], []
-        self.start()
+        self.process, self.selector = None, None
+        try:
+            self.start()
+        except BaseException:
+            # Fixture cannot register a peer until this constructor returns.
+            # Reap partial ownership here and preserve the startup failure.
+            try:
+                self.close()
+            except BaseException:
+                pass
+            raise
 
     def observe(self, action, operation, command=None):
         start = time.monotonic_ns()
@@ -158,11 +168,12 @@ class Peer:
         return self.observe('close', self._close)
 
     def _close(self):
-        if self.process.poll() is None:
+        if self.process is not None and self.process.poll() is None:
             self.process.kill()  # actual abrupt process death, not a logical offline flag
             self.process.wait(timeout=10)
         self.stopped = time.monotonic_ns()
-        self.selector.close()
+        if self.selector is not None:
+            self.selector.close()
 
     def reconnect_to(self, provider):
         if self.swift:
