@@ -102,23 +102,34 @@ class Fixture:
     def __init__(self, root, evidence, harness, swift, bitcoin, p2p=False):
         self.root, self.evidence, self.harness, self.swift, self.bitcoin = root, evidence, harness, swift, bitcoin
         self.peers, self.logs = [], []
-        self.base = ['-regtest', f'-datadir={root / "bitcoin"}', f'-rpcport={port()}']
-        (root / 'bitcoin').mkdir()
-        log = self.log('bitcoin')
-        self.p2p_port = port() if p2p else None
-        listen = [f'-port={self.p2p_port}', '-bind=127.0.0.1', '-listen=1', '-blockfilterindex=1', '-peerblockfilters=1', '-txindex=1'] if p2p else ['-listen=0']
-        self.core = subprocess.Popen([str(bitcoin / 'bitcoind'), *self.base, '-server=1', *listen, '-connect=0', '-dnsseed=0', '-discover=0',
-            '-fallbackfee=0.00002', '-rpcbind=127.0.0.1', '-rpcallowip=127.0.0.1', '-debug=rpc'], stdout=log, stderr=log)
-        def ready():
+        self.core = None
+        try:
+            self.base = ['-regtest', f'-datadir={root / "bitcoin"}', f'-rpcport={port()}']
+            (root / 'bitcoin').mkdir()
+            log = self.log('bitcoin')
+            self.p2p_port = port() if p2p else None
+            listen = [f'-port={self.p2p_port}', '-bind=127.0.0.1', '-listen=1', '-blockfilterindex=1', '-peerblockfilters=1', '-txindex=1'] if p2p else ['-listen=0']
+            self.core = subprocess.Popen([str(bitcoin / 'bitcoind'), *self.base, '-server=1', *listen, '-connect=0', '-dnsseed=0', '-discover=0',
+                '-fallbackfee=0.00002', '-rpcbind=127.0.0.1', '-rpcallowip=127.0.0.1', '-debug=rpc'], stdout=log, stderr=log)
+            def ready():
+                try:
+                    return self.rpc('getblockchaininfo')
+                except subprocess.CalledProcessError:
+                    return False
+            wait(ready)
+            self.rpc('createwallet', 'fixture')
+            self.address = self.rpc('getnewaddress')
+            self.rpc('generatetoaddress', 101, self.address)
+            self.chain = bytes.fromhex(self.rpc('getblockhash', 0))[::-1].hex()
+        except BaseException:
+            # The caller cannot own this fixture until construction returns.
+            # Clean partial ownership here, including a failed Core launch,
+            # and keep the original startup failure even if cleanup fails.
             try:
-                return self.rpc('getblockchaininfo')
-            except subprocess.CalledProcessError:
-                return False
-        wait(ready)
-        self.rpc('createwallet', 'fixture')
-        self.address = self.rpc('getnewaddress')
-        self.rpc('generatetoaddress', 101, self.address)
-        self.chain = bytes.fromhex(self.rpc('getblockhash', 0))[::-1].hex()
+                self.close()
+            except BaseException:
+                pass
+            raise
 
     def log(self, name):
         handle = open(self.evidence / f'{name}.log', 'w')
@@ -288,13 +299,21 @@ class Fixture:
         return wait(persisted)
 
     def close(self):
-        for peer in self.peers:
-            peer.close()
-        if self.core.poll() is None:
-            self.core.terminate()
-            self.core.wait(timeout=15)
-        for log in self.logs:
-            log.close()
+        try:
+            for peer in self.peers:
+                peer.close()
+        finally:
+            try:
+                if self.core is not None and self.core.poll() is None:
+                    self.core.terminate()
+                    try:
+                        self.core.wait(timeout=15)
+                    except subprocess.TimeoutExpired:
+                        self.core.kill()
+                        self.core.wait(timeout=10)
+            finally:
+                for log in self.logs:
+                    log.close()
 
 
 def main():
