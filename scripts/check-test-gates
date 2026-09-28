@@ -20,7 +20,11 @@ ALLOW_UNSET="WINNOW_BITCOIN_CLI WINNOW_LIVE_MAINNET"
 # both. These remain pending physical-device checks in the TestFlight evidence.
 # LightningAppUITests skips only the explicitly opted-in public mainnet smoke
 # test above. Its deterministic regtest and receive/setup tests remain required.
-ALLOW_XCTSKIP="AppTests/E2EModeTests.swift AppTests/LightningAppTests.swift AppTests/BackgroundSyncTests.swift UITests/LightningAppUITests.swift"
+# LightningFundingReadinessTests skips only the unlocked-network Lightning
+# switch in the normal wallet host, whose Lightning fixture requires a forced
+# regtest network. Research CI selects the full class and must execute all 15
+# cases without skips; normal forced-regtest cases remain required and fatal.
+ALLOW_XCTSKIP="AppTests/E2EModeTests.swift AppTests/LightningAppTests.swift AppTests/BackgroundSyncTests.swift AppTests/LightningFundingReadinessTests.swift UITests/LightningAppUITests.swift"
 # Retired gates: node integration now runs through the one UI journey.
 DENY='WINNOW_DIFF|WINNOW_SIGNET|WINNOW_HEADERS_BIN|WINNOW_GENERATE_FALLBACK_PEERS'
 

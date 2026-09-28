@@ -92,8 +92,12 @@ struct LightningSendView: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Done") { dismiss() }.accessibilityIdentifier("lightningSendDone")
                 }
-                ToolbarItem(placement: .keyboard) {
-                    Button("Done") { focusedField = nil }.accessibilityIdentifier("lightningOfferKeyboardDone")
+                if focusedField != nil {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button("Hide keyboard", systemImage: "keyboard.chevron.compact.down") { focusedField = nil }
+                            .labelStyle(.iconOnly)
+                            .accessibilityIdentifier("lightningOfferHideKeyboard")
+                    }
                 }
             }
             .sheet(item: $review, onDismiss: {

@@ -59,6 +59,15 @@ struct LightningView: View {
                 }
             }
             .navigationTitle("Lightning")
+            .toolbar {
+                if editingCapacity {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button("Hide keyboard", systemImage: "keyboard.chevron.compact.down") { editingCapacity = false }
+                            .labelStyle(.iconOnly)
+                            .accessibilityIdentifier("lightningCapacityHideKeyboard")
+                    }
+                }
+            }
             .disabled(busy)
             .sheet(isPresented: $setup) { LightningSetupView(controller: controller) }
             .sheet(isPresented: $sendInvoice) { LightningInvoiceSendView(controller: controller) }
@@ -106,11 +115,6 @@ struct LightningView: View {
                     .font(.footnote).foregroundStyle(.secondary)
                 TextField("Capacity in sats", text: $capacity).keyboardType(.numberPad).accessibilityIdentifier("lightningCapacity")
                     .focused($editingCapacity)
-                    .toolbar {
-                        ToolbarItem(placement: .keyboard) {
-                            Button("Done") { editingCapacity = false }.accessibilityIdentifier("sendKeyboardDone")
-                        }
-                    }
                 Button("Request a channel") { editingCapacity = false; run {
                     guard let amount = UInt64(capacity) else { throw LightningError.invalidAmount }
                     try await controller.openChannel(capacitySat: amount, model: model)

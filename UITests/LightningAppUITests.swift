@@ -226,7 +226,10 @@ final class LightningAppUITests: XCTestCase {
         let capacity = app.textFields["lightningCapacity"]
         XCTAssertTrue(scroll(app, capacity, fullyVisible: true))
         app.typeInto("lightningCapacity", "100000", dismissKeyboardAfterTyping: false)
-        XCTAssertTrue(dismissLightningKeyboard(app, accessory: "sendKeyboardDone"), app.debugDescription)
+        XCTAssertTrue(dismissLightningKeyboard(app, action: "lightningCapacityHideKeyboard"), app.debugDescription)
+        XCTAssertEqual(capacity.value as? String, "100000")
+        XCTAssertTrue(NSPredicate(format: "hasKeyboardFocus == false").evaluate(with: capacity), app.debugDescription)
+        XCTAssertEqual(app.keyboards.count, 0)
         tap(app, "lightningOpen")
         let funding = app.buttons["lightningFundingReview"]
         XCTAssertTrue(scroll(app, funding))
@@ -248,7 +251,7 @@ final class LightningAppUITests: XCTestCase {
         tap(app, "lightningPasteOffer")
         XCTAssertTrue(scroll(app, app.textFields["lightningAmount"], fullyVisible: true))
         app.typeInto("lightningAmount", "5000", dismissKeyboardAfterTyping: false)
-        let keyboardDismissed = dismissLightningKeyboard(app, accessory: "lightningOfferKeyboardDone")
+        let keyboardDismissed = dismissLightningKeyboard(app, action: "lightningOfferHideKeyboard")
         if !keyboardDismissed {
             Screenshots.capture(app, "async-payment-keyboard-failure", testCase: self)
             let hierarchy = XCTAttachment(string: app.debugDescription)
@@ -258,8 +261,9 @@ final class LightningAppUITests: XCTestCase {
         }
         XCTAssertTrue(keyboardDismissed, app.debugDescription)
         XCTAssertTrue(app.navigationBars["Pay receive offer"].exists,
-                      "Keyboard Done must keep the payment input open: \(app.debugDescription)")
+                      "Hide keyboard must keep the payment input open: \(app.debugDescription)")
         XCTAssertEqual(app.textFields["lightningAmount"].value as? String, "5000")
+        XCTAssertTrue(NSPredicate(format: "hasKeyboardFocus == false").evaluate(with: app.textFields["lightningAmount"]), app.debugDescription)
         XCTAssertEqual(app.keyboards.count, 0)
         tap(app, "lightningReviewPayment")
         XCTAssertTrue(app.navigationBars["Review Lightning"].appears(within: 15), app.debugDescription)
@@ -326,7 +330,10 @@ final class LightningAppUITests: XCTestCase {
         try waitConnected(app)
         XCTAssertTrue(scroll(app, app.textFields["lightningCapacity"], fullyVisible: true))
         app.typeInto("lightningCapacity", "100000", dismissKeyboardAfterTyping: false)
-        XCTAssertTrue(dismissLightningKeyboard(app, accessory: "sendKeyboardDone"), app.debugDescription)
+        XCTAssertTrue(dismissLightningKeyboard(app, action: "lightningCapacityHideKeyboard"), app.debugDescription)
+        XCTAssertEqual(app.textFields["lightningCapacity"].value as? String, "100000")
+        XCTAssertTrue(NSPredicate(format: "hasKeyboardFocus == false").evaluate(with: app.textFields["lightningCapacity"]), app.debugDescription)
+        XCTAssertEqual(app.keyboards.count, 0)
         tap(app, "lightningOpen"); tap(app, "lightningFundingReview")
         XCTAssertTrue(app.navigationBars["Review Lightning"].appears(within: 30), app.debugDescription)
         tap(app, "lightningConfirm")
@@ -446,14 +453,14 @@ final class LightningAppUITests: XCTestCase {
         return scrollUntilExists(app, element, up: up, fullyVisible: fullyVisible,
                                  dragX: 0.03)
     }
-    private func dismissLightningKeyboard(_ app: XCUIApplication, accessory: String) -> Bool {
+    private func dismissLightningKeyboard(_ app: XCUIApplication, action: String) -> Bool {
         let deadline = Date().addingTimeInterval(10)
-        // Each input clears its own focus. System Hide and generic navigation
-        // or swipe fallbacks do not establish that the app action was activated.
+        // Activate the field-owned navigation action, outside keyboard windows.
+        // System Hide and generic fallbacks do not establish app focus clearing.
         var activated = false
         for _ in 0..<2 {
             guard deadline.timeIntervalSinceNow > 0 else { break }
-            let done = app.buttons[accessory]
+            let done = app.buttons[action]
             guard done.exists, done.isEnabled, tapVisibleCenter(app, done) else { break }
             activated = true
             let remaining = max(0, deadline.timeIntervalSinceNow)
