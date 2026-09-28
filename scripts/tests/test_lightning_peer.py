@@ -1,10 +1,13 @@
 """Reference startup recovery must never turn a protocol failure into a pass."""
 import json
+import io
+from contextlib import redirect_stderr
 from pathlib import Path
 import runpy
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
+from types import SimpleNamespace
 
 SCRIPT = Path(__file__).resolve().parents[1] / 'ci-lightning-peer'
 CRASH = '''DEBUG chan#1: Got opening_fundee_finish_response
@@ -84,6 +87,91 @@ class PeerStartupTests(unittest.TestCase):
                     check('force', evidence)
                 self.assertEqual(run.call_count, calls)
                 self.assertFalse((evidence / 'opening-receipt.json').exists())
+
+
+class PeerDiagnosticTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.module = runpy.run_path(str(SCRIPT))
+
+    def peer(self, response=b'{"type":"38"}\n'):
+        peer = self.module['SwiftPeer'].__new__(self.module['SwiftPeer'])
+        peer.process = SimpleNamespace(stdin=io.BytesIO(), stdout=io.BytesIO(response))
+        peer.selector = Mock()
+        peer.selector.select.return_value = [(peer.process.stdout, None)]
+        peer.trace = io.StringIO()
+        return peer
+
+    def test_command_and_response_trace_preserves_wire_exchange_and_timeout(self):
+        peer = self.peer()
+        result = peer.call('receive', expected='38')
+        self.assertEqual(result, {'type': '38'})
+        self.assertEqual(json.loads(peer.process.stdin.getvalue()), {'command': 'receive', 'expected': '38'})
+        records = [json.loads(line) for line in peer.trace.getvalue().splitlines()]
+        self.assertEqual([record['kind'] for record in records], ['request', 'response'])
+        self.assertEqual(records[0]['arguments'], {'expected': '38'})
+        self.assertEqual(records[1]['response'], result)
+        peer.selector.select.assert_called_once_with(timeout=60)
+
+    def test_stalled_receive_remains_fatal_and_retains_unanswered_command(self):
+        peer = self.peer()
+        peer.selector.select.return_value = []
+        with self.assertRaisesRegex(TimeoutError, 'Swift peer did not complete'):
+            peer.call('receive')
+        peer.selector.select.assert_called_once_with(timeout=60)
+        records = [json.loads(line) for line in peer.trace.getvalue().splitlines()]
+        self.assertEqual([record['kind'] for record in records], ['request', 'failure'])
+        self.assertEqual(records[-1]['command'], 'receive')
+        self.assertIn('TimeoutError', records[-1]['error'])
+
+    def test_failure_trace_write_cannot_replace_protocol_timeout(self):
+        peer = self.peer()
+        peer.selector.select.return_value = []
+        peer.record = Mock(side_effect=[None, OSError('disk full')])
+        output = io.StringIO()
+        with redirect_stderr(output), self.assertRaisesRegex(TimeoutError, 'Swift peer did not complete'):
+            peer.call('receive')
+        self.assertIn('disk full', output.getvalue())
+        peer.selector.select.assert_called_once_with(timeout=60)
+
+    def test_oversized_trace_record_is_bounded_and_retains_exact_content_hash(self):
+        peer = self.peer()
+        record = dict(time_ns=42, kind='request', command='scan_block', arguments={'hex': 'ab' * 40_000})
+        with patch('time.time_ns', return_value=42):
+            peer.record('request', command=record['command'], arguments=record['arguments'])
+        encoded = json.dumps(record, sort_keys=True).encode()
+        saved = json.loads(peer.trace.getvalue())
+        self.assertTrue(saved['truncated'])
+        self.assertEqual(saved['bytes'], len(encoded))
+        self.assertEqual(saved['sha256'], self.module['hashlib'].sha256(encoded).hexdigest())
+        self.assertLess(len(peer.trace.getvalue().encode()), 65_536)
+
+    def test_failure_state_and_log_tails_are_bounded_without_hiding_rpc_failure(self):
+        log = self.root / 'cln.log'
+        log.write_text('old daemon line\n' * 100_000 + 'WIRE_SHUTDOWN\nWaiting for their initial closing fee offer\n')
+        tail = self.module['bounded_log_tail'](log)
+        self.assertLessEqual(len(tail.encode()), 32_768)
+        self.assertLessEqual(len(tail.splitlines()), 160)
+        self.assertIn('Waiting for their initial closing fee offer', tail)
+        ln = Mock(side_effect=RuntimeError('RPC unavailable'))
+        output = io.StringIO()
+        with redirect_stderr(output):
+            self.module['failure_diagnostics'](TimeoutError('closing_signed absent'), ln, self.root)
+        ln.assert_called_once_with('listpeerchannels')
+        state = json.loads((self.root / 'failure-state.json').read_text())
+        self.assertIn('TimeoutError', state['failure'])
+        self.assertIn('RPC unavailable', state['reference_channels']['diagnostic_error'])
+        self.assertIn('WIRE_SHUTDOWN', output.getvalue())
+        self.assertIn('FileNotFoundError', output.getvalue())
+
+    def test_failure_state_captures_reference_channel_commitment_and_htlc_state(self):
+        channels = {'channels': [{'state': 'CHANNELD_SHUTTING_DOWN', 'htlcs': [], 'next_local_commitment_number': 15}]}
+        with redirect_stderr(io.StringIO()):
+            self.module['failure_diagnostics'](TimeoutError('closing_signed absent'), Mock(return_value=channels), self.root)
+        state = json.loads((self.root / 'failure-state.json').read_text())
+        self.assertEqual(state['reference_channels'], channels)
 
 
 if __name__ == '__main__':

@@ -26,7 +26,7 @@ extension LightningAppController {
         let coins = try await wallet.recoverySpendCoins(requestID: requestID)
         let records = try await engine.anchorFeeBumps(channelID: channel.id, peer: channel.peer)
         let replacing = try records.last(where: { try matchesFeeBump($0, htlcTransactionID: htlcTransactionID) })?.transaction().txid
-        let rate = try await model.resolvedFeeRate(priority: .medium, override: nil)
+        let rate = await model.resolvedFeeRate(priority: .medium, override: nil)
         try requireNetwork(model, generation: epoch)
         let quote = try await engine.anchorFeeBumpQuote(id: Self.freshID(), channelID: channel.id, peer: channel.peer, coins: coins,
             destination: destination, feeRateSatPerVByte: rate, totalFeeLimitSat: maximumFeeSat,

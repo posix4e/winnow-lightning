@@ -372,6 +372,15 @@ struct SendView: View {
 
     private func reviewWarnings(_ preview: AppModel.SendPreview) -> some View {
         Group {
+            recipientWarnings(preview)
+            transactionWarnings(preview)
+        }
+        .font(.footnote)
+        .foregroundStyle(.orange)
+    }
+
+    private func recipientWarnings(_ preview: AppModel.SendPreview) -> some View {
+        Group {
             if let recipient = preview.recipient, recipient.hasUnverifiedFundingDestination {
                 Section {
                     Label("This destination was inferred from transaction funding. Winnow has not verified that it belongs to \(recipient.name). Confirm it with them before sending.", systemImage: "exclamationmark.triangle")
@@ -384,6 +393,11 @@ struct SendView: View {
                         .accessibilityIdentifier("addressReuseWarning")
                 }
             }
+        }
+    }
+
+    private func transactionWarnings(_ preview: AppModel.SendPreview) -> some View {
+        Group {
             if let proportion = preview.feeProportion {
                 Section {
                     Label(proportion.message(sats: satsText), systemImage: "exclamationmark.triangle")
@@ -397,8 +411,6 @@ struct SendView: View {
                 }
             }
         }
-        .font(.footnote)
-        .foregroundStyle(.orange)
     }
 
     private func paymentStatus(_ txid: Data) -> some View {

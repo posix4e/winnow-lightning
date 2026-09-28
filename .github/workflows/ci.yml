@@ -86,16 +86,21 @@ jobs:
       - name: Stock-peer payments, process restart and cooperative close
         run: scripts/ci-lightning-peer --close cooperative --offers
       - name: Stock anchor peer, restart and bounded CPFP replacement
+        if: ${{ !cancelled() }}
         run: WINNOW_LIGHTNING_RESULTS="$WINNOW_LIGHTNING_RESULTS/anchors" scripts/ci-lightning-peer --format anchors --close force
       - name: Stale backup recovery from stock peer latest unilateral close
+        if: ${{ !cancelled() }}
         run: scripts/ci-lightning-peer --format anchors --close recovery
       - name: Install pinned app project generator
+        if: ${{ !cancelled() }}
         run: scripts/install-xcodegen
       - name: Record Swift app sharing, offline payment, crashes and returned funds
+        if: ${{ !cancelled() }}
         env:
           DERIVED_DATA: ${{ runner.temp }}/lightning-app-build
         run: scripts/ci-lightning-ui "$RUNNER_TEMP/lightning-ui"
       - name: Exercise Research and normal wallet app tests with coverage
+        if: ${{ !cancelled() }}
         run: |
           simulator=$(python3 -c 'import json,os; print(json.load(open(os.environ["RUNNER_TEMP"]+"/lightning-ui/manifest.json"))["simulator"])')
           specs=("$RUNNER_TEMP/lightning-app-build"/Build/Products/WinnowLightning_*.xctestrun)
@@ -124,6 +129,7 @@ jobs:
             -enableCodeCoverage YES -collect-test-diagnostics never \
             -resultBundlePath "$CRAP_RESULTS/NormalAppTests.xcresult" > "$CRAP_RESULTS/normal-app-tests.log" 2>&1
       - name: Record normal Bitcoin and multisig UI journey with coverage
+        if: ${{ !cancelled() }}
         timeout-minutes: 20
         run: |
           export SIMULATOR_ID=$(python3 -c 'import json,os; print(json.load(open(os.environ["RUNNER_TEMP"]+"/lightning-ui/manifest.json"))["simulator"])')
@@ -151,12 +157,18 @@ jobs:
           } > "$HOME/.winnow-node.env"
           scripts/ci-ui-journey "$CRAP_RESULTS/normal-ui" --skip-build
       - name: Enforce CRAP at most 12 against package and app evidence
+        if: ${{ !cancelled() }}
         run: |
           scripts/ci-crap --package-build "$CRAP_PACKAGE_BUILD" \
             --derived-data "$RUNNER_TEMP/lightning-app-build" --variant ResearchDebug \
             --additional-app "$RUNNER_TEMP/lightning-app-build" Debug \
+            --app-result "$RUNNER_TEMP/lightning-ui/LightningUI.xcresult" \
+            --app-result "$CRAP_RESULTS/ResearchAppTests.xcresult" \
+            --app-result "$CRAP_RESULTS/NormalAppTests.xcresult" \
+            --app-result "$CRAP_RESULTS/normal-ui/NodeUI.xcresult" \
             --manifest "$CRAP_RESULTS/source-manifest.json" --output "$CRAP_RESULTS/report"
       - name: Compile the device research release and exclude test activation
+        if: ${{ !cancelled() }}
         run: |
           xcodebuild build -project WinnowApp.xcodeproj -scheme WinnowLightning -configuration ResearchRelease \
             -destination 'generic/platform=iOS' -derivedDataPath "$RUNNER_TEMP/lightning-app-build" \

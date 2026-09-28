@@ -9,8 +9,9 @@ CRAP = CC² × (1 − executable-line coverage)³ + CC
 
 SwiftLint 0.65.1 supplies the syntax decision count, including switch cases.
 Its counter starts at zero, so CC includes one additional entry path. The
-compiler supplies declaration ranges and LLVM supplies executable lines;
-covered lines are unioned across package, Research app and normal app tests.
+compiler supplies declaration ranges. Package executable lines come from LLVM
+LCOV; app executable lines come from Xcode's retained `xccov` result archives.
+Covered lines are unioned across package, Research app and normal app tests.
 Named nested functions are measured separately and their lines do not inflate
 the enclosing method. Accessors and standalone closures are outside the
 SwiftLint function/initializer rule; the report states this limitation.
@@ -21,12 +22,18 @@ For example, unmeasured CC 3 has bound 12; unmeasured CC 4 has bound 20 and
 fails. There are no method or file exclusions, case omissions or suppressions.
 
 Capture a source manifest immediately before instrumented builds. Reports
-reject mismatched source hashes. `scripts/ci-crap` exports compiled package and
-simulator app profiles, preserving the binaries and profile paths in a receipt.
-It rejects absent or ambiguous evidence rather than launching a replacement
-test run. The existing Lightning CI job runs the full package suite, Research
+reject mismatched source hashes. `scripts/ci-crap` exports the package profile
+and the successful app runs' coverage archives, preserving raw executable-line
+records, archive references, source hashes, build paths and binary hashes at
+collection in a receipt. It rejects unknown checkout paths and absent or
+ambiguous evidence rather than launching a replacement test run. Xcode replaces
+`Build/ProfileData` between runs; CI uses the stable archives in each result
+bundle so earlier coverage is retained. The existing Lightning CI job runs the full package suite, Research
 Lightning/background app suites and the complete normal app suite, then uploads
-the report and test evidence. The recorded Research payment and normal
+the report and test evidence. Independent app, metric, anchor/recovery and
+release checks continue after a peer check fails, retaining diagnostic evidence;
+missing prerequisites or failed assertions still fail the job. The recorded
+Research payment and normal
 Bitcoin/multisig UI journeys also contribute instrumented coverage. Research deliberately lacks iCloud capability and
 defaults to advanced Lightning controls; normal-only capability/default-mode
 assertions run in the normal configuration. No coverage lines are removed from
@@ -42,6 +49,10 @@ swift test --enable-code-coverage --scratch-path /tmp/crap/package
 scripts/ci-crap --package-build /tmp/crap/package \
   --derived-data /tmp/crap/app --variant ResearchDebug \
   --additional-app /tmp/crap/app Debug \
+  --app-result /tmp/crap/ResearchAppTests.xcresult \
+  --app-result /tmp/crap/ResearchUI.xcresult \
+  --app-result /tmp/crap/NormalAppTests.xcresult \
+  --app-result /tmp/crap/NormalUI.xcresult \
   --manifest /tmp/crap/source-manifest.json --output /tmp/crap/report
 ```
 

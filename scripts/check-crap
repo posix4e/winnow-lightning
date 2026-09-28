@@ -4,7 +4,8 @@
 SwiftLint 0.65.1 supplies syntax-based decision counts, including switch cases.
 Its count starts at zero: McCabe complexity is that count plus the entry path.
 Swift compiler declaration ranges, rather than guessed braces, bind coverage
-to methods and initializers. LLVM LCOV DA records define executable lines.
+to methods and initializers. Compiler LCOV DA records define executable lines,
+including LLVM exports and Xcode archive records converted without omitting zeros.
 Missing coverage is reported as unmeasured, with a conservative zero-coverage
 upper bound. Accessors and standalone closures are explicitly outside the
 SwiftLint function/initializer rule; their executable lines remain visible in
@@ -145,7 +146,7 @@ def report(args):
               'scope': 'All Sources Swift function and initializer bodies, including switch cases; CC entry path is 1',
               'limitations': 'Accessors and standalone closures are not declarations covered by the SwiftLint function/initializer rule',
               'decision_tool': f'SwiftLint {SWIFTLINT_VERSION}',
-              'coverage': 'LLVM compiler executable-line records, union across supplied test runs',
+              'coverage': 'Compiler executable-line records (LLVM LCOV and/or xccov archive lines), union across supplied test runs',
               'unmeasured_policy': 'Explicitly unmeasured; zero coverage conservative bound, never assumed covered',
               'coverage_inputs': [str(path.resolve()) for path in args.coverage],
               'source_manifest': actual, 'functions': rows,

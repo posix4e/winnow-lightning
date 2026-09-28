@@ -203,10 +203,20 @@ def stop(process):
 
 class SwiftPeer:
     def __init__(self, arguments, log):
+        self.trace = open(Path(log.name).with_name('swift-protocol.jsonl'), 'a', buffering=1)
         self.process = subprocess.Popen(arguments, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log)
         self.selector = selectors.DefaultSelector()
         self.selector.register(self.process.stdout, selectors.EVENT_READ)
         self.initialization = self.read()
+        self.record('initialization', response=self.initialization)
+
+    def record(self, kind, **fields):
+        record = dict(time_ns=time.time_ns(), kind=kind, **fields)
+        encoded = json.dumps(record, sort_keys=True)
+        if len(encoded.encode()) > 65_536:
+            encoded = json.dumps(dict(time_ns=record['time_ns'], kind=kind, truncated=True,
+                bytes=len(encoded.encode()), sha256=hashlib.sha256(encoded.encode()).hexdigest(), preview=encoded[:4096]))
+        self.trace.write(encoded + '\n')
 
     def read(self):
         if not self.selector.select(timeout=60):
@@ -217,9 +227,19 @@ class SwiftPeer:
         return json.loads(line)
 
     def call(self, command, **kwargs):
-        self.process.stdin.write(json.dumps(dict(command=command, **kwargs)).encode() + b'\n')
-        self.process.stdin.flush()
-        return self.read()
+        self.record('request', command=command, arguments=kwargs)
+        try:
+            self.process.stdin.write(json.dumps(dict(command=command, **kwargs)).encode() + b'\n')
+            self.process.stdin.flush()
+            response = self.read()
+        except Exception as error:
+            try:
+                self.record('failure', command=command, error=repr(error))
+            except Exception as diagnostic_error:
+                print(f'Swift command failure trace unavailable: {diagnostic_error!r}', file=sys.stderr)
+            raise
+        self.record('response', command=command, response=response)
+        return response
 
     def receive(self, expected):
         for _ in range(30):
@@ -233,6 +253,31 @@ class SwiftPeer:
     def close(self):
         stop(self.process)
         self.selector.close()
+        self.trace.close()
+
+
+def diagnostic_call(callback):
+    try:
+        return callback()
+    except Exception as error:
+        return dict(diagnostic_error=repr(error))
+
+
+def bounded_log_tail(path, maximum=32_768):
+    with path.open('rb') as stream:
+        stream.seek(0, os.SEEK_END)
+        stream.seek(max(0, stream.tell() - maximum))
+        data = stream.read(maximum)
+    return '\n'.join(data.decode(errors='replace').splitlines()[-160:])
+
+
+def failure_diagnostics(error, ln, evidence):
+    state = dict(failure=repr(error), reference_channels=diagnostic_call(lambda: ln('listpeerchannels')))
+    (evidence / 'failure-state.json').write_text(json.dumps(state, indent=2) + '\n')
+    print('Stock-peer failure state: ' + json.dumps(state, sort_keys=True)[:32_768], file=sys.stderr)
+    for name in ('swift-protocol.jsonl', 'swift-peer.log', 'cln.log', 'recipient-cln.log', 'bitcoin.log'):
+        tail = diagnostic_call(lambda: bounded_log_tail(evidence / name))
+        print(f'Stock-peer diagnostic tail {name}:\n{tail}', file=sys.stderr)
 
 
 class ReferenceStartupFailure(RuntimeError):
@@ -444,6 +489,14 @@ def run_peer(close_mode, evidence, channel_format="staticRemoteKey", offers=Fals
                     'capacity_sat': 100_000, 'peer_to_us_msat': remote['to_us_msat'], 'payments': payments, 'fee_bump': fee_bump, 'recovery': recovery}
                 (evidence / 'opening-receipt.json').write_text(json.dumps(receipt, indent=2) + '\n')
                 print(json.dumps(receipt, sort_keys=True))
+            except Exception as error:
+                try:
+                    for log in (core_log, cln_log, swift_log):
+                        log.flush()
+                    failure_diagnostics(error, ln, evidence)
+                except Exception as diagnostic_error:
+                    print(f'Stock-peer diagnostics unavailable: {diagnostic_error!r}', file=sys.stderr)
+                raise
             finally:
                 if swift:
                     swift.close()
