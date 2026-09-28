@@ -14,7 +14,8 @@ final class LightningFundingReadinessTests: XCTestCase {
     }
     private final class Approved: DeviceAuthenticating {
         var entered: (() -> Void)?
-        func authenticate(reason: String) async throws { entered?() }
+        var calls = 0
+        func authenticate(reason: String) async throws { calls += 1; entered?() }
     }
     private struct Fixture {
         let model: AppModel
@@ -24,18 +25,22 @@ final class LightningFundingReadinessTests: XCTestCase {
         let pool: PeerPool
         let node: LoopbackNode
         let peer: Data
+        let counterparty: LightningEngine
+        let local: Data
         let review: LightningAppController.FundingReview
         let authenticator: Approved
     }
 
-    private func makeFixture() async throws -> Fixture {
-        let environment = ["WINNOW_E2E": "1", "WINNOW_E2E_RUN": "funding-readiness-\(UUID())",
+    private func makeFixture(lockNetwork: Bool = true) async throws -> Fixture {
+        var environment = ["WINNOW_E2E": "1", "WINNOW_E2E_RUN": "funding-readiness-\(UUID())",
             "WINNOW_E2E_NETWORK": "regtest", "WINNOW_E2E_ENTROPY": "000102030405060708090a0b0c0d0e0f",
             "WINNOW_E2E_DEVICE_AUTH": "1"]
+        if !lockNetwork { environment.removeValue(forKey: "WINNOW_E2E_NETWORK") }
         guard case let .active(mode) = E2EMode.resolve(environment: environment),
               case let .active(cleanup) = E2EMode.resolve(environment: environment.merging(["WINNOW_E2E_RESET": "1"]) { _, value in value })
         else { throw WalletError.invalidBundle("isolated Debug test namespace unavailable") }
         addTeardownBlock { cleanup.wipeIfRequested() }
+        mode.defaults.set(BitcoinNetwork.regtest.rawValue, forKey: AppModel.DefaultsKey.network)
         let authenticator = Approved(), keys = InMemoryStoreKeyVault(), spendingKeys = InMemoryKeyStore()
         let model = AppModel(deviceAuthenticator: authenticator, e2e: mode, defaults: makeDefaults(),
             storeKeys: keys, keyStore: spendingKeys)
@@ -86,7 +91,8 @@ final class LightningFundingReadinessTests: XCTestCase {
         let request = try XCTUnwrap(fundingRequests.first)
         let review = try await controller.reviewFunding(request, model: model)
         return Fixture(model: model, controller: controller, engine: engine, wallet: wallet,
-            pool: pool, node: node, peer: peer, review: review, authenticator: authenticator)
+            pool: pool, node: node, peer: peer, counterparty: counterparty, local: local,
+            review: review, authenticator: authenticator)
     }
 
     /// The real model/driver clears engine readiness and blocks on the peer's
@@ -129,6 +135,160 @@ final class LightningFundingReadinessTests: XCTestCase {
     private func assertReadinessRejected(_ operation: Task<Void, Error>, file: StaticString = #filePath, line: UInt = #line) async {
         do { try await operation.value; XCTFail("funding passed an unverified readiness gate", file: file, line: line) }
         catch { XCTAssertEqual(error as? LightningError, .invalidState, file: file, line: line) }
+    }
+
+    /// Create a funded, initialized channel through the real signature and
+    /// confirmation transitions. No app approval or wallet reservation occurs.
+    private func readyChannel(_ fixture: Fixture) async throws -> LightningEngine.Channel {
+        let request = fixture.review.request
+        let funding = Transaction(version: 2,
+            inputs: [.init(previousOutput: .init(txid: Data(repeating: 22, count: 32), vout: 1),
+                scriptSig: Data(), sequence: .max, witness: [Data([1])])],
+            outputs: [.init(value: Int64(request.amountSat), scriptPubKey: request.scriptPubKey)], locktime: 0)
+        try await fixture.engine.provideFunding(temporaryID: request.temporaryID, peer: fixture.peer, transaction: funding, output: 0)
+        try await deliver(34, from: fixture.engine, peer: fixture.peer, to: fixture.counterparty, senderID: fixture.local)
+        try await deliver(35, from: fixture.counterparty, peer: fixture.local, to: fixture.engine, senderID: fixture.peer)
+        let channels = await fixture.engine.channels()
+        let channel = try XCTUnwrap(channels.first)
+        for (engine, peer) in [(fixture.engine, fixture.peer), (fixture.counterparty, fixture.local)] {
+            _ = try await engine.fundingConfirmed(channelID: channel.id, peer: peer, transaction: funding, confirmations: 3)
+        }
+        try await deliver(36, from: fixture.engine, peer: fixture.peer, to: fixture.counterparty, senderID: fixture.local)
+        try await deliver(36, from: fixture.counterparty, peer: fixture.local, to: fixture.engine, senderID: fixture.peer)
+        let ready = await fixture.engine.channels()
+        let result = try XCTUnwrap(ready.first)
+        XCTAssertEqual(result.phase, .ready)
+        XCTAssertNotNil(result.signedCommitment)
+        await assertUnreserved(fixture)
+        return result
+    }
+    private func deliver(_ type: UInt16, from sender: LightningEngine, peer: Data,
+                         to recipient: LightningEngine, senderID: Data) async throws {
+        let pending = try await sender.pendingMessages(peer: peer)
+        let message = try XCTUnwrap(pending.first { $0.message.type == type })
+        _ = try await recipient.receive(peer: senderID, message: message.message)
+    }
+    private func startCloseReview(_ fixture: Fixture, channel: LightningEngine.Channel,
+                                 completed: XCTestExpectation? = nil) async -> Task<LightningAppController.CloseReview, Error> {
+        let entered = expectation(description: "close review started while the actual scan is held")
+        let operation = Task {
+            entered.fulfill()
+            defer { if fixture.model.status.syncing { completed?.fulfill() } }
+            return try await fixture.controller.reviewClose(channel, force: false, model: fixture.model)
+        }
+        await fulfillment(of: [entered], timeout: 2)
+        return operation
+    }
+    private func assertCloseUnchanged(_ fixture: Fixture, channel: LightningEngine.Channel,
+                                      file: StaticString = #filePath, line: UInt = #line) async {
+        let channels = await fixture.engine.channels()
+        XCTAssertEqual(channels.count, 1, file: file, line: line)
+        XCTAssertEqual(channels.first?.id, channel.id, file: file, line: line)
+        XCTAssertEqual(channels.first?.phase, .ready, file: file, line: line)
+        XCTAssertEqual(channels.first?.signedCommitment, channel.signedCommitment, file: file, line: line)
+        XCTAssertEqual(fixture.authenticator.calls, 0, "a review cannot authenticate a close", file: file, line: line)
+        await assertUnreserved(fixture, file: file, line: line)
+    }
+    private func assertCloseRejected(_ operation: Task<LightningAppController.CloseReview, Error>,
+                                     file: StaticString = #filePath, line: UInt = #line) async {
+        do { _ = try await operation.value; XCTFail("close review passed an unverified readiness gate", file: file, line: line) }
+        catch { XCTAssertEqual(error as? LightningError, .invalidState, file: file, line: line) }
+    }
+
+    func testCloseReviewWaitsForActualVerifiedScanWithoutClosingOrApproving() async throws {
+        let fixture = try await makeFixture(), channel = try await readyChannel(fixture)
+        let scan = try await holdScan(fixture)
+        let completed = expectation(description: "review must not complete or reject before verified scan")
+        completed.isInverted = true
+        let operation = await startCloseReview(fixture, channel: channel, completed: completed)
+        await fulfillment(of: [completed], timeout: 0.2)
+        await assertCloseUnchanged(fixture, channel: channel)
+        try await releaseScan(fixture, scan: scan)
+        let review: LightningAppController.CloseReview
+        do { review = try await operation.value }
+        catch { XCTFail("close review rejected after actual verified scan: \(error)"); return }
+        XCTAssertEqual(review.channel.id, channel.id)
+        XCTAssertFalse(review.force)
+        XCTAssertGreaterThan(review.feeSat, 0)
+        XCTAssertEqual(try AddressDecoder.scriptPubKey(for: review.address, network: .regtest), review.destination)
+        await assertCloseUnchanged(fixture, channel: channel)
+        let outbox = try await fixture.engine.pendingMessages(peer: fixture.peer)
+        XCTAssertFalse(outbox.contains { [38, 39].contains($0.message.type) }, "readiness may not initiate a close")
+    }
+
+    func testCancelledCloseReviewDuringActualScanCannotProduceApproval() async throws {
+        let fixture = try await makeFixture(), channel = try await readyChannel(fixture)
+        let scan = try await holdScan(fixture), operation = await startCloseReview(fixture, channel: channel)
+        operation.cancel()
+        do { _ = try await operation.value; XCTFail("cancelled close review completed") } catch is CancellationError {}
+        try await releaseScan(fixture, scan: scan)
+        await assertCloseUnchanged(fixture, channel: channel)
+    }
+
+    func testStoppedGenerationDuringActualScanCannotPublishOldCloseReview() async throws {
+        let fixture = try await makeFixture(), channel = try await readyChannel(fixture)
+        let scan = try await holdScan(fixture), operation = await startCloseReview(fixture, channel: channel)
+        await fixture.controller.stop()
+        do { _ = try await operation.value; XCTFail("stale generation produced close review") } catch is CancellationError {}
+        try await fixture.node.send(.headers([]))
+        let request = await fixture.node.nextMessage(command: "getheaders")
+        _ = try XCTUnwrap(request)
+        try await fixture.node.send(.headers([]))
+        await scan.value
+        XCTAssertNotNil(fixture.model.status.lastSyncError)
+        await assertCloseUnchanged(fixture, channel: channel)
+    }
+
+    func testNetworkSwitchDuringActualScanCannotPublishOldCloseReview() async throws {
+        let fixture = try await makeFixture(lockNetwork: false), channel = try await readyChannel(fixture)
+        let scan = try await holdScan(fixture), operation = await startCloseReview(fixture, channel: channel)
+        await fixture.model.switchNetwork(to: .signet)
+        await scan.value
+        XCTAssertEqual(fixture.model.network, .signet, "exercise the actual network switch rather than a test setter")
+        do { _ = try await operation.value; XCTFail("old network produced close review") } catch is CancellationError {}
+        await assertCloseUnchanged(fixture, channel: channel)
+    }
+
+    func testFailedActualScanRejectsCloseReviewWithoutClosing() async throws {
+        let fixture = try await makeFixture(), channel = try await readyChannel(fixture)
+        let scan = try await holdScan(fixture), operation = await startCloseReview(fixture, channel: channel)
+        await fixture.pool.stop()
+        await scan.value
+        XCTAssertNotNil(fixture.model.status.lastSyncError)
+        await assertCloseRejected(operation)
+        await assertCloseUnchanged(fixture, channel: channel)
+    }
+
+    func testNoActiveScanAndIncompleteChainRejectCloseReviewWithoutStartingScan() async throws {
+        let fixture = try await makeFixture(), channel = try await readyChannel(fixture)
+        await fixture.engine.chainDisconnected()
+        XCTAssertFalse(fixture.model.status.syncing)
+        let operation = await startCloseReview(fixture, channel: channel)
+        await assertCloseRejected(operation)
+        let requests = await fixture.node.receivedMessages.filter { $0.command == "getheaders" }
+        XCTAssertTrue(requests.isEmpty, "review cannot start an unrequested scan")
+        await assertCloseUnchanged(fixture, channel: channel)
+    }
+
+    func testDisconnectedPeerRejectsCloseReviewAfterActualScanCompletes() async throws {
+        let fixture = try await makeFixture(), channel = try await readyChannel(fixture)
+        let scan = try await holdScan(fixture), operation = await startCloseReview(fixture, channel: channel)
+        await fixture.engine.peerDisconnected(fixture.peer)
+        try await releaseScan(fixture, scan: scan)
+        await assertCloseRejected(operation)
+        await assertCloseUnchanged(fixture, channel: channel)
+    }
+
+    func testStalledActualScanKeepsOriginalReadinessDeadlineWithoutClosing() async throws {
+        let fixture = try await makeFixture(), channel = try await readyChannel(fixture)
+        let scan = try await holdScan(fixture), start = ContinuousClock.now
+        let operation = await startCloseReview(fixture, channel: channel)
+        await assertCloseRejected(operation)
+        XCTAssertGreaterThanOrEqual(start.duration(to: ContinuousClock.now), .seconds(9))
+        XCTAssertLessThan(start.duration(to: ContinuousClock.now), .seconds(12))
+        XCTAssertTrue(fixture.model.status.syncing)
+        try await releaseScan(fixture, scan: scan)
+        await assertCloseUnchanged(fixture, channel: channel)
     }
 
     func testApprovalWaitsForTheActualScanThenSignsTheReviewedFundingOnce() async throws {

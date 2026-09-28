@@ -62,7 +62,7 @@ extension LightningAppController {
             try await refresh()
         }
     }
-    struct CloseReview {
+    struct CloseReview: Sendable {
         let channel: LightningEngine.Channel
         let force: Bool
         let address: String
@@ -70,18 +70,62 @@ extension LightningAppController {
         let feeSat: UInt64
     }
     func reviewClose(_ channel: LightningEngine.Channel, force: Bool, model: AppModel) async throws -> CloseReview {
-        try requireNetwork(model)
-        guard let engine, let wallet = model.wallet else { throw LightningError.invalidState }
-        if force { return CloseReview(channel: channel, force: true, address: "", destination: Data(), feeSat: 0) }
-        model.e2e?.journal("lightning.closeReviewStarted")
-        let address = try await wallet.freshReceiveAddress()
-        model.e2e?.journal("lightning.closeDestinationPersisted")
-        let destination = try AddressDecoder.scriptPubKey(for: address, network: network)
-        let rate = await model.resolvedFeeRate(priority: .medium, override: nil)
-        let fee = try await engine.estimatedClosingFee(channelID: channel.id, peer: channel.peer,
-            destination: destination, feeRateSatPerVByte: rate)
-        model.e2e?.journal("lightning.closeReviewReady", fields: ["feeSat": String(fee)])
-        return CloseReview(channel: channel, force: false, address: address, destination: destination, feeSat: fee)
+        let epoch = generation
+        var stage = "context"
+        do {
+            try Task.checkCancellation()
+            try requireNetwork(model, generation: epoch)
+            guard let engine, let wallet = model.wallet else { throw LightningError.invalidState }
+            if force { return CloseReview(channel: channel, force: true, address: "", destination: Data(), feeSat: 0) }
+            model.e2e?.journal("lightning.closeReviewStarted")
+            stage = "receiveAddress"
+            let address = try await wallet.freshReceiveAddress()
+            try Task.checkCancellation()
+            try requireNetwork(model, generation: epoch)
+            model.e2e?.journal("lightning.closeDestinationPersisted")
+            let destination = try AddressDecoder.scriptPubKey(for: address, network: network)
+            stage = "feeRate"
+            let rate = await model.resolvedFeeRate(priority: .medium, override: nil)
+            try Task.checkCancellation()
+            try requireNetwork(model, generation: epoch)
+            stage = "closingFee"
+            let fee = try await currentClosingFee(channel, engine: engine, destination: destination,
+                rate: rate, model: model, generation: epoch)
+            try Task.checkCancellation()
+            try requireNetwork(model, generation: epoch)
+            model.e2e?.journal("lightning.closeReviewReady", fields: ["feeSat": String(fee)])
+            return CloseReview(channel: channel, force: false, address: address, destination: destination, feeSat: fee)
+        } catch {
+            model.e2e?.journal("lightning.closeReviewRejected", fields: ["stage": stage,
+                "errorType": String(reflecting: type(of: error)), "error": String(describing: error),
+                "syncing": String(model.status.syncing), "scanFailed": String(model.status.lastSyncError != nil)])
+            throw error
+        }
+    }
+    private func currentClosingFee(_ channel: LightningEngine.Channel, engine: LightningEngine,
+                                   destination: Data, rate: Double, model: AppModel,
+                                   generation epoch: UInt64) async throws -> UInt64 {
+        let deadline = ContinuousClock.now + .seconds(10)
+        while true {
+            try await awaitChannelScan(model: model, generation: epoch, deadline: deadline, operation: "closeReview")
+            guard ContinuousClock.now < deadline else { throw LightningError.invalidState }
+            guard try await channelReady(engine, peer: channel.peer, model: model,
+                                         generation: epoch, operation: "closeReview") else { continue }
+            do {
+                let fee = try await engine.estimatedClosingFee(channelID: channel.id, peer: channel.peer,
+                    destination: destination, feeRateSatPerVByte: rate)
+                try Task.checkCancellation()
+                try requireNetwork(model, generation: epoch)
+                guard !model.status.syncing else { continue }
+                return fee
+            } catch LightningError.invalidState {
+                try Task.checkCancellation()
+                try requireNetwork(model, generation: epoch)
+                // Only repeat this read-only quote if an actual new scan began
+                // during its actor await, within the same readiness deadline.
+                guard model.status.syncing else { throw LightningError.invalidState }
+            }
+        }
     }
     func close(_ review: CloseReview, model: AppModel) async throws {
         try await model.exclusively(.spending) {
