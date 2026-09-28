@@ -65,6 +65,34 @@ def defer_encryption_questionnaire(project):
     project.write_text(updated)
 
 
+def check_supply_chain(directory, ipa, source, driver_source):
+    repository = f'https://github.com/{REPOSITORY}'
+    spdx = json.loads((directory / 'winnow.spdx.json').read_text())
+    root_packages = [item for item in spdx['packages'] if item['SPDXID'] == 'SPDXRef-Package-winnow']
+    assert len(root_packages) == 1, 'SBOM must identify exactly one app source package'
+    assert root_packages[0]['downloadLocation'] == repository, 'SBOM source repository mismatch'
+    assert root_packages[0]['versionInfo'] == source, 'SBOM source commit mismatch'
+    assert spdx['documentNamespace'] == f'{repository}/sbom/{source}', 'SBOM source namespace mismatch'
+    provenance = json.loads((directory / 'winnow-build-provenance.json').read_text())
+    expected_subject = dict(name=ipa.name, digest=dict(sha256=hashlib.sha256(ipa.read_bytes()).hexdigest()))
+    assert provenance['subject'] == [expected_subject], 'provenance package digest mismatch'
+    predicate = provenance['predicate']
+    sources = [item for item in predicate['buildDefinition']['resolvedDependencies'] if item['uri'].startswith('git+')]
+    assert sources == [dict(uri=f'git+{repository}.git', digest=dict(sha1=source))], 'provenance source repository or commit mismatch'
+    expected_builder = f'{repository}/blob/{driver_source}/scripts/release-lightning'
+    assert predicate['runDetails']['builder']['id'] == expected_builder, 'provenance release tooling mismatch'
+    assert predicate['runDetails']['metadata']['invocationId'] == source, 'provenance invocation source mismatch'
+
+
+def generate_supply_chain(destination, ipa, source, driver_source, run):
+    directory = destination / 'supply-chain'
+    run('provenance', [str(DRIVER_ROOT / 'scripts/generate-supply-chain-metadata'),
+                      '--output-dir', str(directory), '--source-repository', f'https://github.com/{REPOSITORY}',
+                      '--subject', str(ipa), '--subject-name', ipa.name,
+                      '--builder-id', f'https://github.com/{REPOSITORY}/blob/{driver_source}/scripts/release-lightning'])
+    check_supply_chain(directory, ipa, source, driver_source)
+
+
 def main():
     global ROOT
     parser = argparse.ArgumentParser()
@@ -159,9 +187,7 @@ def main():
                    '-exportPath', str(exported), *signing])
     ipa = exported / 'WinnowApp.ipa'
     run('ipa-policy', [str(DRIVER_ROOT / 'scripts/verify-exported-ipa'), str(ipa)])
-    run('provenance', ['scripts/generate-supply-chain-metadata', '--output-dir', str(destination / 'supply-chain'),
-                      '--subject', str(ipa), '--subject-name', ipa.name,
-                      '--builder-id', f'https://github.com/{REPOSITORY}/blob/{driver_source}/scripts/release-lightning'])
+    generate_supply_chain(destination, ipa, args.commit, driver_source, run)
     receipt = dict(source=args.commit, ci_run=green['databaseId'], bundle=BUNDLE, version=args.version, build=args.build,
                    ipa_sha256=hashlib.sha256(ipa.read_bytes()).hexdigest(),
                    evidence_sha256=hashlib.sha256(args.evidence.read_bytes()).hexdigest(), encryption=encryption,
@@ -176,6 +202,7 @@ def main():
     check_evidence(args.evidence.resolve(), args.commit, allow_pending_encryption=args.upload_only)
     run('upload-integrity', ['shasum', '-a', '256', '-c', str(ipa) + '.verified.sha256'])
     assert hashlib.sha256(ipa.read_bytes()).hexdigest() == receipt['ipa_sha256'], 'package changed after verification'
+    check_supply_chain(destination / 'supply-chain', ipa, args.commit, driver_source)
     # altool requires this exact filename, including when CI supplied AuthKey.p8.
     with tempfile.TemporaryDirectory(prefix='winnow-lightning-upload-') as keys:
         alias = Path(keys) / f'AuthKey_{key_id}.p8'

@@ -43,6 +43,7 @@ jobs:
       - name: Research release evidence and signing policy tests
         run: |
           python3 -m unittest discover -s scripts/tests -p test_lightning_release.py
+          python3 -m unittest discover -s scripts/tests -p test_supply_chain_metadata.py
           python3 -m unittest discover -s scripts/tests -p test_signed_distribution.py
           python3 -m unittest discover -s scripts/tests -p test_lightning_references.py
           python3 -m unittest discover -s scripts/tests -p test_lightning_peer.py

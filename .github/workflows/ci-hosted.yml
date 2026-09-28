@@ -133,11 +133,13 @@ jobs:
         run: |
           scripts/generate-supply-chain-metadata \
             --output-dir "$CI_RESULTS/supply-chain" \
+            --source-repository "https://github.com/$GITHUB_REPOSITORY" \
             --subject "$CI_RESULTS/production-build/release/winnow-debug" \
             --subject-name winnow-debug \
             --builder-id "https://github.com/${{ github.repository }}/.github/workflows/ci.yml@${{ github.workflow_sha }}"
           scripts/generate-supply-chain-metadata \
             --output-dir "$CI_RESULTS/supply-chain-replay" \
+            --source-repository "https://github.com/$GITHUB_REPOSITORY" \
             --subject "$CI_RESULTS/production-build/release/winnow-debug" \
             --subject-name winnow-debug \
             --builder-id "https://github.com/${{ github.repository }}/.github/workflows/ci.yml@${{ github.workflow_sha }}"
