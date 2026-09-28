@@ -225,8 +225,8 @@ final class LightningAppUITests: XCTestCase {
         try waitConnected(app)
         let capacity = app.textFields["lightningCapacity"]
         XCTAssertTrue(scroll(app, capacity, fullyVisible: true))
-        app.typeInto("lightningCapacity", "100000")
-        XCTAssertTrue(dismissLightningKeyboard(app), app.debugDescription)
+        app.typeInto("lightningCapacity", "100000", dismissKeyboardAfterTyping: false)
+        XCTAssertTrue(dismissLightningKeyboard(app, accessory: "sendKeyboardDone"), app.debugDescription)
         tap(app, "lightningOpen")
         let funding = app.buttons["lightningFundingReview"]
         XCTAssertTrue(scroll(app, funding))
@@ -248,7 +248,7 @@ final class LightningAppUITests: XCTestCase {
         tap(app, "lightningPasteOffer")
         XCTAssertTrue(scroll(app, app.textFields["lightningAmount"], fullyVisible: true))
         app.typeInto("lightningAmount", "5000", dismissKeyboardAfterTyping: false)
-        let keyboardDismissed = dismissAsyncOfferKeyboard(app)
+        let keyboardDismissed = dismissLightningKeyboard(app, accessory: "lightningOfferKeyboardDone")
         if !keyboardDismissed {
             Screenshots.capture(app, "async-payment-keyboard-failure", testCase: self)
             let hierarchy = XCTAttachment(string: app.debugDescription)
@@ -325,8 +325,8 @@ final class LightningAppUITests: XCTestCase {
         try configure(app, profile: XCTUnwrap(setup["sender"] as? [String: Any]))
         try waitConnected(app)
         XCTAssertTrue(scroll(app, app.textFields["lightningCapacity"], fullyVisible: true))
-        app.typeInto("lightningCapacity", "100000")
-        XCTAssertTrue(dismissLightningKeyboard(app), app.debugDescription)
+        app.typeInto("lightningCapacity", "100000", dismissKeyboardAfterTyping: false)
+        XCTAssertTrue(dismissLightningKeyboard(app, accessory: "sendKeyboardDone"), app.debugDescription)
         tap(app, "lightningOpen"); tap(app, "lightningFundingReview")
         XCTAssertTrue(app.navigationBars["Review Lightning"].appears(within: 30), app.debugDescription)
         tap(app, "lightningConfirm")
@@ -446,14 +446,14 @@ final class LightningAppUITests: XCTestCase {
         return scrollUntilExists(app, element, up: up, fullyVisible: fullyVisible,
                                  dragX: 0.03)
     }
-    private func dismissAsyncOfferKeyboard(_ app: XCUIApplication) -> Bool {
+    private func dismissLightningKeyboard(_ app: XCUIApplication, accessory: String) -> Bool {
         let deadline = Date().addingTimeInterval(10)
-        // Clear this sheet's focus; neither the parent capacity accessory nor
-        // the system Hide key establishes that this action was activated.
+        // Each input clears its own focus. System Hide and generic navigation
+        // or swipe fallbacks do not establish that the app action was activated.
         var activated = false
         for _ in 0..<2 {
             guard deadline.timeIntervalSinceNow > 0 else { break }
-            let done = app.buttons["lightningOfferKeyboardDone"]
+            let done = app.buttons[accessory]
             guard done.exists, done.isEnabled, tapVisibleCenter(app, done) else { break }
             activated = true
             let remaining = max(0, deadline.timeIntervalSinceNow)
@@ -462,27 +462,6 @@ final class LightningAppUITests: XCTestCase {
         }
         let remaining = max(0, deadline.timeIntervalSinceNow)
         return activated && app.keyboards.firstMatch.disappears(within: remaining) && app.keyboards.count == 0
-    }
-    private func dismissLightningKeyboard(_ app: XCUIApplication) -> Bool {
-        let deadline = Date().addingTimeInterval(10)
-        // iPad can retain its system keyboard after the numeric popup closes.
-        // Use its explicit dismissal control when it is accessible, otherwise
-        // resolve the app accessory again for a bounded activation.
-        for _ in 0..<2 {
-            if app.keyboards.count == 0 { return true }
-            guard deadline.timeIntervalSinceNow > 0 else { return false }
-            let hide = app.keyboards.buttons["Hide keyboard"].firstMatch
-            if hide.exists && hide.isHittable {
-                hide.tap()
-            } else {
-                let done = app.buttons["sendKeyboardDone"]
-                guard done.exists, done.isEnabled, tapVisibleCenter(app, done) else { return false }
-            }
-            let remaining = max(0, deadline.timeIntervalSinceNow)
-            _ = app.keyboards.firstMatch.disappears(within: min(1, remaining))
-        }
-        let remaining = max(0, deadline.timeIntervalSinceNow)
-        return app.keyboards.firstMatch.disappears(within: remaining) && app.keyboards.count == 0
     }
     private func requireFundingReviewConfirmed(_ app: XCUIApplication) {
         let review = app.navigationBars["Review Lightning"]

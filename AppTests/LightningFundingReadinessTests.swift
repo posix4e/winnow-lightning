@@ -240,6 +240,9 @@ final class LightningFundingReadinessTests: XCTestCase {
     }
 
     func testNetworkSwitchDuringActualScanCannotPublishOldCloseReview() async throws {
+        guard LightningResearch.isResearchApp else {
+            throw XCTSkip("Unlocked Lightning network switching applies to the Winnow Lightning research bundle; the normal wallet enables Lightning only in a forced-regtest fixture.")
+        }
         let fixture = try await makeFixture(lockNetwork: false), channel = try await readyChannel(fixture)
         let scan = try await holdScan(fixture), operation = await startCloseReview(fixture, channel: channel)
         await fixture.model.switchNetwork(to: .signet)
