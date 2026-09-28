@@ -173,6 +173,70 @@ class PeerDiagnosticTests(unittest.TestCase):
         state = json.loads((self.root / 'failure-state.json').read_text())
         self.assertEqual(state['reference_channels'], channels)
 
+    def test_filtered_close_events_survive_unrelated_recipient_and_backend_chatter(self):
+        log = self.root / 'cln.log'
+        events = ['DEBUG channeld: peer_in WIRE_CHANNEL_REESTABLISH',
+                  'DEBUG channeld: next_idx_local = 15 next_idx_remote = 15 revocations_received = 14',
+                  'DEBUG channeld: peer_out WIRE_SHUTDOWN',
+                  'DEBUG peer-closingd-chan#1: Waiting for their initial closing fee offer']
+        chatter = 'DEBUG recipient-gossipd: Received channel update\nDEBUG plugin-bcli: getblock completed\n'
+        log.write_text('\n'.join(events) + '\n' + chatter * 100_000)
+        self.assertNotIn('WIRE_SHUTDOWN', self.module['bounded_log_tail'](log))
+        filtered = self.module['bounded_close_tail'](log)
+        self.assertEqual(filtered.splitlines(), events)
+        self.assertNotIn('getblock', filtered)
+        with redirect_stderr(io.StringIO()) as output:
+            self.module['failure_diagnostics'](TimeoutError('closing_signed absent'), Mock(return_value={'channels': []}), self.root)
+        self.assertIn('WIRE_SHUTDOWN', output.getvalue())
+        self.assertIn('Waiting for their initial closing fee offer', output.getvalue())
+
+    def test_filtered_tail_enforces_event_byte_and_physical_line_bounds(self):
+        log = self.root / 'cln.log'
+        long_line = b'WIRE_CLOSING_SIGNED ' + b'x' * 1_000_000 + b'\n'
+        log.write_bytes(long_line + b'final unterminated line')
+        lines = list(self.module['bounded_log_lines'](log))
+        self.assertEqual(len(lines), 2)
+        self.assertLessEqual(len(lines[0]), 4096 + len(b' [line clipped]'))
+        self.assertTrue(lines[0].endswith(b' [line clipped]'))
+        self.assertEqual(lines[1], b'final unterminated line')
+        log.write_bytes(b'\n'.join((f'{index}: WIRE_REVOKE_AND_ACK '.encode() + ('\u2603' * 1000).encode() + b'\xff')
+                                  for index in range(300)) + b'\n299: WIRE_CLOSING_SIGNED newest\n')
+        for maximum in (32_768, 1024, 1):
+            with self.subTest(maximum=maximum):
+                tail = self.module['bounded_close_tail'](log, maximum)
+                self.assertLessEqual(len(tail.encode()), maximum)
+                self.assertLessEqual(len(tail.splitlines()), 160)
+        self.assertIn('WIRE_CLOSING_SIGNED newest', self.module['bounded_close_tail'](log))
+        self.assertFalse(any(line.startswith('0: ') for line in self.module['bounded_close_tail'](log).splitlines()))
+        log.write_text(''.join(f'{index}: WIRE_REVOKE_AND_ACK\n' for index in range(300)) + 'WIRE_CLOSING_SIGNED newest\n')
+        events = self.module['bounded_close_tail'](log).splitlines()
+        self.assertEqual(len(events), 160)
+        self.assertEqual(events[0], '141: WIRE_REVOKE_AND_ACK')
+        self.assertEqual(events[-1], 'WIRE_CLOSING_SIGNED newest')
+        for maximum in (0, -1):
+            with self.assertRaises(ValueError):
+                self.module['bounded_close_tail'](log, maximum)
+
+    def test_filtered_diagnostic_read_error_preserves_original_receive_timeout(self):
+        peer = self.peer()
+        peer.selector.select.return_value = []
+        diagnostics = self.module['failure_diagnostics']
+        original = None
+        output = io.StringIO()
+        with patch.dict(diagnostics.__globals__, bounded_close_tail=Mock(side_effect=OSError('daemon log unreadable'))), redirect_stderr(output):
+            with self.assertRaises(TimeoutError) as raised:
+                try:
+                    peer.call('receive')
+                except TimeoutError as error:
+                    original = error
+                    diagnostics(error, Mock(return_value={'channels': []}), self.root)
+                    raise
+        self.assertIs(raised.exception, original)
+        peer.selector.select.assert_called_once_with(timeout=60)
+        self.assertIn('daemon log unreadable', output.getvalue())
+        saved = json.loads((self.root / 'failure-state.json').read_text())
+        self.assertIn('Swift peer did not complete a protocol operation', saved['failure'])
+
 
 if __name__ == '__main__':
     unittest.main()

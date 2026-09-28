@@ -18,6 +18,7 @@ import sys
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
+from collections import deque
 
 ROOT = Path(__file__).resolve().parent.parent
 CLN_COMMIT = '6f741afc395c66d200429ea477d29df4d974748d'
@@ -271,10 +272,38 @@ def bounded_log_tail(path, maximum=32_768):
     return '\n'.join(data.decode(errors='replace').splitlines()[-160:])
 
 
+def bounded_log_lines(path):
+    with path.open('rb') as stream:
+        while chunk := stream.readline(4096):
+            first = chunk.rstrip(b'\r\n')
+            clipped = len(chunk) == 4096 and not chunk.endswith(b'\n')
+            while chunk and not chunk.endswith(b'\n'):
+                chunk = stream.readline(4096)
+            yield first + (b' [line clipped]' if clipped else b'')
+
+
+def bounded_close_tail(path, maximum=32_768):
+    if maximum <= 0:
+        raise ValueError('Diagnostic tail bound must be positive')
+    markers = (b'WIRE_SHUTDOWN', b'WIRE_CLOSING_', b'WIRE_CHANNEL_REESTABLISH',
+               b'WIRE_REVOKE_AND_ACK', b'WIRE_COMMITMENT_SIGNED', b'-closingd-',
+               b'CLOSINGD_', b'CHANNELD_SHUTTING_DOWN', b'shutdown_complete',
+               b'revocations_received', b'next_idx_', b'next_revocation_number', b'Got reestablish')
+    events = deque(maxlen=160)
+    for line in bounded_log_lines(path):
+        if any(marker in line for marker in markers):
+            events.append(line)
+    encoded = b'\n'.join(events).decode(errors='replace').encode()
+    return encoded[-maximum:].decode(errors='ignore')
+
+
 def failure_diagnostics(error, ln, evidence):
     state = dict(failure=repr(error), reference_channels=diagnostic_call(lambda: ln('listpeerchannels')))
     (evidence / 'failure-state.json').write_text(json.dumps(state, indent=2) + '\n')
     print('Stock-peer failure state: ' + json.dumps(state, sort_keys=True)[:32_768], file=sys.stderr)
+    for name in ('cln.log', 'recipient-cln.log'):
+        events = diagnostic_call(lambda: bounded_close_tail(evidence / name))
+        print(f'Stock-peer closing/reestablishment/revocation events {name}:\n{events}', file=sys.stderr)
     for name in ('swift-protocol.jsonl', 'swift-peer.log', 'cln.log', 'recipient-cln.log', 'bitcoin.log'):
         tail = diagnostic_call(lambda: bounded_log_tail(evidence / name))
         print(f'Stock-peer diagnostic tail {name}:\n{tail}', file=sys.stderr)
