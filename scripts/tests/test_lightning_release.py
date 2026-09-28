@@ -8,12 +8,31 @@ import tempfile
 import unittest
 import subprocess
 import sys
+import ast
+from types import SimpleNamespace
 
 RELEASE = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'release-lightning'))
 SOURCE = 'a' * 40
 
 
 class LightningReleaseTests(unittest.TestCase):
+    def test_pinned_ci_selects_exact_green_run_even_when_another_run_is_newer(self):
+        script = Path(__file__).resolve().parents[1] / 'release-lightning'
+        main = next(node for node in ast.parse(script.read_text()).body if isinstance(node, ast.FunctionDef) and node.name == 'main')
+        selection = next(node.value for node in main.body if isinstance(node, ast.Assign)
+                         and any(isinstance(target, ast.Name) and target.id == 'green' for target in node.targets))
+        expression = compile(ast.Expression(selection), str(script), 'eval')
+        runs = [
+            dict(databaseId=102, headSha=SOURCE, status='completed', conclusion='success'),
+            dict(databaseId=101, headSha=SOURCE, status='completed', conclusion='success'),
+            dict(databaseId=100, headSha=SOURCE, status='completed', conclusion='failure'),
+            dict(databaseId=99, headSha='b' * 40, status='completed', conclusion='success'),
+        ]
+        for requested, expected in [(101, 101), (102, 102), (None, 102), (100, None), (99, None), (103, None)]:
+            with self.subTest(requested=requested):
+                selected = eval(expression, {'runs': runs, 'args': SimpleNamespace(commit=SOURCE, ci_run=requested)})
+                self.assertEqual(selected['databaseId'] if selected else None, expected)
+
     def test_optimized_python_cannot_disable_release_validation(self):
         script = Path(__file__).resolve().parents[1] / 'release-lightning'
         result = subprocess.run([sys.executable, '-O', str(script), '--help'], text=True, capture_output=True)
