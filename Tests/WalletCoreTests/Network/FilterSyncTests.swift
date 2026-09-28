@@ -673,12 +673,22 @@ struct FilterSyncTests {
                                 chain: Array(synthetic.blocks.prefix(nodeTip + 1)))
         try await node.start()
         defer { Task { await node.stop() } }
+        let endpoint = await node.endpoint
         let pool = PeerPool(params: synthetic.params, peerCount: 1,
-                            manualPeers: [await node.endpoint],
+                            manualPeers: [endpoint],
                             peersFileURL: tempFileURL("peers.json"), dialTimeout: .seconds(30))
         await pool.start()
         defer { Task { await pool.stop() } }
-        try #require(await pool.connectedPeers().count == 1, "the filter fixture must complete its handshake")
+        let connected = await pool.connectedPeers().count
+        if connected != 1 {
+            let status = await pool.connectionStatus
+            let activeConnections = await node.activeConnectionCount
+            let clientRelay = await node.clientRelay
+            let commands = await node.receivedMessages.map(\.command).joined(separator: ",")
+            let rejections = await pool.rejectionReasons.map { "\($0.key.description): \($0.value)" }.sorted().joined(separator: " | ")
+            try #require(connected == 1,
+                "the filter fixture must complete its handshake: nodeTip=\(nodeTip), endpoint=\(endpoint.description), activeConnections=\(activeConnections), clientRelay=\(String(describing: clientRelay)), commands=[\(commands)], connected=\(status.connected), target=\(status.target), dialing=\(status.dialing), attempts=\(status.attempts), exhausted=\(status.exhausted), rejections=[\(rejections)]")
+        }
         let chain = try HeaderChain(params: synthetic.params)
         let sync = try FilterSync(pool: pool, chain: chain, startHeight: 999,
                                   storageURL: progressFile, requiredCheckpointPeers: 1)

@@ -65,10 +65,14 @@ final class LightningAppUITests: XCTestCase {
         }, app.debugDescription)
         XCTAssertFalse(app.staticTexts["lightningLiquidityError"].exists, app.debugDescription)
         XCTAssertTrue(app.staticTexts["lightningSetupFee"].exists, app.debugDescription)
-        XCTAssertTrue(app.buttons["lightningApproveSetupFee"].exists)
+        let setupFee = app.staticTexts["lightningSetupFee"].label
+        // Form review rows below the viewport materialize after scrolling.
+        let approval = app.buttons["lightningApproveSetupFee"]
+        XCTAssertTrue(scroll(app, approval, fullyVisible: true), app.debugDescription)
+        XCTAssertTrue(approval.isEnabled, app.debugDescription)
         XCTAssertFalse(app.staticTexts["lightningSetupInvoice"].exists, "Unapproved quote must not expose a payable invoice")
         Screenshots.capture(app, "live-mainnet-unpaid-quote", testCase: self)
-        print("LIVE_MAINNET_QUOTE=\(app.staticTexts["lightningSetupFee"].label)")
+        print("LIVE_MAINNET_QUOTE=\(setupFee)")
         print("LIVE_MAINNET_FINANCIAL_ACTIONS=none")
         app.navigationBars["Set up receiving"].buttons.firstMatch.tap()
         app.buttons["Done"].tap()
