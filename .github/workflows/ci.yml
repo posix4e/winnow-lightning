@@ -112,6 +112,7 @@ jobs:
             -only-testing:WinnowAppTests/LightningAppTests \
             -only-testing:WinnowAppTests/LightningNetworkTests \
             -only-testing:WinnowAppTests/LightningPreparationTests \
+            -only-testing:WinnowAppTests/LightningFundingReadinessTests \
             -only-testing:WinnowAppTests/LightningReceivingTests \
             -only-testing:WinnowAppTests/LightningRoadmapTests \
             -only-testing:WinnowAppTests/BackgroundSyncTests \

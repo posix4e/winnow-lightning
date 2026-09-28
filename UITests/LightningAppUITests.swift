@@ -311,7 +311,10 @@ final class LightningAppUITests: XCTestCase {
         XCTAssertTrue(scroll(app, app.textFields["lightningCapacity"], fullyVisible: true))
         app.typeInto("lightningCapacity", "100000")
         XCTAssertTrue(dismissLightningKeyboard(app), app.debugDescription)
-        tap(app, "lightningOpen"); tap(app, "lightningFundingReview"); tap(app, "lightningConfirm")
+        tap(app, "lightningOpen"); tap(app, "lightningFundingReview")
+        XCTAssertTrue(app.navigationBars["Review Lightning"].appears(within: 30), app.debugDescription)
+        tap(app, "lightningConfirm")
+        requireFundingReviewConfirmed(app)
         _ = try rpc("confirm_funding")
         XCTAssertTrue(poll(timeout: verifiedChainTimeout, interval: 1, "invoice channel verified") {
             app.staticTexts["lightningChannelPhase"].label.contains("ready")
@@ -441,6 +444,26 @@ final class LightningAppUITests: XCTestCase {
         }
         let remaining = max(0, deadline.timeIntervalSinceNow)
         return app.keyboards.firstMatch.disappears(within: remaining) && app.keyboards.count == 0
+    }
+    private func requireFundingReviewConfirmed(_ app: XCUIApplication) {
+        let review = app.navigationBars["Review Lightning"]
+        let error = app.staticTexts["lightningReviewError"]
+        let deadline = Date().addingTimeInterval(30)
+        while review.exists && !error.exists && Date() < deadline {
+            Thread.sleep(forTimeInterval: min(0.2, max(0, deadline.timeIntervalSinceNow)))
+        }
+        // Keep the actual local rejection before a fatal assertion or the
+        // host's mempool wait. A synthesized tap is not successful approval.
+        let errorText = error.exists ? error.label : "Funding review did not close after confirmation."
+        let confirmed = !review.exists && !error.exists
+        if !confirmed {
+            Screenshots.capture(app, "bolt11-funding-confirmation-failure", testCase: self)
+            let hierarchy = XCTAttachment(string: app.debugDescription)
+            hierarchy.name = "bolt11-funding-confirmation-hierarchy.txt"
+            hierarchy.lifetime = .keepAlways
+            add(hierarchy)
+        }
+        XCTAssertTrue(confirmed, errorText)
     }
     private func tapToolbar(_ app: XCUIApplication, _ identifier: String) {
         let button = app.buttons[identifier]

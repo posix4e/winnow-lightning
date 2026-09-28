@@ -45,12 +45,10 @@ extension LightningAppController {
         try await model.exclusively(.spending) {
             try requireNetwork(model)
             let epoch = generation
-            guard let engine, let wallet = model.wallet, try await engine.fundingRequests().contains(review.request) else { throw LightningError.invalidState }
+            _ = try await fundingContext(review, model: model)
             try await model.authenticateSensitiveAction(reason: "Fund this \(network.rawValue) Lightning channel")
             defer { model.keychainAuthentication.revoke() }
-            try Task.checkCancellation()
-            try requireNetwork(model, generation: epoch)
-            guard await engine.isChainCurrent() else { throw LightningError.invalidState }
+            let (engine, wallet) = try await currentFundingContext(review, model: model, generation: epoch)
             let request = review.request, preview = review.preview
             let reservation = try await wallet.reserveChannelFunding(requestID: request.temporaryID.hex, amount: Int64(request.amountSat),
                 scriptPubKey: request.scriptPubKey, feeRateSatPerVByte: preview.feeRateSatPerVByte, chainTip: model.chainTipHeight)
@@ -62,6 +60,71 @@ extension LightningAppController {
             try await supply(submitted, request: request, engine: engine)
             try await refresh()
         }
+    }
+    private func fundingContext(_ review: FundingReview, model: AppModel) async throws -> (LightningEngine, Wallet) {
+        guard let engine, let wallet = model.wallet else { throw fundingReadinessRejected("missingContext", model: model) }
+        guard try await engine.fundingRequests().contains(review.request) else {
+            throw fundingReadinessRejected("requestChanged", model: model)
+        }
+        return (engine, wallet)
+    }
+    private func currentFundingContext(_ review: FundingReview, model: AppModel,
+                                       generation epoch: UInt64) async throws -> (LightningEngine, Wallet) {
+        let deadline = ContinuousClock.now + .seconds(10)
+        while true {
+            try await awaitFundingScan(model: model, generation: epoch, deadline: deadline)
+            let context = try await fundingContext(review, model: model)
+            if try await fundingReady(context.0, peer: review.request.peer, model: model, generation: epoch) {
+                return context
+            }
+            // An actor read yielded to a newly started scan. Repeat only the
+            // readiness reads within this same deadline, never funding itself.
+        }
+    }
+    private func fundingReady(_ engine: LightningEngine, peer: Data, model: AppModel,
+                              generation epoch: UInt64) async throws -> Bool {
+        try Task.checkCancellation()
+        try requireNetwork(model, generation: epoch)
+        guard !model.status.syncing else { return false }
+        guard model.status.lastSyncError == nil else { throw fundingReadinessRejected("scanFailed", model: model) }
+        let current = await engine.isChainCurrent()
+        try Task.checkCancellation()
+        try requireNetwork(model, generation: epoch)
+        guard !model.status.syncing else { return false }
+        guard current else { throw fundingReadinessRejected("chainNotCurrent", model: model) }
+        // This read-only gate requires the peer to be initialized as well.
+        do { _ = try await engine.pendingMessages(peer: peer) }
+        catch LightningError.invalidState {
+            try Task.checkCancellation()
+            try requireNetwork(model, generation: epoch)
+            guard !model.status.syncing else { return false }
+            throw fundingReadinessRejected("peerNotReady", model: model)
+        }
+        try Task.checkCancellation()
+        try requireNetwork(model, generation: epoch)
+        return !model.status.syncing
+    }
+    /// Wait for only a scan already in progress. It still has to finish with
+    /// verified current state; approval never starts or retries a financial act.
+    private func awaitFundingScan(model: AppModel, generation epoch: UInt64,
+                                  deadline: ContinuousClock.Instant) async throws {
+        try Task.checkCancellation()
+        try requireNetwork(model, generation: epoch)
+        guard model.status.syncing else { return }
+        model.e2e?.journal("lightning.fundingScanWait", fields: ["network": network.rawValue])
+        while model.status.syncing {
+            try Task.checkCancellation()
+            try requireNetwork(model, generation: epoch)
+            guard ContinuousClock.now < deadline else { throw fundingReadinessRejected("scanWaitExpired", model: model) }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        guard ContinuousClock.now < deadline else { throw fundingReadinessRejected("scanWaitExpired", model: model) }
+        try Task.checkCancellation()
+        try requireNetwork(model, generation: epoch)
+    }
+    private func fundingReadinessRejected(_ stage: String, model: AppModel) -> LightningError {
+        model.e2e?.journal("lightning.fundingReadinessRejected", fields: ["stage": stage, "network": network.rawValue])
+        return .invalidState
     }
     func resumeSubmittedFunding(model: AppModel) async throws {
         try requireNetwork(model)
