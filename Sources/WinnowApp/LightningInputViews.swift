@@ -93,7 +93,7 @@ struct LightningSendView: View {
                     Button("Done") { dismiss() }.accessibilityIdentifier("lightningSendDone")
                 }
                 ToolbarItem(placement: .keyboard) {
-                    Button("Done") { focusedField = nil }.accessibilityIdentifier("sendKeyboardDone")
+                    Button("Done") { focusedField = nil }.accessibilityIdentifier("lightningOfferKeyboardDone")
                 }
             }
             .sheet(item: $review, onDismiss: {

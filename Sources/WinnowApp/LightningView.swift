@@ -60,8 +60,10 @@ struct LightningView: View {
             }
             .navigationTitle("Lightning")
             .toolbar {
-                ToolbarItem(placement: .keyboard) {
-                    Button("Done") { editingCapacity = false }.accessibilityIdentifier("sendKeyboardDone")
+                if editingCapacity {
+                    ToolbarItem(placement: .keyboard) {
+                        Button("Done") { editingCapacity = false }.accessibilityIdentifier("sendKeyboardDone")
+                    }
                 }
             }
             .disabled(busy)

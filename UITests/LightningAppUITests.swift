@@ -248,7 +248,15 @@ final class LightningAppUITests: XCTestCase {
         tap(app, "lightningPasteOffer")
         XCTAssertTrue(scroll(app, app.textFields["lightningAmount"], fullyVisible: true))
         app.typeInto("lightningAmount", "5000", dismissKeyboardAfterTyping: false)
-        XCTAssertTrue(dismissLightningKeyboard(app), app.debugDescription)
+        let keyboardDismissed = dismissAsyncOfferKeyboard(app)
+        if !keyboardDismissed {
+            Screenshots.capture(app, "async-payment-keyboard-failure", testCase: self)
+            let hierarchy = XCTAttachment(string: app.debugDescription)
+            hierarchy.name = "async-payment-keyboard-failure-hierarchy.txt"
+            hierarchy.lifetime = .keepAlways
+            add(hierarchy)
+        }
+        XCTAssertTrue(keyboardDismissed, app.debugDescription)
         XCTAssertTrue(app.navigationBars["Pay receive offer"].exists,
                       "Keyboard Done must keep the payment input open: \(app.debugDescription)")
         XCTAssertEqual(app.textFields["lightningAmount"].value as? String, "5000")
@@ -437,6 +445,23 @@ final class LightningAppUITests: XCTestCase {
         // On iPad the modal form is centered within the wider app surface.
         return scrollUntilExists(app, element, up: up, fullyVisible: fullyVisible,
                                  dragX: 0.03)
+    }
+    private func dismissAsyncOfferKeyboard(_ app: XCUIApplication) -> Bool {
+        let deadline = Date().addingTimeInterval(10)
+        // Clear this sheet's focus; neither the parent capacity accessory nor
+        // the system Hide key establishes that this action was activated.
+        var activated = false
+        for _ in 0..<2 {
+            guard deadline.timeIntervalSinceNow > 0 else { break }
+            let done = app.buttons["lightningOfferKeyboardDone"]
+            guard done.exists, done.isEnabled, tapVisibleCenter(app, done) else { break }
+            activated = true
+            let remaining = max(0, deadline.timeIntervalSinceNow)
+            if app.keyboards.firstMatch.disappears(within: min(1, remaining)),
+               app.keyboards.count == 0 { return true }
+        }
+        let remaining = max(0, deadline.timeIntervalSinceNow)
+        return activated && app.keyboards.firstMatch.disappears(within: remaining) && app.keyboards.count == 0
     }
     private func dismissLightningKeyboard(_ app: XCUIApplication) -> Bool {
         let deadline = Date().addingTimeInterval(10)
