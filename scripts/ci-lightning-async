@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Live Swift/stock-LDK regtest async lifecycle, using separately killed processes."""
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -107,7 +108,7 @@ class Fixture:
         self.p2p_port = port() if p2p else None
         listen = [f'-port={self.p2p_port}', '-bind=127.0.0.1', '-listen=1', '-blockfilterindex=1', '-peerblockfilters=1', '-txindex=1'] if p2p else ['-listen=0']
         self.core = subprocess.Popen([str(bitcoin / 'bitcoind'), *self.base, '-server=1', *listen, '-connect=0', '-dnsseed=0', '-discover=0',
-            '-fallbackfee=0.00002', '-rpcbind=127.0.0.1', '-rpcallowip=127.0.0.1'], stdout=log, stderr=log)
+            '-fallbackfee=0.00002', '-rpcbind=127.0.0.1', '-rpcallowip=127.0.0.1', '-debug=rpc'], stdout=log, stderr=log)
         def ready():
             try:
                 return self.rpc('getblockchaininfo')
@@ -124,9 +125,43 @@ class Fixture:
         self.logs.append(handle)
         return handle
 
+    def record_rpc(self, method, start_epoch_ns, start_monotonic_ns, error):
+        end_epoch_ns, end_monotonic_ns = time.time_ns(), time.monotonic_ns()
+        try:
+            record = dict(method=method, start_epoch_ns=start_epoch_ns, end_epoch_ns=end_epoch_ns,
+                          start_monotonic_ns=start_monotonic_ns, end_monotonic_ns=end_monotonic_ns,
+                          elapsed_seconds=(end_monotonic_ns - start_monotonic_ns) / 1_000_000_000,
+                          timeout_seconds=20, exit_code=0 if error is None else getattr(error, 'returncode', None),
+                          timed_out=isinstance(error, subprocess.TimeoutExpired))
+            if error is not None:
+                record['error_type'] = type(error).__name__
+                for name in ('stdout', 'stderr'):
+                    value = getattr(error, name, None) or ''
+                    text = value.decode('utf-8', errors='replace') if isinstance(value, bytes) else str(value)
+                    record['partial_' + name] = text[:4096]
+                    record[name + '_truncated'] = len(text) > 4096
+            # A nonblocking append lock prevents interleaved records without
+            # extending CLI waits. Omit arguments, auth, and successful output.
+            with (self.evidence / 'rpc-events.jsonl').open('a', encoding='utf-8') as file:
+                fcntl.flock(file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                file.write(json.dumps(record, sort_keys=True) + '\n')
+                file.flush()
+        except Exception:
+            # Diagnostics must never replace a CLI failure or change its result.
+            pass
+
     def rpc(self, command, *args):
         arguments = [json.dumps(value) if isinstance(value, bool) else str(value) for value in args]
-        raw = subprocess.check_output([str(self.bitcoin / 'bitcoin-cli'), *self.base, command, *arguments], stderr=subprocess.PIPE, text=True, timeout=20).strip()
+        start_epoch_ns, start_monotonic_ns = time.time_ns(), time.monotonic_ns()
+        error = None
+        try:
+            raw = subprocess.check_output([str(self.bitcoin / 'bitcoin-cli'), *self.base, command, *arguments], stderr=subprocess.PIPE, text=True, timeout=20)
+        except BaseException as failure:
+            error = failure
+            raise
+        finally:
+            self.record_rpc(command, start_epoch_ns, start_monotonic_ns, error)
+        raw = raw.strip()
         try:
             return json.loads(raw)
         except json.JSONDecodeError:

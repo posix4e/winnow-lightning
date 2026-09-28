@@ -89,6 +89,148 @@ class PeerStartupTests(unittest.TestCase):
                 self.assertFalse((evidence / 'opening-receipt.json').exists())
 
 
+class RoutedReferenceStartupTests(unittest.TestCase):
+    SOURCE = '02' + '11' * 32
+    RECIPIENT = '03' + '22' * 32
+    FUNDING = 'ab' * 32
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.module = runpy.run_path(str(SCRIPT))
+        self.failure = self.module['ReferenceStartupFailure']
+        self.funder = (f'DEBUG {self.RECIPIENT}-openingd-chan#2: continuing with funding_txid {self.FUNDING}\n'
+                       f'DEBUG {self.RECIPIENT}-openingd-chan#2: peer_out WIRE_FUNDING_CREATED\n')
+        self.recipient = (f'DEBUG {self.SOURCE}-openingd-chan#1: peer_in WIRE_FUNDING_CREATED\n'
+                          f'DEBUG {self.SOURCE}-chan#1: Got opening_fundee_finish_response\n'
+                          f'DEBUG {self.SOURCE}-chan#1: Watching funding tx {self.FUNDING}\n'
+                          f'DEBUG {self.SOURCE}-channeld-chan#1: init REMOTE: next_idx_local = 1 next_idx_remote = 1\n'
+                          f'INFO {self.SOURCE}-chan#1: Peer transient failure in CHANNELD_AWAITING_LOCKIN: channeld: Owning subdaemon channeld died (0)\n')
+        self.channels = dict(channels=[dict(peer_id=self.RECIPIENT, state='OPENINGD', owner='lightning_openingd',
+            opener='local', status=['Funding channel: create first tx, now waiting for their signature'])])
+        self.write_logs(self.funder, self.recipient)
+        self.error = self.module['subprocess'].TimeoutExpired(['lightning-cli', '-k', 'fundchannel'], 20)
+
+    def write_logs(self, funder, recipient):
+        (self.root / 'cln.log').write_text(funder)
+        (self.root / 'recipient-cln.log').write_text(recipient)
+
+    def invoke(self, ln):
+        return self.module['open_routed_reference_channel'](ln, self.SOURCE, self.RECIPIENT, self.root)
+
+    def test_known_target_only_prebroadcast_failure_retains_original_and_state(self):
+        # The earlier Swift channel is funded; its signatures do not belong to
+        # the new stock routed channel being classified.
+        self.write_logs(f'DEBUG 02other-channeld-chan#1: peer_out WIRE_FUNDING_SIGNED\n' + self.funder, self.recipient)
+        ln = Mock(side_effect=[self.error, self.channels])
+        with patch('sys.platform', 'darwin'), self.assertRaises(self.failure) as caught:
+            self.invoke(ln)
+        self.assertIs(caught.exception.__cause__, self.error)
+        self.assertEqual(ln.call_args_list[0].args, ('-k', 'fundchannel', 'id=' + self.RECIPIENT, 'amount=500000sat', 'announce=true'))
+        self.assertEqual(ln.call_args_list[1].args, ('listpeerchannels',))
+        receipt = json.loads((self.root / 'routed-funding-failure.json').read_text())
+        self.assertTrue(receipt['classified'])
+        self.assertEqual(receipt['funding_txid'], self.FUNDING)
+        self.assertEqual(receipt['reference_channels'], self.channels)
+        self.assertIn('TimeoutExpired', receipt['original_failure'])
+        self.assertIn('unproven', receipt['cause'])
+
+    def test_success_or_non20s_timeout_or_rpc_rejection_are_unchanged(self):
+        result = dict(txid=self.FUNDING)
+        ln = Mock(return_value=result)
+        self.assertIs(self.invoke(ln), result)
+        ln.assert_called_once()
+        for error in (self.module['subprocess'].TimeoutExpired(['lightning-cli'], 30),
+                      self.module['subprocess'].CalledProcessError(1, ['lightning-cli']),
+                      AssertionError('invalid channel signature')):
+            with self.subTest(error=error), patch('sys.platform', 'darwin'):
+                ln = Mock(side_effect=error)
+                with self.assertRaises(type(error)) as caught:
+                    self.invoke(ln)
+                self.assertIs(caught.exception, error)
+                ln.assert_called_once()
+
+    def test_unknown_rejected_or_post_signature_log_remains_fatal(self):
+        mutations = [('', self.recipient), (self.funder, ''),
+            (self.funder, self.recipient.replace('(0)', '(9)')),
+            (self.funder, self.recipient.replace('CHANNELD_AWAITING_LOCKIN', 'CHANNELD_NORMAL')),
+            (self.funder, self.recipient.replace('Got opening_fundee_finish_response', 'other response')),
+            (self.funder, self.recipient.replace(self.SOURCE, '03' + '55' * 32)),
+            (self.funder, self.recipient.replace(self.FUNDING, 'cd' * 32)),
+            (self.funder + f'DEBUG {self.RECIPIENT}-openingd: peer_in WIRE_FUNDING_SIGNED\n', self.recipient),
+            (self.funder, self.recipient + f'DEBUG {self.SOURCE}-channeld: peer_out WIRE_FUNDING_SIGNED\n')]
+        for marker in ('peer_in WIRE_ERROR', '**BROKEN**', 'STATUS_FAIL_HSM_IO', 'sendrawtransaction:', 'sendpsbt.'):
+            mutations.append((self.funder + marker, self.recipient))
+        for funder, recipient in mutations:
+            with self.subTest(funder=funder[-100:], recipient=recipient[-100:]):
+                self.write_logs(funder, recipient)
+                ln = Mock(side_effect=[self.error, self.channels])
+                with patch('sys.platform', 'darwin'), self.assertRaises(type(self.error)) as caught:
+                    self.invoke(ln)
+                self.assertIs(caught.exception, self.error)
+                self.assertFalse(json.loads((self.root / 'routed-funding-failure.json').read_text())['classified'])
+
+    def test_channel_snapshot_must_be_unique_exact_target_waiting_for_signature(self):
+        for change in (dict(state='CHANNELD_NORMAL'), dict(owner='channeld'), dict(opener='remote'),
+                       dict(peer_id=self.SOURCE), dict(funding_txid=self.FUNDING), dict(channel_id='aa' * 32),
+                       dict(status=['Funding broadcast'])):
+            channel = self.channels['channels'][0] | change
+            with self.subTest(change=change), patch('sys.platform', 'darwin'):
+                ln = Mock(side_effect=[self.error, dict(channels=[channel])])
+                with self.assertRaises(type(self.error)) as caught:
+                    self.invoke(ln)
+                self.assertIs(caught.exception, self.error)
+        duplicate = dict(channels=self.channels['channels'] * 2)
+        with patch('sys.platform', 'darwin'), self.assertRaises(type(self.error)):
+            self.invoke(Mock(side_effect=[self.error, duplicate]))
+
+    def test_classified_stock_failure_stops_after_two_fresh_retained_attempts(self):
+        check = self.module['check_peer']
+        directories = []
+        def run(mode, evidence, channel_format='staticRemoteKey', offers=False):
+            directories.append(evidence)
+            (evidence / 'cln.log').write_text(self.funder)
+            (evidence / 'recipient-cln.log').write_text(self.recipient)
+            self.module['open_routed_reference_channel'](Mock(side_effect=[self.error, self.channels]),
+                self.SOURCE, self.RECIPIENT, evidence)
+        evidence = self.root / 'attempts'
+        with patch('sys.platform', 'darwin'), patch.dict(check.__globals__, run_peer=run):
+            with self.assertRaises(self.failure):
+                check('cooperative', evidence)
+        self.assertEqual(directories, [evidence / 'attempt-1', evidence / 'attempt-2'])
+        self.assertFalse((evidence / 'attempt-3').exists())
+        self.assertFalse((evidence / 'opening-receipt.json').exists())
+        history = json.loads((evidence / 'attempts.json').read_text())
+        self.assertEqual([item['result'] for item in history], ['reference-startup-failure'] * 2)
+        for attempt in directories:
+            receipt = json.loads((attempt / 'routed-funding-failure.json').read_text())
+            self.assertTrue(receipt['classified'])
+            self.assertEqual(receipt['reference_channels'], self.channels)
+            self.assertEqual((attempt / 'recipient-cln.log').read_text(), self.recipient)
+
+    def test_other_platform_or_failed_diagnostics_do_not_reclassify_timeout(self):
+        ln = Mock(side_effect=self.error)
+        with patch('sys.platform', 'linux'), self.assertRaises(type(self.error)) as caught:
+            self.invoke(ln)
+        self.assertIs(caught.exception, self.error)
+        ln.assert_called_once()
+        for error in (RuntimeError('RPC unavailable'), {'channels': []}):
+            ln = Mock(side_effect=[self.error, error] if isinstance(error, Exception) else [self.error, error])
+            with patch('sys.platform', 'darwin'), self.assertRaises(type(self.error)) as caught:
+                self.invoke(ln)
+            self.assertIs(caught.exception, self.error)
+        with patch.object(Path, 'read_text', side_effect=OSError('log unavailable')):
+            with patch('sys.platform', 'darwin'), self.assertRaises(type(self.error)) as caught:
+                self.invoke(Mock(side_effect=[self.error, self.channels]))
+            self.assertIs(caught.exception, self.error)
+        with patch.object(Path, 'write_text', side_effect=OSError('disk full')):
+            with patch('sys.platform', 'darwin'), self.assertRaises(type(self.error)) as caught:
+                self.invoke(Mock(side_effect=[self.error, self.channels]))
+            self.assertIs(caught.exception, self.error)
+
+
+
 class PeerDiagnosticTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()

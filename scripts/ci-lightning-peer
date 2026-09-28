@@ -11,6 +11,7 @@ import argparse
 import os
 from pathlib import Path
 import selectors
+import re
 import shutil
 import socket
 import subprocess
@@ -331,6 +332,60 @@ def funding_signature(swift, log):
         raise
 
 
+
+def pending_routed_channel(channels, recipient_peer):
+    pending = [channel for channel in channels.get('channels', []) if channel.get('peer_id') == recipient_peer]
+    if len(pending) != 1:
+        return False
+    channel = pending[0]
+    expected = dict(state='OPENINGD', owner='lightning_openingd', opener='local')
+    if any(channel.get(key) != value for key, value in expected.items()) or any(key in channel for key in ('funding_txid', 'channel_id')):
+        return False
+    return 'Funding channel: create first tx, now waiting for their signature' in channel.get('status', [])
+
+
+def unfunded_routed_startup(funder_log, recipient_log, channels, source_peer, recipient_peer):
+    if not pending_routed_channel(channels, recipient_peer):
+        return None
+    funder = '\n'.join(line for line in funder_log.splitlines() if f' {recipient_peer}-' in line)
+    recipient = '\n'.join(line for line in recipient_log.splitlines() if f' {source_peer}-' in line)
+    required = ('peer_in WIRE_FUNDING_CREATED', 'Got opening_fundee_finish_response',
+                'init REMOTE:', 'Peer transient failure in CHANNELD_AWAITING_LOCKIN: channeld: Owning subdaemon channeld died (0)')
+    if not all(marker in recipient for marker in required) or 'peer_out WIRE_FUNDING_CREATED' not in funder:
+        return None
+    if 'WIRE_FUNDING_SIGNED' in funder + recipient:
+        return None
+    if any(marker in funder_log + recipient_log for marker in ('WIRE_ERROR', '**BROKEN**', 'STATUS_FAIL_', 'sendrawtransaction:', 'sendpsbt.')):
+        return None
+    offered = set(re.findall(r'continuing with funding_txid ([0-9a-f]{64})(?:\s|$)', funder))
+    watched = set(re.findall(r'Watching funding tx ([0-9a-f]{64})(?:\s|$)', recipient))
+    return next(iter(offered)) if len(offered) == 1 and offered == watched else None
+
+
+def open_routed_reference_channel(ln, source_peer, recipient_peer, evidence):
+    try:
+        return ln('-k', 'fundchannel', 'id=' + recipient_peer, 'amount=500000sat', 'announce=true')
+    except subprocess.TimeoutExpired as error:
+        funding_id = None
+        if sys.platform == 'darwin' and error.timeout == 20:
+            try:
+                channels = diagnostic_call(lambda: ln('listpeerchannels'))
+                funding_id = unfunded_routed_startup((evidence / 'cln.log').read_text(),
+                    (evidence / 'recipient-cln.log').read_text(), channels, source_peer, recipient_peer)
+                context = dict(original_failure=repr(error), source_peer=source_peer, recipient_peer=recipient_peer,
+                               funding_txid=funding_id, reference_channels=channels, classified=funding_id is not None,
+                               scope='Disposable routed stock channel before funding_signed/broadcast; prior Swift channel remains in this retained attempt',
+                               cause='Underlying HSM I/O or process-exit cause is unproven')
+                (evidence / 'routed-funding-failure.json').write_text(json.dumps(context, indent=2) + '\n')
+            except Exception as diagnostic_error:
+                funding_id = None
+                print(f'Routed-channel startup classification unavailable: {diagnostic_error!r}', file=sys.stderr)
+        if funding_id is not None:
+            raise ReferenceStartupFailure(f'Stock routed recipient exited before funding_signed for {funding_id}; '
+                                          f'original 20s timeout and state retained in {evidence / "routed-funding-failure.json"}') from error
+        raise
+
+
 def run_peer(close_mode, evidence, channel_format="staticRemoteKey", offers=False):
     cln = Path(os.environ['WINNOW_CLN_DIR']).resolve()
     bitcoin = Path(os.environ['WINNOW_BITCOIN_DIR']).resolve()
@@ -430,7 +485,7 @@ def run_peer(close_mode, evidence, channel_format="staticRemoteKey", offers=Fals
                     deposit = ln('newaddr', 'bech32')['bech32']; rpc('sendtoaddress', deposit, 0.01); rpc('generatetoaddress', 1, address)
                     wait_for(lambda: ln('listfunds')['outputs'])
                     ln('connect', recipient_info['id'], '127.0.0.1', recipient_port)
-                    ln('-k', 'fundchannel', 'id=' + recipient_info['id'], 'amount=500000sat', 'announce=true')
+                    open_routed_reference_channel(ln, info['id'], recipient_info['id'], evidence)
                     rpc('generatetoaddress', 6, address)
                     wait_for(lambda: any(c['state'] == 'CHANNELD_NORMAL' for c in recipient('listpeerchannels')['channels']))
                     wait_for(lambda: ln('listchannels')['channels'])
@@ -655,7 +710,7 @@ def check_peer(close_mode, evidence, channel_format="staticRemoteKey", offers=Fa
             (evidence / 'attempts.json').write_text(json.dumps(attempts, indent=2) + '\n')
             if number == 2:
                 raise
-            print(f'{error}. Retrying once with fresh, unfunded test nodes.', flush=True)
+            print(f'{error}. Retrying once with a fresh disposable fixture; failed attempt retained.', flush=True)
         else:
             attempts.append(dict(attempt=number, result='passed'))
             (evidence / 'attempts.json').write_text(json.dumps(attempts, indent=2) + '\n')

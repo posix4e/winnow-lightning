@@ -226,8 +226,7 @@ final class LightningAppUITests: XCTestCase {
         let capacity = app.textFields["lightningCapacity"]
         XCTAssertTrue(scroll(app, capacity, fullyVisible: true))
         app.typeInto("lightningCapacity", "100000")
-        if app.keyboards.firstMatch.exists { tapToolbar(app, "sendKeyboardDone") }
-        XCTAssertTrue(app.keyboards.firstMatch.disappears(within: 10), app.debugDescription)
+        XCTAssertTrue(dismissLightningKeyboard(app), app.debugDescription)
         tap(app, "lightningOpen")
         let funding = app.buttons["lightningFundingReview"]
         XCTAssertTrue(scroll(app, funding))
@@ -249,10 +248,7 @@ final class LightningAppUITests: XCTestCase {
         tap(app, "lightningPasteOffer")
         XCTAssertTrue(scroll(app, app.textFields["lightningAmount"], fullyVisible: true))
         app.typeInto("lightningAmount", "5000")
-        if app.keyboards.firstMatch.exists {
-            tapToolbar(app, "sendKeyboardDone")
-            XCTAssertTrue(app.keyboards.firstMatch.disappears(within: 10), app.debugDescription)
-        }
+        XCTAssertTrue(dismissLightningKeyboard(app), app.debugDescription)
         tap(app, "lightningReviewPayment")
         XCTAssertTrue(app.navigationBars["Review Lightning"].appears(within: 15), app.debugDescription)
         for row in ["Amount, 5000 sats", "Maximum fee, 50 sats", "Maximum expiry, 2016 blocks"] {
@@ -314,8 +310,7 @@ final class LightningAppUITests: XCTestCase {
         try waitConnected(app)
         XCTAssertTrue(scroll(app, app.textFields["lightningCapacity"], fullyVisible: true))
         app.typeInto("lightningCapacity", "100000")
-        if app.keyboards.firstMatch.exists { tapToolbar(app, "sendKeyboardDone") }
-        XCTAssertTrue(app.keyboards.firstMatch.disappears(within: 10), app.debugDescription)
+        XCTAssertTrue(dismissLightningKeyboard(app), app.debugDescription)
         tap(app, "lightningOpen"); tap(app, "lightningFundingReview"); tap(app, "lightningConfirm")
         _ = try rpc("confirm_funding")
         XCTAssertTrue(poll(timeout: verifiedChainTimeout, interval: 1, "invoice channel verified") {
@@ -431,6 +426,21 @@ final class LightningAppUITests: XCTestCase {
         // On iPad the modal form is centered within the wider app surface.
         return scrollUntilExists(app, element, up: up, fullyVisible: fullyVisible,
                                  dragX: 0.03)
+    }
+    private func dismissLightningKeyboard(_ app: XCUIApplication) -> Bool {
+        let deadline = Date().addingTimeInterval(10)
+        // An iPad keypad popover can consume the first outside tap. Resolve
+        // the app's Done button again before a second bounded activation.
+        for _ in 0..<2 {
+            if app.keyboards.count == 0 { return true }
+            guard deadline.timeIntervalSinceNow > 0 else { return false }
+            let done = app.buttons["sendKeyboardDone"]
+            guard done.exists, done.isEnabled, tapVisibleCenter(app, done) else { return false }
+            let remaining = max(0, deadline.timeIntervalSinceNow)
+            _ = app.keyboards.firstMatch.disappears(within: min(1, remaining))
+        }
+        let remaining = max(0, deadline.timeIntervalSinceNow)
+        return app.keyboards.firstMatch.disappears(within: remaining) && app.keyboards.count == 0
     }
     private func tapToolbar(_ app: XCUIApplication, _ identifier: String) {
         let button = app.buttons[identifier]
