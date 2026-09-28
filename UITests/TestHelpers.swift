@@ -241,8 +241,8 @@ extension XCTestCase {
 }
 
 extension XCUIApplication {
-    /// Types into a field (TextField or TextEditor) and dismisses the
-    /// software keyboard afterwards.
+    /// Types into a field (TextField or TextEditor). Callers that use a
+    /// specific keyboard accessory can dismiss it themselves afterwards.
     ///
     /// A tap that lands while the previous field's keyboard is still on its
     /// way out can leave nothing focused, and typing then fails with
@@ -250,7 +250,7 @@ extension XCUIApplication {
     /// hosted runners, #84). So the tap is repeated until the field has
     /// the keyboard, and dismissal waits for the keyboard to be gone.
     @MainActor
-    func typeInto(_ identifier: String, _ text: String) {
+    func typeInto(_ identifier: String, _ text: String, dismissKeyboardAfterTyping: Bool = true) {
         var field = textFields[identifier]
         if !field.exists { field = textViews[identifier] }
         XCTAssertTrue(field.appears(within: 20), "no text field \(identifier)")
@@ -261,7 +261,7 @@ extension XCUIApplication {
         }
         XCTAssertTrue(focused, "\(identifier) never took keyboard focus")
         field.typeText(text)
-        dismissKeyboard()
+        if dismissKeyboardAfterTyping { dismissKeyboard() }
     }
 
     @MainActor

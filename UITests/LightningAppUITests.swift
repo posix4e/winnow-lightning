@@ -247,8 +247,12 @@ final class LightningAppUITests: XCTestCase {
         tap(app, "lightningSend")
         tap(app, "lightningPasteOffer")
         XCTAssertTrue(scroll(app, app.textFields["lightningAmount"], fullyVisible: true))
-        app.typeInto("lightningAmount", "5000")
+        app.typeInto("lightningAmount", "5000", dismissKeyboardAfterTyping: false)
         XCTAssertTrue(dismissLightningKeyboard(app), app.debugDescription)
+        XCTAssertTrue(app.navigationBars["Pay receive offer"].exists,
+                      "Keyboard Done must keep the payment input open: \(app.debugDescription)")
+        XCTAssertEqual(app.textFields["lightningAmount"].value as? String, "5000")
+        XCTAssertEqual(app.keyboards.count, 0)
         tap(app, "lightningReviewPayment")
         XCTAssertTrue(app.navigationBars["Review Lightning"].appears(within: 15), app.debugDescription)
         for row in ["Amount, 5000 sats", "Maximum fee, 50 sats", "Maximum expiry, 2016 blocks"] {
@@ -432,13 +436,19 @@ final class LightningAppUITests: XCTestCase {
     }
     private func dismissLightningKeyboard(_ app: XCUIApplication) -> Bool {
         let deadline = Date().addingTimeInterval(10)
-        // An iPad keypad popover can consume the first outside tap. Resolve
-        // the app's Done button again before a second bounded activation.
+        // iPad can retain its system keyboard after the numeric popup closes.
+        // Use its explicit dismissal control when it is accessible, otherwise
+        // resolve the app accessory again for a bounded activation.
         for _ in 0..<2 {
             if app.keyboards.count == 0 { return true }
             guard deadline.timeIntervalSinceNow > 0 else { return false }
-            let done = app.buttons["sendKeyboardDone"]
-            guard done.exists, done.isEnabled, tapVisibleCenter(app, done) else { return false }
+            let hide = app.keyboards.buttons["Hide keyboard"].firstMatch
+            if hide.exists && hide.isHittable {
+                hide.tap()
+            } else {
+                let done = app.buttons["sendKeyboardDone"]
+                guard done.exists, done.isEnabled, tapVisibleCenter(app, done) else { return false }
+            }
             let remaining = max(0, deadline.timeIntervalSinceNow)
             _ = app.keyboards.firstMatch.disappears(within: min(1, remaining))
         }

@@ -47,6 +47,7 @@ jobs:
           python3 -m unittest discover -s scripts/tests -p test_lightning_references.py
           python3 -m unittest discover -s scripts/tests -p test_lightning_peer.py
           python3 -m unittest discover -s scripts/tests -p test_ci_lightning_ui.py
+          python3 -m unittest discover -s scripts/tests -p test_lightning_ui_fixture.py
           python3 -m unittest discover -s scripts/tests -p 'test*crap.py'
       - name: Prepare host-only reference tools
         run: |

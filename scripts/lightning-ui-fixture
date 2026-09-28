@@ -93,6 +93,19 @@ class Journey:
         target.write_bytes(Path(client['journal']).read_bytes())
         return self.record(role + '_killed', pid=client['pid'], signal='SIGKILL', running=self.alive(role))
 
+    def export_journals(self, *, preserve_run=False):
+        for role, client in self.clients.items():
+            journal = Path(client['journal'])
+            if not journal.is_file():
+                continue
+            data = journal.read_bytes()
+            (self.evidence / (role + '-story-events.jsonl')).write_bytes(data)
+            if preserve_run:
+                snapshot = self.run + '-' + role + '-story-events.jsonl'
+                (self.evidence / snapshot).write_bytes(data)
+                self.record('client_journal_preserved', run=self.run, role=role,
+                            pid=client['pid'], snapshot=snapshot, sha256=hashlib.sha256(data).hexdigest())
+
     def recipient_channel(self):
         node = self.clients['recipient']['node']
         reference.wait(lambda: node in self.b.call('status')['peers'])
@@ -156,6 +169,9 @@ class Journey:
         return receipt
 
     def invoice_fixture(self):
+        # The previous UI case can fail before kill() snapshots its journal.
+        # Retain that run before the invoice case replaces the registered roles.
+        self.export_journals(preserve_run=True)
         cln = Path(os.environ['WINNOW_CLN_DIR']).resolve()
         peer = __import__('runpy').run_path(str(ROOT / 'scripts/ci-lightning-peer'))
         commit = subprocess.check_output(['git', '-C', str(cln), 'rev-parse', 'HEAD'], text=True).strip()
@@ -297,10 +313,7 @@ def main():
         try:
             # Include the restarted clients and final close review, not only
             # the journal snapshots taken before each intentional crash.
-            for role, client in journey.clients.items():
-                journal = Path(client['journal'])
-                if journal.is_file():
-                    (journey.evidence / (role + '-story-events.jsonl')).write_bytes(journal.read_bytes())
+            journey.export_journals()
         finally:
             __import__('runpy').run_path(str(ROOT / 'scripts/ci-lightning-peer'))['stop'](journey.cln_process)
             journey.fixture.close()
