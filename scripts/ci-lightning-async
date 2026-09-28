@@ -33,6 +33,38 @@ def wait(check, timeout=45):
     raise TimeoutError('Async peer condition did not become true')
 
 
+def record_peer_event(evidence, event, *, role=None, pid=None, command=None, stage=None,
+                      success=None, error_type=None, elapsed_seconds=None):
+    # Observe only: never retain arguments, successful replies or error text.
+    # A failed/nonblocking diagnostic write must not replace the real result.
+    try:
+        fields = dict(role=role, pid=pid, command=command, stage=stage, success=success,
+                      error_type=error_type, elapsed_seconds=elapsed_seconds)
+        record = dict(event=event, epoch_ns=time.time_ns(), monotonic_ns=time.monotonic_ns(),
+                      **{key: value for key, value in fields.items() if value is not None})
+        with (evidence / 'peer-events.jsonl').open('a', encoding='utf-8') as file:
+            fcntl.flock(file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            file.write(json.dumps(record, sort_keys=True) + '\n')
+            file.flush()
+    except Exception:
+        pass
+
+
+def observed_wait(evidence, stage, check, timeout=45):
+    record_peer_event(evidence, 'stage_started', stage=stage)
+    start = time.monotonic_ns()
+    try:
+        result = wait(check, timeout=timeout)
+    except BaseException as error:
+        record_peer_event(evidence, 'stage_failed', stage=stage, success=False,
+                          error_type=type(error).__name__,
+                          elapsed_seconds=(time.monotonic_ns() - start) / 1_000_000_000)
+        raise
+    record_peer_event(evidence, 'stage_completed', stage=stage, success=True,
+                      elapsed_seconds=(time.monotonic_ns() - start) / 1_000_000_000)
+    return result
+
+
 def reconnect_async_recipient(recipient, return_provider, notification_provider):
     recipient.start()
     recipient.call('connect', peer=return_provider.node, address=f'127.0.0.1:{return_provider.initial["port"]}')
@@ -50,7 +82,32 @@ class Peer:
         self.events, self.broadcasts = [], []
         self.start()
 
+    def observe(self, action, operation, command=None):
+        start = time.monotonic_ns()
+        def record(event, **fields):
+            try:
+                log = Path(self.log.name)
+                process = getattr(self, 'process', None)
+                record_peer_event(log.parent, event, role=log.stem,
+                                  pid=process.pid if process is not None else None,
+                                  command=command, **fields)
+            except Exception:
+                pass
+        record(action + '_started')
+        try:
+            result = operation()
+        except BaseException as error:
+            record(action + '_failed', success=False, error_type=type(error).__name__,
+                   elapsed_seconds=(time.monotonic_ns() - start) / 1_000_000_000)
+            raise
+        record(action + '_completed', success=True,
+               elapsed_seconds=(time.monotonic_ns() - start) / 1_000_000_000)
+        return result
+
     def start(self):
+        return self.observe('start', self._start)
+
+    def _start(self):
         self.process = subprocess.Popen(self.command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.log)
         self.selector = selectors.DefaultSelector()
         self.selector.register(self.process.stdout, selectors.EVENT_READ)
@@ -69,6 +126,9 @@ class Peer:
         return json.loads(line)
 
     def call(self, command, **values):
+        return self.observe('command', lambda: self._call(command, **values), command)
+
+    def _call(self, command, **values):
         if self.swift and command == 'height':
             self.command[-1] = values['height']
         self.process.stdin.write(json.dumps(dict(command=command, **values)).encode() + b'\n')
@@ -95,6 +155,9 @@ class Peer:
         return next((item for item in self.events if item.get('event') == kind), None)
 
     def close(self):
+        return self.observe('close', self._close)
+
+    def _close(self):
         if self.process.poll() is None:
             self.process.kill()  # actual abrupt process death, not a logical offline flag
             self.process.wait(timeout=10)
@@ -120,19 +183,26 @@ class Fixture:
             log = self.log('bitcoin')
             self.p2p_port = port() if p2p else None
             listen = [f'-port={self.p2p_port}', '-bind=127.0.0.1', '-listen=1', '-blockfilterindex=1', '-peerblockfilters=1', '-txindex=1'] if p2p else ['-listen=0']
-            self.core = subprocess.Popen([str(bitcoin / 'bitcoind'), *self.base, '-server=1', *listen, '-connect=0', '-dnsseed=0', '-discover=0',
-                '-fallbackfee=0.00002', '-rpcbind=127.0.0.1', '-rpcallowip=127.0.0.1', '-debug=rpc'], stdout=log, stderr=log)
+            command = [str(bitcoin / 'bitcoind'), *self.base, '-server=1', *listen, '-connect=0', '-dnsseed=0', '-discover=0',
+                       '-fallbackfee=0.00002', '-rpcbind=127.0.0.1', '-rpcallowip=127.0.0.1', '-debug=rpc']
+            self.record_core('launch_requested', argv=command, cwd=os.getcwd())
+            self.core = subprocess.Popen(command, stdout=log, stderr=log)
+            self.record_core('launched')
             def ready():
+                self.record_core('startup_poll', poll_change_only=True)
                 try:
                     return self.rpc('getblockchaininfo')
                 except subprocess.CalledProcessError:
                     return False
             wait(ready)
+            self.record_core('startup_ready', snapshot=True)
             self.rpc('createwallet', 'fixture')
             self.address = self.rpc('getnewaddress')
             self.rpc('generatetoaddress', 101, self.address)
             self.chain = bytes.fromhex(self.rpc('getblockhash', 0))[::-1].hex()
-        except BaseException:
+        except BaseException as error:
+            self.record_core('startup_failure', snapshot=True, error_type=type(error).__name__,
+                             error_exit_code=getattr(error, 'returncode', None))
             # The caller cannot own this fixture until construction returns.
             # Clean partial ownership here, including a failed Core launch,
             # and keep the original startup failure even if cleanup fails.
@@ -146,6 +216,37 @@ class Fixture:
         handle = open(self.evidence / f'{name}.log', 'w')
         self.logs.append(handle)
         return handle
+
+    def record_core(self, event, *, poll_change_only=False, snapshot=False, **fields):
+        # Observe only: an exited child does not shorten the existing warm-up
+        # wait, and diagnostics never replace a startup or cleanup failure.
+        try:
+            result = self.core.poll() if self.core is not None else None
+            if poll_change_only and getattr(self, '_last_core_poll', object()) == result:
+                return
+            self._last_core_poll = result
+            record = dict(event=event, epoch_ns=time.time_ns(), monotonic_ns=time.monotonic_ns(),
+                          pid=self.core.pid if self.core is not None else None, poll=result, **fields)
+            if snapshot:
+                files = []
+                truncated = False
+                for directory, folders, names in os.walk(self.root / 'bitcoin'):
+                    folders.sort()
+                    for name in sorted(names):
+                        if len(files) == 128:
+                            truncated = True
+                            break
+                        path = Path(directory) / name
+                        files.append(dict(path=str(path.relative_to(self.root / 'bitcoin')), size=path.stat().st_size))
+                    if truncated:
+                        break
+                record.update(data_files=files, data_files_truncated=truncated)
+            with (self.evidence / 'core-events.jsonl').open('a', encoding='utf-8') as file:
+                fcntl.flock(file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                file.write(json.dumps(record, sort_keys=True) + '\n')
+                file.flush()
+        except Exception:
+            pass
 
     def record_rpc(self, method, start_epoch_ns, start_monotonic_ns, error):
         end_epoch_ns, end_monotonic_ns = time.time_ns(), time.monotonic_ns()
@@ -282,8 +383,8 @@ class Fixture:
         a.close(); b.close()
         a.start(); b.start()
         a.call('connect', peer=b.node, address=f'127.0.0.1:{b.initial["port"]}')
-        wait(lambda: any(c['peer'] == b.node and c['usable'] for c in a.call('status')['channels']))
-        wait(lambda: any(c['peer'] == a.node and c['usable'] for c in b.call('status')['channels']))
+        observed_wait(self.evidence, 'provider_a_reestablished', lambda: any(c['peer'] == b.node and c['usable'] for c in a.call('status')['channels']))
+        observed_wait(self.evidence, 'provider_b_reestablished', lambda: any(c['peer'] == a.node and c['usable'] for c in b.call('status')['channels']))
         print('Both LDK providers restored held channels and offline messages', flush=True)
 
     def held_notification(self, provider, recipient):
@@ -307,7 +408,7 @@ class Fixture:
                 if cache[raw]:
                     return hashlib.sha256(bytes.fromhex(raw)).hexdigest()
             return None
-        return wait(persisted)
+        return observed_wait(self.evidence, 'held_notification_persisted', persisted)
 
     def close(self):
         try:
@@ -315,16 +416,25 @@ class Fixture:
                 peer.close()
         finally:
             try:
+                self.record_core('cleanup_started')
                 if self.core is not None and self.core.poll() is None:
                     self.core.terminate()
+                    self.record_core('terminate_sent')
                     try:
                         self.core.wait(timeout=15)
                     except subprocess.TimeoutExpired:
+                        self.record_core('terminate_timeout', timeout_seconds=15)
                         self.core.kill()
+                        self.record_core('kill_sent')
                         self.core.wait(timeout=10)
+                    self.record_core('reaped')
+            except BaseException as error:
+                self.record_core('cleanup_failure', error_type=type(error).__name__)
+                raise
             finally:
                 for log in self.logs:
                     log.close()
+                self.record_core('cleanup_finished')
 
 
 def main():
@@ -361,7 +471,7 @@ def main():
             def offer_ready():
                 response = recipient.call('offer')
                 return response['offer']
-            offer = wait(offer_ready)
+            offer = observed_wait(evidence, 'offer_ready', offer_ready)
             print('Reusable receive offer persisted', flush=True)
             recipient.close()
             recipient_stopped = recipient.stopped
@@ -381,7 +491,7 @@ def main():
             if args.restart_providers:
                 fixture.restart_providers(a, b)
             reconnect_async_recipient(recipient, a, b)
-            received = wait(lambda: recipient.event('received'))
+            received = observed_wait(evidence, 'recipient_received', lambda: recipient.event('received'))
             recipient_settled = time.monotonic_ns()
             assert sender.process.poll() is not None
             assert received['hash'] == initial['hash']
@@ -424,7 +534,7 @@ def main():
                 recipient.drain()
                 state = recipient.call('async_offer')
                 return state.get('offer')
-            offer = wait(offer_ready)
+            offer = observed_wait(evidence, 'offer_ready', offer_ready)
             print('Swift reusable receive offer persisted by LDK', flush=True)
             recipient.close()
             recipient_stopped = recipient.stopped
@@ -447,7 +557,7 @@ def main():
                 recipient.drain()
                 event = next((e for e in recipient.events if e.get('event') == 'payment_changed' and e.get('phase') == 'settled'), None)
                 return recipient.call('payment', id=event['id']) if event else None
-            received = wait(received_payment)
+            received = observed_wait(evidence, 'recipient_received', received_payment)
             recipient_settled = time.monotonic_ns()
             assert sender.process.poll() is not None
             recipient_started = recipient.started

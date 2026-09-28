@@ -128,6 +128,10 @@ time.sleep(30)
         self.assertEqual(result['open_log_descriptors'], 0, result)
         return result
 
+    def core_events(self):
+        return {event['event']: event for event in (json.loads(line) for line in
+                (self.directory/'evidence/core-events.jsonl').read_text().splitlines())}
+
     def test_startup_rpc_failure_reaps_real_process_and_preserves_original_error(self):
         self.harmless_core()
         result = self.failed_construction()
@@ -137,6 +141,18 @@ time.sleep(30)
         self.assertIsNotNone(result['child_pid'])
         self.assertFalse(result['child_alive'])
         self.assertTrue(result['child_already_reaped'])
+        events = self.core_events()
+        self.assertEqual(events['launch_requested']['argv'][0], str(self.directory/'bin/bitcoind'))
+        self.assertEqual(events['launched']['pid'], result['child_pid'])
+        self.assertIsNone(events['launched']['poll'])
+        self.assertEqual(events['startup_failure']['error_type'], 'CalledProcessError')
+        self.assertEqual(events['startup_failure']['error_exit_code'], 19)
+        self.assertIn({'path': 'harmless.pid', 'size': len(str(result['child_pid']))},
+                      events['startup_failure']['data_files'])
+        self.assertLess(events['startup_ready']['monotonic_ns'], events['startup_failure']['monotonic_ns'])
+        self.assertIn('terminate_sent', events)
+        self.assertIsNotNone(events['reaped']['poll'])
+        self.assertIsNotNone(events['cleanup_finished']['poll'])
 
     def test_startup_failure_reaps_process_that_ignores_terminate(self):
         self.harmless_core(ignore_terminate=True)
@@ -146,12 +162,31 @@ time.sleep(30)
         self.assertEqual(result['stderr'], 'original startup RPC failure\n')
         self.assertFalse(result['child_alive'])
         self.assertTrue(result['child_already_reaped'])
+        events = self.core_events()
+        self.assertEqual(events['terminate_timeout']['timeout_seconds'], 15)
+        self.assertIn('kill_sent', events)
+        self.assertEqual(events['reaped']['poll'], -9)
+        self.assertEqual(events['cleanup_finished']['poll'], -9)
 
     def test_launch_failure_closes_log_and_preserves_missing_executable_error(self):
         result = self.failed_construction()
         self.assertEqual(result['error_class'], 'FileNotFoundError')
         self.assertEqual(result['filename'], str(self.directory/'bin/bitcoind'))
         self.assertIsNone(result['child_pid'])
+        events = self.core_events()
+        self.assertEqual(events['launch_requested']['argv'][0], result['filename'])
+        self.assertEqual(events['startup_failure']['error_type'], 'FileNotFoundError')
+        self.assertIsNone(events['cleanup_finished']['pid'])
+
+    def test_diagnostic_write_failure_preserves_original_error_and_child_cleanup(self):
+        self.harmless_core()
+        (self.directory/'evidence/core-events.jsonl').mkdir()
+        result = self.failed_construction()
+        self.assertEqual(result['error_class'], 'CalledProcessError')
+        self.assertEqual(result['returncode'], 19)
+        self.assertEqual(result['stderr'], 'original startup RPC failure\n')
+        self.assertFalse(result['child_alive'])
+        self.assertTrue(result['child_already_reaped'])
 
 
 if __name__ == '__main__':

@@ -49,6 +49,7 @@ jobs:
           python3 -m unittest discover -s scripts/tests -p test_lightning_peer.py
           python3 -m unittest discover -s scripts/tests -p test_ci_lightning_async_lifecycle.py
           python3 -m unittest discover -s scripts/tests -p test_ci_lightning_async_readiness.py
+          python3 -m unittest discover -s scripts/tests -p test_ci_lightning_async_observation.py
           python3 -m unittest discover -s scripts/tests -p test_ci_lightning_ui.py
           python3 -m unittest discover -s scripts/tests -p test_lightning_ui_fixture.py
           python3 -m unittest discover -s scripts/tests -p 'test*crap.py'
