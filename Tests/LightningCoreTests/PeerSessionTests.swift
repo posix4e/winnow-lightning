@@ -4,10 +4,12 @@ import WalletCore
 import XCTest
 @testable import LightningCore
 
-private final class SessionJournal: LightningJournal {
+private final class SessionJournal: LightningJournal, @unchecked Sendable {
+    private let lock = NSLock()
     private var bytes: Data?
-    func load() -> Data? { bytes }
-    func store(_ snapshot: Data) { bytes = snapshot }
+    init(snapshot: Data? = nil) { bytes = snapshot }
+    func load() -> Data? { lock.withLock { bytes } }
+    func store(_ snapshot: Data) { lock.withLock { bytes = snapshot } }
 }
 
 /// A real localhost BOLT 8 peer, with no Bitcoin funding or external service.
@@ -42,7 +44,9 @@ private actor SessionPeer {
         self.connection = connection
         connection.start(queue: DispatchQueue(label: "winnow.test.lightning.peer"))
     }
-    func handshake(features: LightningFeatures = .channelOpening) async throws {
+    func handshake(features: LightningFeatures = .channelOpening,
+                   following: [LightningWire.Message] = [],
+                   beforeInitialization: @Sendable () async throws -> Void = {}) async throws {
         let deadline = ContinuousClock.now + .seconds(3)
         while connection == nil {
             guard ContinuousClock.now < deadline else { throw LightningError.closed }
@@ -54,7 +58,14 @@ private actor SessionPeer {
         let actThree = try await exact(66)
         transport = try XCTUnwrap(handshake.receive(actThree).transport)
         _ = try LightningFeatures.readInitialization(await receive())
-        try await send(features.initialization())
+        try await beforeInitialization()
+        // One write makes the eager peer's Init and channel replay available
+        // together; it does not depend on a timing delay or another process.
+        let transport = try XCTUnwrap(transport)
+        let bytes = try ([features.initialization()] + following).reduce(into: Data()) {
+            $0.append(try transport.encrypt($1.bytes))
+        }
+        try await write(bytes)
     }
     func send(_ message: LightningWire.Message) async throws {
         try await write(XCTUnwrap(transport).encrypt(message.bytes))
@@ -65,7 +76,11 @@ private actor SessionPeer {
         }
         return try .init(bytes: messages.removeFirst())
     }
-    func close() { connection?.cancel(); listener.cancel(); transport?.close() }
+    func disconnect() {
+        connection?.cancel(); transport?.close()
+        connection = nil; transport = nil; messages.removeAll()
+    }
+    func close() { disconnect(); listener.cancel() }
     private func exact(_ count: Int) async throws -> Data {
         var bytes = Data()
         while bytes.count < count { bytes.append(try await read(maximum: count - bytes.count)) }
@@ -180,6 +195,168 @@ extension PeerSessionTests {
             XCTAssertEqual(status, .stopped); XCTAssertTrue(channels.isEmpty); XCTAssertTrue(payments.isEmpty)
             await remote.close()
         } catch { await session.stop(); await remote.close(); handshake.cancel(); throw error }
+    }
+}
+
+/// The funded snapshot is created by the same opening, signature and
+/// confirmation transitions as ChannelEngineTests.pair(), with zero payments.
+private struct SessionRestartFixture: Sendable {
+    let engine: LightningEngine
+    let peer, channelID: Data
+    let reestablish: LightningWire.Message
+}
+
+private extension PeerSessionTests {
+    func fundedRestartFixture() async throws -> SessionRestartFixture {
+        let chain = Data(repeating: 7, count: 32)
+        let aliceKey = try ChannelKeys.publicKey(secret: Data(repeating: 1, count: 32))
+        let bobKey = try ChannelKeys.publicKey(secret: Data(repeating: 2, count: 32))
+        let aliceJournal = SessionJournal(), bobJournal = SessionJournal()
+        let alice = try LightningEngine(chain: chain, nodeSecret: Data(repeating: 1, count: 32), journal: aliceJournal)
+        let bob = try LightningEngine(chain: chain, nodeSecret: Data(repeating: 2, count: 32), journal: bobJournal)
+        for (engine, peer) in [(alice, bobKey), (bob, aliceKey)] {
+            try await engine.chainCaughtUp()
+            try await engine.peerInitialized(peer, features: .channelOpening)
+        }
+        let temporary = try await alice.openChannel(peer: bobKey, capacitySat: 100_000, feePerKW: 1000, format: .staticRemoteKey)
+        _ = try await bob.receive(peer: aliceKey, message: alice.pendingMessages(peer: bobKey)[0].message)
+        let events = try await alice.receive(peer: bobKey, message: bob.pendingMessages(peer: aliceKey)[0].message)
+        guard case .fundingRequired(_, _, let script) = try XCTUnwrap(events.first) else { throw LightningError.invalidState }
+        let funding = Transaction(version: 2, inputs: [.init(previousOutput: .init(txid: Data(repeating: 9, count: 32), vout: 1),
+            scriptSig: Data(), sequence: .max, witness: [Data([1])])], outputs: [.init(value: 100_000, scriptPubKey: script)], locktime: 0)
+        try await alice.provideFunding(temporaryID: temporary, peer: bobKey, transaction: funding, output: 0)
+        _ = try await bob.receive(peer: aliceKey, message: alice.pendingMessages(peer: bobKey)[0].message)
+        _ = try await alice.receive(peer: bobKey, message: bob.pendingMessages(peer: aliceKey)[0].message)
+        let aliceChannels = await alice.channels()
+        let channelID = try XCTUnwrap(aliceChannels.first?.id)
+        for (engine, peer) in [(alice, bobKey), (bob, aliceKey)] {
+            _ = try await engine.fundingConfirmed(channelID: channelID, peer: peer, transaction: funding, confirmations: 3)
+        }
+        let alicePending = try await alice.pendingMessages(peer: bobKey)
+        let bobPending = try await bob.pendingMessages(peer: aliceKey)
+        let aReady = try XCTUnwrap(alicePending.first { $0.message.type == 36 })
+        let bReady = try XCTUnwrap(bobPending.first { $0.message.type == 36 })
+        _ = try await alice.receive(peer: bobKey, message: bReady.message)
+        _ = try await bob.receive(peer: aliceKey, message: aReady.message)
+        let snapshot = try XCTUnwrap(aliceJournal.load())
+        let saved = try XCTUnwrap(JSONDecoder().decode(LightningEngine.State.self, from: snapshot).channels.first)
+        XCTAssertEqual(saved.phase, .ready); XCTAssertEqual(saved.localNumber, 0); XCTAssertEqual(saved.remoteNumber, 0)
+        await bob.peerDisconnected(aliceKey)
+        try await bob.peerInitialized(aliceKey, features: .channelOpening)
+        let bobReplay = try await bob.pendingMessages(peer: aliceKey)
+        let reestablish = try XCTUnwrap(bobReplay.first { $0.message.type == 136 })
+        let restored = try LightningEngine(chain: chain, journal: SessionJournal(snapshot: snapshot))
+        try await restored.chainCaughtUp()
+        return SessionRestartFixture(engine: restored, peer: bobKey, channelID: channelID, reestablish: reestablish.message)
+    }
+
+    func assertRestartReplay(_ remote: SessionPeer, fixture: SessionRestartFixture) async throws {
+        let first = try await remote.receive()
+        XCTAssertEqual(first.type, 136, "Our reestablish must reach the wire before the peer can acknowledge it")
+        guard first.type == 136 else { return }
+        XCTAssertEqual(Data(first.payload.prefix(32)), fixture.channelID)
+        let ready = try await remote.receive()
+        XCTAssertEqual(ready.type, 36, "Validated peer reestablishment releases channel_ready after our replay")
+        XCTAssertEqual(Data(ready.payload.prefix(32)), fixture.channelID)
+        let channels = await fixture.engine.channels()
+        XCTAssertEqual(channels.first?.phase, .ready)
+        XCTAssertNotNil(channels.first?.signedCommitment)
+        let pending = try await fixture.engine.pendingMessages(peer: fixture.peer)
+        XCTAssertFalse(pending.contains { $0.message.type == 136 })
+    }
+}
+
+extension PeerSessionTests {
+    func testEagerPeerReestablishmentCannotAcknowledgeOurUnpublishedReplay() async throws {
+        let fixture = try await fundedRestartFixture(), remote = try SessionPeer(), port = try await remote.listen()
+        let session = LightningPeerSession(engine: fixture.engine, peer: fixture.peer, host: "127.0.0.1", port: port, onEvents: { _ in })
+        let handshake = Task { try await remote.handshake(following: [fixture.reestablish]) }
+        do {
+            try await session.start(); try await handshake.value
+            try await assertRestartReplay(remote, fixture: fixture)
+            await session.stop(); await remote.close()
+        } catch { await session.stop(); await remote.close(); handshake.cancel(); throw error }
+    }
+
+    func testPausedInitialPublicationKeepsPingAliveAndReplaysBeforePeerAcknowledgement() async throws {
+        let fixture = try await fundedRestartFixture(), remote = try SessionPeer(), port = try await remote.listen()
+        let session = LightningPeerSession(engine: fixture.engine, peer: fixture.peer, host: "127.0.0.1", port: port, onEvents: { _ in })
+        var ping = LightningWire.Writer(); ping.u16(2); ping.u16(0)
+        let pingMessage = try LightningWire.Message(type: 18, payload: ping.data)
+        let handshake = Task {
+            try await remote.handshake(following: [fixture.reestablish, pingMessage]) {
+                await fixture.engine.chainDisconnected()
+            }
+        }
+        do {
+            try await session.start(); try await handshake.value
+            // Receiving this pong proves the earlier 136 reached the ordered
+            // incoming queue while initial publication was chain-paused.
+            let pong = try await remote.receive()
+            XCTAssertEqual(pong.type, 19); XCTAssertEqual(pong.payload, Data([0, 2, 0, 0]))
+            let current = await fixture.engine.chainIsCurrent
+            XCTAssertFalse(current)
+            try await fixture.engine.chainCaughtUp()
+            try await assertRestartReplay(remote, fixture: fixture)
+            await session.stop(); await remote.close()
+        } catch { await session.stop(); await remote.close(); handshake.cancel(); throw error }
+    }
+
+    func testStoppedInitializationCannotActivateReaderOrContaminateNextGeneration() async throws {
+        let fixture = try await fundedRestartFixture(), remote = try SessionPeer(), port = try await remote.listen()
+        let session = LightningPeerSession(engine: fixture.engine, peer: fixture.peer, host: "127.0.0.1", port: port, onEvents: { _ in })
+        let initialized = expectation(description: "Peer received authenticated client Init")
+        let gate = SessionInitializationGate()
+        let handshake = Task {
+            try await remote.handshake(following: [fixture.reestablish]) {
+                initialized.fulfill()
+                try await gate.wait()
+            }
+        }
+        let starting = Task { try await session.start() }
+        do {
+            await fulfillment(of: [initialized], timeout: 3)
+            await session.stop()
+            do { _ = try await starting.value; XCTFail("Stopped startup returned success") } catch {}
+            let stopped = await session.status; XCTAssertEqual(stopped, .stopped)
+            await gate.open(); _ = try? await handshake.value
+            await remote.disconnect()
+            let nextHandshake = Task { try await remote.handshake(following: [fixture.reestablish]) }
+            do {
+                try await session.start(); try await nextHandshake.value
+                try await assertRestartReplay(remote, fixture: fixture)
+                let connected = await session.status; XCTAssertEqual(connected, .connected)
+            } catch { nextHandshake.cancel(); throw error }
+            await session.stop(); await remote.close()
+        } catch {
+            await gate.open(); await session.stop(); await remote.close()
+            starting.cancel(); handshake.cancel(); throw error
+        }
+    }
+}
+
+/// An explicit bounded gate for cancellation, entirely within the test peer.
+/// Startup ordering tests need no production hook or artificial sleep.
+private actor SessionInitializationGate {
+    private var opened = false
+    private var waiting: CheckedContinuation<Void, any Error>?
+    private var expiry: Task<Void, Never>?
+
+    func wait() async throws {
+        if opened { return }
+        try await withCheckedThrowingContinuation { continuation in
+            waiting = continuation
+            expiry = Task {
+                do { try await Task.sleep(for: .seconds(3)); expire() } catch {}
+            }
+        }
+    }
+    func open() {
+        opened = true; expiry?.cancel(); expiry = nil
+        waiting?.resume(); waiting = nil
+    }
+    private func expire() {
+        waiting?.resume(throwing: LightningError.closed); waiting = nil; expiry = nil
     }
 }
 

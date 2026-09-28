@@ -33,6 +33,17 @@ def wait(check, timeout=45):
     raise TimeoutError('Async peer condition did not become true')
 
 
+def reconnect_async_recipient(recipient, return_provider, notification_provider):
+    recipient.start()
+    recipient.call('connect', peer=return_provider.node, address=f'127.0.0.1:{return_provider.initial["port"]}')
+    # A TCP connect acknowledgement does not complete Init. Establish the
+    # release response route before reconnecting the provider that replays the
+    # saved HeldHtlcAvailable notification. status.peers uses LDK list_peers,
+    # which reports only peers whose initial handshake has completed.
+    wait(lambda: return_provider.node in recipient.call('status')['peers'])
+    recipient.call('connect', peer=notification_provider.node, address=f'127.0.0.1:{notification_provider.initial["port"]}')
+
+
 class Peer:
     def __init__(self, command, log, swift=False):
         self.command, self.log, self.swift = command, log, swift
@@ -369,8 +380,7 @@ def main():
             print('Sender terminated after committed hold and persisted offline notification', flush=True)
             if args.restart_providers:
                 fixture.restart_providers(a, b)
-            recipient.reconnect_to(b)
-            recipient.call('connect', peer=a.node, address=f'127.0.0.1:{a.initial["port"]}')
+            reconnect_async_recipient(recipient, a, b)
             received = wait(lambda: recipient.event('received'))
             recipient_settled = time.monotonic_ns()
             assert sender.process.poll() is not None

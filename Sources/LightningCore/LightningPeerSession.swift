@@ -13,6 +13,7 @@ public actor LightningPeerSession {
     private var generation: UInt64 = 0
     private var sent = Set<UInt64>()
     private var flushing = false
+    private var initialChannelPublicationPending = false
     private var stopping = false
     private var starting = false
     private var incoming: [LightningWire.Message] = []
@@ -44,11 +45,14 @@ public actor LightningPeerSession {
             let features = try LightningFeatures.readInitialization(await transport.receive())
             guard epoch == generation else { throw CancellationError() }
             try await engine.peerInitialized(peer, features: features)
+            guard epoch == generation else { throw CancellationError() }
             peerFeatures = features
+            initialChannelPublicationPending = true
             status = .connected
             reader = Task { await receiveLoop(transport, epoch: epoch) }
             timer = Task { await publicationLoop(epoch: epoch) }
             try await flush()
+            guard epoch == generation else { throw CancellationError() }
             return features
         } catch { await finish(epoch: epoch, error: error); throw error }
     }
@@ -62,6 +66,7 @@ public actor LightningPeerSession {
         reader?.cancel(); timer?.cancel()
         await transport.close(); await engine.peerDisconnected(peer)
         connection = nil; reader = nil; timer = nil; status = .stopped
+        initialChannelPublicationPending = false
         incoming.removeAll(); incomingBytes = 0
     }
     /// Reentrant callers share a single ordered publisher. Channel messages
@@ -74,6 +79,8 @@ public actor LightningPeerSession {
         guard await engine.chainIsCurrent else { return }
         do {
             try await publishChannel(transport, epoch: epoch)
+            guard epoch == generation, status == .connected else { throw CancellationError() }
+            initialChannelPublicationPending = false
             try await publishOnions(transport, epoch: epoch)
         } catch LightningError.invalidState {
             if await engine.chainIsCurrent { throw LightningError.invalidState }
@@ -138,7 +145,10 @@ public actor LightningPeerSession {
         [32, 33, 34, 35, 36, 38, 39, 128, 130, 131, 132, 133, 134, 135, 136, 513].contains(type)
     }
     private func drainIncoming(epoch: UInt64) async throws {
-        guard !handlingIncoming else { return }
+        // An eager channel_reestablish can acknowledge our queued replay.
+        // Keep it queued until that replay reaches this session's transport,
+        // including when a chain scan pauses the initial publication.
+        guard !handlingIncoming, !initialChannelPublicationPending else { return }
         handlingIncoming = true; defer { handlingIncoming = false }
         while epoch == generation, status == .connected, let message = incoming.first {
             let events: [LightningEngine.Event]?
