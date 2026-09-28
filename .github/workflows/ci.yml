@@ -93,6 +93,16 @@ jobs:
       - name: Stale backup recovery from stock peer latest unilateral close
         if: ${{ !cancelled() }}
         run: scripts/ci-lightning-peer --format anchors --close recovery
+      - name: Preserve reference and interoperability evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: swift-lightning-peers
+          path: |
+            ${{ env.WINNOW_LIGHTNING_RESULTS }}
+            ${{ env.REFERENCE_DIR }}/reference-manifest.json
+            ${{ env.REFERENCE_DIR }}/ldk-async-*.log
+          retention-days: 14
       - name: Install pinned app project generator
         if: ${{ !cancelled() }}
         run: scripts/install-xcodegen
@@ -196,16 +206,6 @@ jobs:
             ${{ runner.temp }}/lightning-ui/manifest.json
             ${{ runner.temp }}/lightning-ui/journey.json
             ${{ runner.temp }}/lightning-ui/fixture/evidence
-          retention-days: 14
-      - name: Preserve reference and interoperability evidence
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: swift-lightning-peers
-          path: |
-            ${{ env.WINNOW_LIGHTNING_RESULTS }}
-            ${{ env.REFERENCE_DIR }}/reference-manifest.json
-            ${{ env.REFERENCE_DIR }}/ldk-async-*.log
           retention-days: 14
       - name: Preserve method complexity and coverage evidence
         if: always()
