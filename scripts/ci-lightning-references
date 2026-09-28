@@ -5,7 +5,7 @@ import subprocess
 import sys
 
 REPOSITORY = 'https://github.com/posix4e/lightning-reference.git'
-COMMIT = 'ffaeefca9280cd4c674296cd2e2c4957cc44060f'
+COMMIT = 'dcf4d7a99d943fd480a1e715ce8d4d4d739ff45b'
 
 
 def run(*args, cwd=None, env=None):
