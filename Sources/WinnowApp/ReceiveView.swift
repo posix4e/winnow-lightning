@@ -170,12 +170,15 @@ struct ReceiveView: View {
         let events = await window.events()
         windowTask = Task {
             for await event in events {
-                guard case let .paymentSeen(txid, amount, _) = event else { continue }
-                if !unconfirmed.contains(where: { $0.txid == txid }) {
-                    unconfirmed.append(UnconfirmedPayment(txid: txid, amount: amount))
-                }
+                recordUnconfirmedPayment(event)
             }
         }
+    }
+
+    private func recordUnconfirmedPayment(_ event: MempoolWindow.Event) {
+        guard case let .paymentSeen(txid, amount, _) = event else { return }
+        guard !unconfirmed.contains(where: { $0.txid == txid }) else { return }
+        unconfirmed.append(UnconfirmedPayment(txid: txid, amount: amount))
     }
 
     private func closeWindow() {

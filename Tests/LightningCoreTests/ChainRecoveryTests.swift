@@ -277,7 +277,7 @@ final class ChainRecoveryTests: XCTestCase, @unchecked Sendable {
         let status = await restored.chainStatus()
         XCTAssertEqual(status.origin.height, 0)
         XCTAssertEqual(status.origin.hash, genesis.hash)
-        XCTAssertEqual(try state(store).version, 4)
+        XCTAssertEqual(try state(store).version, 5)
         XCTAssertEqual(try state(store).channels.first?.id, legacy.channels.first?.id)
         XCTAssertEqual(try state(store).nodeSecret, legacy.nodeSecret)
     }
@@ -517,7 +517,7 @@ extension ChainRecoveryTests {
             do {
                 try await engine.resumeFromBackground()
                 XCTAssertFalse(failure)
-                XCTAssertEqual(try state(full).version, 4)
+                XCTAssertEqual(try state(full).version, 5)
                 XCTAssertEqual(try state(full).revision, try store.load()?.revision)
             } catch {
                 XCTAssertTrue(failure)

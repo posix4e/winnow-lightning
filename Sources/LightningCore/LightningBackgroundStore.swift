@@ -98,6 +98,7 @@ struct LightningBackgroundSnapshot: Codable {
                                                 confirmed: synthetic, preimages: preimages)
         var spends = channel.resolutions
         for parent in parents { spends += try context.candidates(parent: parent) }
+        spends += try authorizedFeeBumps(channel)
         var seen = Set<Data>()
         spends = try spends.filter { seen.insert(try Transaction.decode($0.transaction).txid).inserted }
         var scripts = Set([try channel.fundingScript()])
@@ -114,13 +115,29 @@ struct LightningBackgroundSnapshot: Codable {
         return plan
     }
 
+    private static func authorizedFeeBumps(_ channel: ChannelState) throws -> [ChannelResolution.Spend] {
+        guard !channel.dataLossDetected else { return [] }
+        let records = channel.feeBumps ?? []
+        let replaced = Set(records.compactMap(\.replacesTxid))
+        return try records.compactMap { record in
+            guard let raw = record.signedTransaction else { return nil }
+            let tx = try Transaction.decode(raw)
+            guard !replaced.contains(tx.txid) else { return nil }
+            return ChannelResolution.Spend(tx, delay: record.kind == .htlc ? 1 : 0, height: tx.locktime,
+                unconfirmedParent: record.kind == .commitment ? record.parentTransaction : nil)
+        }
+    }
+
     private static func recoveryParents(_ channel: ChannelState, confirmed: [ChannelResolution.Confirmed]) throws
         -> ([Transaction], [ChannelResolution.Confirmed]) {
         var parents: [Transaction] = []
         var synthetic = confirmed
-        // Segwit HTLC second-stage txids are fixed before witnesses exist.
-        // Pre-sign both direct claims and descendants, so a peer racing a
-        // penalty with its second stage cannot defeat the locked monitor.
+        for bump in channel.feeBumps ?? [] where bump.kind == .htlc {
+            if let raw = bump.signedTransaction { synthetic.append(try .init(height: 0, tx: Transaction.decode(raw))) }
+        }
+        // Pre-sign descendants of known second stages. A peer can augment an
+        // anchor stage and change its txid; claiming that new descendant needs
+        // foreground signing after the verified chain reveals the transaction.
         if !channel.dataLossDetected {
             let local = try channel.commitment(localOwner: true)
             parents.append(try Transaction.decode(channel.signedCommitment!))

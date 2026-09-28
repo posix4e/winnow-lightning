@@ -70,7 +70,9 @@ extension LightningEngine {
                   let policy = invoicePolicies[scid] ?? channel.invoicePolicy, policy.peer == peer,
                   policy.shortChannelID == scid, !policy.disabled, policy.expiryDelta > 0 else { return nil }
             let balance = try channel.view(localOwner: true, number: channel.localNumber)
-            let reserve = channel.local.reserveSat * 1000 + (channel.isFunder ? 0 : UInt64(balance.feePerKW) * 724)
+            let recoveryReserve = UInt64(balance.feePerKW) * channel.local.format.commitmentWeight
+                + channel.local.format.anchorReserveSat * 1000
+            let reserve = channel.local.reserveSat * 1000 + (channel.isFunder ? 0 : recoveryReserve)
             let maximum = min(balance.remoteMsat > reserve ? balance.remoteMsat - reserve : 0,
                               channel.local.maximumHTLCMsat, policy.maximumMsat ?? .max)
             return InvoiceCapacity(channelID: channel.id, route: policy.route,

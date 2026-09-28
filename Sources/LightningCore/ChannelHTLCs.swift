@@ -15,7 +15,7 @@ extension LightningEngine {
         return id
     }
     func enqueueHTLC(channel: inout ChannelState, in next: inout State, amountMsat: UInt64,
-                     paymentHash: Data, expiry: UInt32, onion: Data, hold: Bool = false) throws -> UInt64 {
+                     paymentHash: Data, expiry: UInt32, onion: Data, hold: Bool = false, blinding: Data? = nil) throws -> UInt64 {
         guard channel.phase == .ready else { throw LightningError.invalidState }
         guard paymentHash.count == 32, onion.count == 1366, amountMsat > 0, amountMsat <= channel.capacity * 1000,
               channel.nextLocalHTLC < UInt64.max, channel.updates.count < 4096 else { throw LightningError.invalidMessage }
@@ -25,7 +25,10 @@ extension LightningEngine {
         channel.nextLocalHTLC += 1
         var writer = LightningWire.Writer(); writer.append(channel.id); writer.u64(id); writer.u64(amountMsat)
         writer.append(paymentHash); writer.u32(expiry); writer.append(onion)
-        if hold { try writer.tlvs([.init(type: 75537, value: Data())]) }
+        var fields: [LightningWire.TLV] = []
+        if let blinding { _ = try ChannelKeys.point(blinding); fields.append(.init(type: 0, value: blinding)) }
+        if hold { fields.append(.init(type: 75537, value: Data())) }
+        if !fields.isEmpty { try writer.tlvs(fields) }
         try Self.enqueue(.init(type: 128, payload: writer.data), channel: channel, in: &next)
         try signPending(&channel, in: &next)
         return id
@@ -64,24 +67,30 @@ extension LightningEngine {
     private func readChange(_ type: UInt16, reader: inout LightningWire.Reader, channel: inout ChannelState) throws -> ChannelUpdate.Change {
         switch type {
         case 128: return try readAdd(&reader, channel: &channel)
-        case 130:
-            let id = try reader.u64(), preimage = try reader.take(32); _ = try reader.tlvs(known: [])
-            let htlc = try channel.activeHTLC(id: id, offered: true)
-            guard ChannelKeys.hash(preimage) == htlc.paymentHash, !channel.hasRemoval(id: id, offered: true) else { throw LightningError.invalidHash }
-            if !channel.learnedPreimages.contains(preimage) { channel.learnedPreimages.append(preimage) }
-            return .fulfill(id: id, offered: true, preimage: preimage)
-        case 131:
-            let id = try reader.u64(), length = try reader.u16(), reason = try reader.take(Int(length)); _ = try reader.tlvs(known: [])
-            _ = try channel.activeHTLC(id: id, offered: true)
-            guard !channel.hasRemoval(id: id, offered: true) else { throw LightningError.invalidState }
-            return .fail(id: id, offered: true, reason: reason)
-        case 134:
-            let fee = try reader.u32(); try reader.requireEnd()
-            guard !channel.isFunder, (253...100_000).contains(fee) else { throw LightningError.invalidMessage }
-            return .fee(fee)
+        case 130: return try readFulfill(&reader, channel: &channel)
+        case 131: return try readFailure(&reader, channel: channel)
+        case 134: return try readFee(&reader, channel: channel)
         case 135: return try readMalformed(&reader, channel: channel)
         default: throw LightningError.invalidMessage
         }
+    }
+    private func readFulfill(_ reader: inout LightningWire.Reader, channel: inout ChannelState) throws -> ChannelUpdate.Change {
+        let id = try reader.u64(), preimage = try reader.take(32); _ = try reader.tlvs(known: [])
+        let htlc = try channel.activeHTLC(id: id, offered: true)
+        guard ChannelKeys.hash(preimage) == htlc.paymentHash, !channel.hasRemoval(id: id, offered: true) else { throw LightningError.invalidHash }
+        if !channel.learnedPreimages.contains(preimage) { channel.learnedPreimages.append(preimage) }
+        return .fulfill(id: id, offered: true, preimage: preimage)
+    }
+    private func readFailure(_ reader: inout LightningWire.Reader, channel: ChannelState) throws -> ChannelUpdate.Change {
+        let id = try reader.u64(), length = try reader.u16(), reason = try reader.take(Int(length)); _ = try reader.tlvs(known: [])
+        _ = try channel.activeHTLC(id: id, offered: true)
+        guard !channel.hasRemoval(id: id, offered: true) else { throw LightningError.invalidState }
+        return .fail(id: id, offered: true, reason: reason)
+    }
+    private func readFee(_ reader: inout LightningWire.Reader, channel: ChannelState) throws -> ChannelUpdate.Change {
+        let fee = try reader.u32(); try reader.requireEnd()
+        guard !channel.isFunder, (253...100_000).contains(fee) else { throw LightningError.invalidMessage }
+        return .fee(fee)
     }
     private func readAdd(_ reader: inout LightningWire.Reader, channel: inout ChannelState) throws -> ChannelUpdate.Change {
         guard channel.remoteShutdown == nil else { throw LightningError.invalidState }

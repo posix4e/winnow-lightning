@@ -186,3 +186,41 @@ extension PeerSessionTests {
 private extension LightningPeerSession {
     func testRoutingProgress(now: UInt64) { gossipQuery?.lastProgress = now }
 }
+
+extension PeerSessionTests {
+    func testOrdinaryOfferAndInvoiceRoutesUseFreshCacheAndFailAfterDisconnect() async throws {
+        let remote = try SessionPeer(), port = try await remote.listen(), peer = try ChannelKeys.publicKey(secret: remote.secret)
+        let chain = NetworkParams.regtest.genesisHash, now = UInt64(Date().timeIntervalSince1970)
+        let target = try ChannelKeys.publicKey(secret: Data(repeating: 3, count: 32))
+        let recipient = try ChannelKeys.publicKey(secret: Data(repeating: 4, count: 32))
+        let path = try OnionMessage.path(nodes: [target, recipient], context: Data(repeating: 5, count: 32), authenticationKey: Data(repeating: 6, count: 32))
+        let offer = try LightningOffer(bytes: Bolt12Encoding.serialize([.init(type: 2, value: chain), .init(type: 10, value: Data("Cached routing".utf8)),
+            .init(type: 16, value: path.encoded()), .init(type: 22, value: recipient)]))
+        let request = try InvoiceRequest(offer: offer, chain: chain, amountMsat: 5000, now: now, metadata: Data(repeating: 7, count: 32), payerSecret: Data(repeating: 8, count: 32))
+        let info = try StaticInvoice.PayInfo(baseMsat: 1000, proportionalMillionths: 0, expiryDelta: 58, minimumMsat: 1000, maximumMsat: 100_000, features: .init(bytes: Data()))
+        let invoice = try Bolt12Invoice(request: request, paths: [path], payInfo: [info], paymentHash: Data(repeating: 9, count: 32), createdAt: now, signingSecret: Data(repeating: 4, count: 32))
+        let engine = try LightningEngine(chain: chain, journal: SessionJournal())
+        try await engine.chainCaughtUp(height: 100)
+        let session = LightningPeerSession(engine: engine, peer: peer, host: "127.0.0.1", port: port, onEvents: { _ in })
+        let handshake = Task { try await remote.handshake() }
+        do {
+            try await session.start(); try await handshake.value
+            let direct = try LightningOffer(bytes: Bolt12Encoding.serialize([.init(type: 2, value: chain), .init(type: 22, value: peer)]))
+            let directPath = try await session.ordinaryOfferPath(offer: direct); XCTAssertEqual(directPath, [peer])
+            var graph = LightningRoutingGraph(chain: chain); graph.synchronizedAt = now
+            graph.channels[456] = .init(nodes: [peer, target], policies: [0: .init(hop: .init(peer: peer, shortChannelID: 456, baseMsat: 1000, proportionalMillionths: 0, expiryDelta: 40), timestamp: UInt32(now), minimum: 1000, maximum: 100_000, disabled: false)])
+            await engine.cacheRouting(graph)
+            let via = try await session.ordinaryOfferPath(offer: offer); XCTAssertEqual(via, [peer])
+            let route = try await session.ordinaryInvoiceRoute(invoice: invoice, feeLimitMsat: 2000)
+            XCTAssertEqual(route.hops.map(\.shortChannelID), [456])
+            XCTAssertEqual(try route.quote(invoice: invoice, feeLimitMsat: 2000, height: 100, maximumDelta: 144).feeMsat, 2000)
+            do { _ = try await session.ordinaryInvoiceRoute(invoice: invoice, feeLimitMsat: 1999); XCTFail("Fee cap must hold across cached routing") } catch {}
+            graph.synchronizedAt = now - 601; await engine.cacheRouting(graph)
+            do { _ = try await session.ordinaryOfferPath(offer: offer); XCTFail("Stale gossip needs a fresh query") } catch {}
+            let payments = await engine.payments(); XCTAssertTrue(payments.isEmpty)
+            await session.stop(); await remote.close()
+            do { _ = try await session.ordinaryOfferPath(offer: offer); XCTFail("Disconnected session cannot resolve routes") } catch {}
+            do { _ = try await session.ordinaryInvoiceRoute(invoice: invoice, feeLimitMsat: 2000); XCTFail() } catch {}
+        } catch { await session.stop(); await remote.close(); handshake.cancel(); throw error }
+    }
+}

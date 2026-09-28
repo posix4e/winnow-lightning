@@ -11,15 +11,18 @@ public struct ChannelTerms: Sendable, Codable, Equatable {
     public let maximumHTLCCount: UInt16
     public let funding: Data, revocation: Data, payment: Data, delayed: Data, htlc: Data, firstPoint: Data
     public let shutdownScript: Data
+    private let negotiatedFormat: ChannelFormat?
+    public var format: ChannelFormat { negotiatedFormat ?? .staticRemoteKey }
 
     public init(dustSat: UInt64 = 546, maximumHTLCMsat: UInt64, reserveSat: UInt64,
                 minimumHTLCMsat: UInt64 = 1, delay: UInt16 = 144, maximumHTLCCount: UInt16 = 30,
                 funding: Data, revocation: Data, payment: Data, delayed: Data, htlc: Data, firstPoint: Data,
-                shutdownScript: Data = Data()) {
+                shutdownScript: Data = Data(), format: ChannelFormat = .staticRemoteKey) {
         self.dustSat = dustSat; self.maximumHTLCMsat = maximumHTLCMsat; self.reserveSat = reserveSat
         self.minimumHTLCMsat = minimumHTLCMsat; self.delay = delay; self.maximumHTLCCount = maximumHTLCCount
         self.funding = funding; self.revocation = revocation; self.payment = payment
         self.delayed = delayed; self.htlc = htlc; self.firstPoint = firstPoint; self.shutdownScript = shutdownScript
+        negotiatedFormat = format == .staticRemoteKey ? nil : format
     }
     public func validate(capacity: UInt64) throws {
         guard capacity >= 20_000, capacity < 1 << 24, dustSat > 0, dustSat <= reserveSat,
@@ -115,7 +118,7 @@ public enum ChannelNegotiation {
         for point in [terms.funding, terms.revocation, terms.payment, terms.delayed, terms.htlc, terms.firstPoint] { writer.append(point) }
     }
     private static func tail(_ terms: ChannelTerms, to writer: inout LightningWire.Writer) throws {
-        try writer.tlvs([.init(type: 0, value: terms.shutdownScript), .init(type: 1, value: Data([0x10, 0]))])
+        try writer.tlvs([.init(type: 0, value: terms.shutdownScript), .init(type: 1, value: terms.format.features.bytes)])
     }
     private static func readLimits(_ reader: inout LightningWire.Reader) throws -> [UInt64] {
         try (0..<4).map { _ in try reader.u64() }
@@ -127,11 +130,11 @@ public enum ChannelNegotiation {
     }
     private static func readTail(_ reader: inout LightningWire.Reader, limits: [UInt64], points: Points) throws -> ChannelTerms {
         let tlvs = try reader.tlvs(known: [0, 1])
-        guard let type = tlvs.first(where: { $0.type == 1 }), LightningFeatures(bytes: type.value).bits == [12]
-        else { throw LightningError.invalidMessage }
+        guard let type = tlvs.first(where: { $0.type == 1 }) else { throw LightningError.invalidMessage }
+        let format = try ChannelFormat(features: LightningFeatures(bytes: type.value))
         return ChannelTerms(dustSat: limits[0], maximumHTLCMsat: limits[1], reserveSat: limits[2], minimumHTLCMsat: limits[3],
             delay: points.delay, maximumHTLCCount: points.count, funding: points.keys[0], revocation: points.keys[1],
             payment: points.keys[2], delayed: points.keys[3], htlc: points.keys[4], firstPoint: points.keys[5],
-            shutdownScript: tlvs.first(where: { $0.type == 0 })?.value ?? Data())
+            shutdownScript: tlvs.first(where: { $0.type == 0 })?.value ?? Data(), format: format)
     }
 }

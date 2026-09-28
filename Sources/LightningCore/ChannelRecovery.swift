@@ -1,24 +1,26 @@
 import Foundation
 import WalletCore
 
-/// BOLT 3 on-chain resolution for static_remotekey, non-anchor commitments.
+/// BOLT 3 on-chain resolution for negotiated commitment formats.
 /// These builders authorize no broadcast: the caller must select the current
 /// commitment and obtain height/confirmation information from Winnow's chain.
 public enum ChannelRecovery {
     /// The non-owner's immediate static_remotekey output.
     public static func immediate(parent: Transaction, outputIndex: UInt32, destination: Script,
-                                 feeSat: UInt64, paymentSecret: Data) throws -> Transaction {
+                                 feeSat: UInt64, paymentSecret: Data, format: ChannelFormat = .staticRemoteKey) throws -> Transaction {
         let key = try ChannelKeys.publicKey(secret: paymentSecret)
         guard parent.outputs.indices.contains(Int(outputIndex)) else { throw LightningError.invalidCommitment }
         let output = parent.outputs[Int(outputIndex)]
-        guard output.scriptPubKey == (try ChannelScripts.witnessKeyHash(key)), output.value > 0,
+        guard output.scriptPubKey == (try ChannelScripts.remoteOutput(paymentKey: key, format: format)), output.value > 0,
               feeSat < UInt64(output.value) else { throw LightningError.invalidAmount }
         let hash = RIPEMD160.hash(ChannelKeys.hash(key))
-        let script = Script.build { $0.appendOpcode(0x76); $0.appendOpcode(0xa9); $0.appendPush(hash); $0.appendOpcode(0x88); $0.appendOpcode(0xac) }
+        let script = try format.hasAnchors ? ChannelScripts.remote(paymentKey: key)
+            : Script.build { $0.appendOpcode(0x76); $0.appendOpcode(0xa9); $0.appendPush(hash); $0.appendOpcode(0x88); $0.appendOpcode(0xac) }
         var tx = Transaction(version: 2, inputs: [.init(previousOutput: .init(txid: parent.txid, vout: outputIndex),
-            scriptSig: Data(), sequence: .max)], outputs: [.init(value: output.value - Int64(feeSat), scriptPubKey: destination.bytes)], locktime: 0)
+            scriptSig: Data(), sequence: format.hasAnchors ? 1 : .max)], outputs: [.init(value: output.value - Int64(feeSat), scriptPubKey: destination.bytes)], locktime: 0)
         let digest = try SighashBIP143.sighash(tx: tx, inputIndex: 0, scriptCode: script.bytes, value: output.value)
-        tx.inputs[0].witness = [try ChannelKeys.sign(digest: digest, secret: paymentSecret) + Data([1]), key]
+        let signature = try ChannelKeys.sign(digest: digest, secret: paymentSecret) + Data([1])
+        tx.inputs[0].witness = format.hasAnchors ? [signature, script.bytes] : [signature, key]
         return tx
     }
 
@@ -37,7 +39,7 @@ public enum ChannelRecovery {
             selector = Data()
         }
         var tx = Transaction(version: 2, inputs: [.init(previousOutput: .init(txid: commitment.transaction.txid, vout: output.index),
-            scriptSig: Data(), sequence: 0)], outputs: [.init(value: Int64(output.htlc.amountMsat / 1000 - feeSat), scriptPubKey: destination.bytes)],
+            scriptSig: Data(), sequence: commitment.parameters.format.htlcSequence)], outputs: [.init(value: Int64(output.htlc.amountMsat / 1000 - feeSat), scriptPubKey: destination.bytes)],
             locktime: output.htlc.offered ? 0 : output.htlc.expiry)
         let digest = try SighashBIP143.sighash(tx: tx, inputIndex: 0, scriptCode: output.witnessScript.bytes,
                                              value: Int64(output.htlc.amountMsat / 1000))
@@ -48,7 +50,7 @@ public enum ChannelRecovery {
                                   output: ChannelTransactions.HTLCOutput) throws -> Data {
         let tx = try ChannelTransactions.htlcTransaction(commitment: commitment, output: output)
         return try SighashBIP143.sighash(tx: tx, inputIndex: 0, scriptCode: output.witnessScript.bytes,
-                                      value: Int64(output.htlc.amountMsat / 1000))
+                                      value: Int64(output.htlc.amountMsat / 1000), hashType: commitment.parameters.format.htlcSighash)
     }
 
     /// HTLC-timeout for an offered output; HTLC-success for a received output.
@@ -58,7 +60,7 @@ public enum ChannelRecovery {
                                   remoteSignature: Data, preimage: Data? = nil) throws -> Transaction {
         let keys = commitment.parameters.keys
         let script = try ChannelScripts.htlc(offered: output.htlc.offered, revocation: keys.revocation,
-            local: keys.htlcLocal, remote: keys.htlcRemote, paymentHash: output.htlc.paymentHash, expiry: output.htlc.expiry)
+            local: keys.htlcLocal, remote: keys.htlcRemote, paymentHash: output.htlc.paymentHash, expiry: output.htlc.expiry, format: commitment.parameters.format)
         guard script == output.witnessScript else { throw LightningError.invalidCommitment }
         let digest = try htlcDigest(commitment: commitment, output: output)
         guard ChannelKeys.verify(signature: localSignature, digest: digest, publicKey: keys.htlcLocal),
@@ -66,7 +68,8 @@ public enum ChannelRecovery {
         else { throw LightningError.invalidSignature }
         let branch = try htlcBranch(output.htlc, preimage: preimage)
         var tx = try ChannelTransactions.htlcTransaction(commitment: commitment, output: output)
-        tx.inputs[0].witness = [Data(), remoteSignature + Data([1]), localSignature + Data([1]), branch, script.bytes]
+        let hashByte = Data([UInt8(commitment.parameters.format.htlcSighash.rawValue)])
+        tx.inputs[0].witness = [Data(), remoteSignature + hashByte, localSignature + hashByte, branch, script.bytes]
         return tx
     }
 
@@ -88,10 +91,10 @@ public enum ChannelRecovery {
 
     public static func penaltyHTLC(parent: Transaction, outputIndex: UInt32, destination: Script, feeSat: UInt64,
                                    revocationSecret: Data, localKey: Data, remoteKey: Data,
-                                   htlc: ChannelTransactions.HTLC) throws -> Transaction {
+                                   htlc: ChannelTransactions.HTLC, format: ChannelFormat = .staticRemoteKey) throws -> Transaction {
         let key = try ChannelKeys.publicKey(secret: revocationSecret)
         let script = try ChannelScripts.htlc(offered: htlc.offered, revocation: key,
-            local: localKey, remote: remoteKey, paymentHash: htlc.paymentHash, expiry: htlc.expiry)
+            local: localKey, remote: remoteKey, paymentHash: htlc.paymentHash, expiry: htlc.expiry, format: format)
         return try spend(parent, outputIndex, destination, feeSat, script: script,
                          secret: revocationSecret, sequence: 0xffffffff, selector: key)
     }

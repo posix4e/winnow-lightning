@@ -13,8 +13,10 @@ enum ChannelResolution {
         let transaction: Data
         let relativeDelay: UInt16
         let minimumHeight: UInt32
-        init(_ tx: Transaction, delay: UInt16 = 0, height: UInt32 = 0) {
+        let unconfirmedParent: Data?
+        init(_ tx: Transaction, delay: UInt16 = 0, height: UInt32 = 0, unconfirmedParent: Data? = nil) {
             transaction = tx.serialized(includeWitness: true); relativeDelay = delay; minimumHeight = height
+            self.unconfirmedParent = unconfirmedParent
         }
     }
     struct Confirmed {
@@ -50,11 +52,12 @@ enum ChannelResolution {
             return (false, commitment)
         }
         private func immediate(_ parent: Transaction) throws -> [Spend] {
-            let script = try ChannelScripts.witnessKeyHash(channel.local.payment)
+            let script = try ChannelScripts.remoteOutput(paymentKey: channel.local.payment, format: channel.local.format)
             return try parent.outputs.enumerated().compactMap { index, output in
                 guard output.scriptPubKey == script, policy.economic(output.value) else { return nil }
                 return Spend(try ChannelRecovery.immediate(parent: parent, outputIndex: UInt32(index),
-                    destination: policy.script, feeSat: policy.feeSat, paymentSecret: channel.secrets.payment))
+                    destination: policy.script, feeSat: policy.feeSat, paymentSecret: channel.secrets.payment, format: channel.local.format),
+                    delay: channel.local.format.hasAnchors ? 1 : 0)
             }
         }
         private func local(_ commitment: ChannelTransactions.Commitment, parent: Transaction) throws -> [Spend] {
@@ -70,7 +73,12 @@ enum ChannelResolution {
                 let stage = try ChannelRecovery.signedHTLC(commitment: commitment, output: output, localSignature: signature,
                     remoteSignature: channel.localHTLCSignatures[index], preimage: output.htlc.offered ? nil : preimage)
                 result.append(Spend(stage, height: stage.locktime))
-                if let mined = confirmed.first(where: { $0.tx.txid == stage.txid }) {
+                // Anchor HTLC transactions permit added wallet inputs/change.
+                // Their txid changes, while the channel input/output stay bound
+                // by the peer's SINGLE|ANYONECANPAY signature.
+                for mined in confirmed where mined.tx.inputs.contains(where: {
+                    $0.previousOutput == stage.inputs[0].previousOutput
+                }) {
                     result += try delayedSpends(mined.tx, commitment: commitment, secret: delayed)
                 }
             }
@@ -93,7 +101,7 @@ enum ChannelResolution {
                 if output.htlc.offered && preimage == nil { return nil }
                 let tx = try ChannelRecovery.remoteHTLC(commitment: commitment, output: output, destination: policy.script,
                     feeSat: policy.feeSat, htlcSecret: key, preimage: output.htlc.offered ? preimage : nil)
-                return Spend(tx, height: tx.locktime)
+                return Spend(tx, delay: commitment.parameters.format.hasAnchors ? 1 : 0, height: tx.locktime)
             }
         }
         private func penalty(_ commitment: ChannelTransactions.Commitment, parent: Transaction) throws -> [Spend] {
@@ -104,7 +112,7 @@ enum ChannelResolution {
                 if policy.economic(Int64(output.htlc.amountMsat / 1000)) {
                     result.append(Spend(try ChannelRecovery.penaltyHTLC(parent: parent, outputIndex: output.index, destination: policy.script,
                         feeSat: policy.feeSat, revocationSecret: secret, localKey: commitment.parameters.keys.htlcLocal,
-                        remoteKey: commitment.parameters.keys.htlcRemote, htlc: output.htlc)))
+                        remoteKey: commitment.parameters.keys.htlcRemote, htlc: output.htlc, format: channel.local.format)))
                 }
                 let outpoint = Transaction.Outpoint(txid: parent.txid, vout: output.index)
                 for child in confirmed where child.tx.inputs.contains(where: { $0.previousOutput == outpoint }) {
@@ -121,15 +129,31 @@ enum ChannelResolution {
             }
         }
     }
+    private static func needsWalletFee(_ tx: Transaction) -> Bool {
+        guard tx.inputs.count == 1 else { return false }
+        let witness = tx.inputs[0].witness
+        guard witness.count == 5 else { return false }
+        return witness[1].last == 0x83 && witness[2].last == 0x83
+    }
     static func available(_ spend: Spend, confirmed: [Confirmed], height: UInt32) throws -> Bool {
         let tx = try Transaction.decode(spend.transaction)
-        guard let input = tx.inputs.first, tx.inputs.count == 1,
-              let parent = confirmed.first(where: { $0.tx.txid == input.previousOutput.txid }),
-              height >= spend.minimumHeight,
-              UInt64(height) + 1 >= UInt64(parent.height) + UInt64(spend.relativeDelay)
-        else { return false }
-        return !confirmed.contains { $0.tx.inputs.contains { $0.previousOutput == input.previousOutput } }
+        // Anchor second stages require a reserved wallet fee input. Relay only
+        // the already-authorized augmented transaction, including while locked.
+        guard !needsWalletFee(tx), let input = tx.inputs.first, height >= spend.minimumHeight,
+              try parentAvailable(spend, input: input, confirmed: confirmed, height: height) else { return false }
+        let outpoints = Set(tx.inputs.map(\.previousOutput))
+        return !confirmed.contains { $0.tx.inputs.contains { outpoints.contains($0.previousOutput) } }
     }
+    private static func parentAvailable(_ spend: Spend, input: Transaction.Input, confirmed: [Confirmed], height: UInt32) throws -> Bool {
+        if let parent = confirmed.first(where: { $0.tx.txid == input.previousOutput.txid }) {
+            return UInt64(height) + 1 >= UInt64(parent.height) + UInt64(spend.relativeDelay)
+        }
+        // A pre-signed CPFP must relay together with its already-authorized
+        // commitment, before confirmation. CSV/HTLC claims still wait for blocks.
+        guard spend.relativeDelay == 0, let raw = spend.unconfirmedParent else { return false }
+        return try Transaction.decode(raw).txid == input.previousOutput.txid
+    }
+
 }
 
 extension ChannelState {

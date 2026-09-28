@@ -44,6 +44,8 @@ final class LightningAppUITests: XCTestCase {
         XCTAssertEqual(app.staticTexts["lightningReceiveProvider"].value as? String, "Olympus by ZEUS")
         XCTAssertTrue(app.staticTexts["lightningReceivable"].label.contains("0 sats"))
         XCTAssertFalse(app.staticTexts["lightningReceiveInvoice"].exists)
+        app.typeInto("lightningReceiveAmount", "500")
+        app.dismissKeyboard()
         tap(app, "lightningGetCapacity")
         let options = app.buttons["lightningProviderOptions"]
         XCTAssertTrue(poll(timeout: 900, interval: 3, "fresh verified mainnet scan enables provider setup") {

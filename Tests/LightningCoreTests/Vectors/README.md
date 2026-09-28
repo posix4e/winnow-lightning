@@ -21,3 +21,13 @@ comes from public builders in the pinned LDK reference library. The separate
 host harness regenerates it and verifies Swift-built requests and static
 invoices through LDK's normal parsers and signature checks. Keys are public,
 disposable fixtures; codec acceptance alone is not async payment settlement.
+
+`BIP353/proof-{1...5}.json` preserve the RFC9102 AuthenticationChain bytes from
+the primary BIP353 published test vectors. Each file includes its source URL,
+human-readable name and the historical validation time (August 7, 2025 noon UTC,
+within the published signatures' validity windows). The complete BIP source is
+https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki, authored by Matt
+Corallo and Bastien Teinturier. Simple and cross-domain wildcard/CNAME proofs
+must authenticate; the two published invalid proofs must fail for ambiguous
+payment records and absent wildcard denial evidence. Local synthetic DNAME,
+P384 and Ed25519 tests separately exercise supported cryptographic primitives.

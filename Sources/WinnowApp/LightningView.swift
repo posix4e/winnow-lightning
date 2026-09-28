@@ -9,8 +9,12 @@ struct LightningView: View {
     @State private var setup = false
     @State private var send = false
     @State private var sendInvoice = false
+    @State private var sendOffer = false
     @State private var receive = false
     @State private var capacity = ""
+    @State private var backup = false
+    @State private var bump = false
+    @State private var bumpChannelID: Data?
     @FocusState private var editingCapacity: Bool
     @State private var review: LightningReview?
     @State private var busy = false
@@ -22,7 +26,7 @@ struct LightningView: View {
                     Text(controller.networkNotice).font(.headline)
                     Text("Experimental Lightning. Background checks can relay pre-signed channel recovery transactions, but this beta has no external watchtower.")
                         .font(.footnote).foregroundStyle(.secondary)
-                    Text("Each network has its own wallet and channels. Wallet and channel recovery data stay on this device.")
+                    Text("Each network has its own wallet and channels. Save an encrypted Lightning recovery file and its separate recovery phrase before relying on this device alone.")
                         .font(.footnote).foregroundStyle(.secondary)
                     LabeledContent("Connection", value: controller.connection)
                         .accessibilityElement(children: .ignore)
@@ -38,7 +42,8 @@ struct LightningView: View {
                 receiveSection
                 Section("Payments") {
                     Button("Pay Lightning invoice") { sendInvoice = true }.accessibilityIdentifier("lightningSendInvoice")
-                    Button("Pay a receive offer") { send = true }.accessibilityIdentifier("lightningSend")
+                    Button("Pay reusable offer or ₿name") { sendOffer = true }.accessibilityIdentifier("lightningSendOrdinaryOffer")
+                    Button("Pay an async receive offer") { send = true }.accessibilityIdentifier("lightningSend")
                         .disabled(!controller.channels.contains(where: { $0.phase == .ready }))
                     ForEach(controller.payments.reversed(), id: \.id) { payment in
                         VStack(alignment: .leading, spacing: 4) {
@@ -62,8 +67,15 @@ struct LightningView: View {
             .disabled(busy)
             .sheet(isPresented: $setup) { LightningSetupView(controller: controller) }
             .sheet(isPresented: $sendInvoice) { LightningInvoiceSendView(controller: controller) }
+            .sheet(isPresented: $sendOffer) { LightningOfferSendView(controller: controller) }
             .sheet(isPresented: $send) { LightningSendView(controller: controller) }
             .sheet(isPresented: $receive) { LightningReceiveView(controller: controller) }
+            .sheet(isPresented: $backup) { LightningBackupView() }
+            .sheet(isPresented: $bump) {
+                if let channel = controller.channels.first(where: { $0.id == bumpChannelID }) {
+                    LightningFeeBumpView(controller: controller, channel: channel)
+                }
+            }
             .sheet(item: $review) { LightningReviewView(controller: controller, review: $0) }
             .task {
                 while !Task.isCancelled {
@@ -89,6 +101,11 @@ struct LightningView: View {
     }
     private var channelSection: some View {
         Section("Channels") {
+            Button("Lightning recovery file") { backup = true }.accessibilityIdentifier("lightningBackup")
+            if controller.recoveryStatus != nil {
+                Text("Recovery mode: reconnect to original counterparties and sync for returned funds. Payments and old commitment broadcasts are disabled.")
+                    .accessibilityIdentifier("lightningRecoveryOnly")
+            }
             if controller.channels.allSatisfy({ $0.phase == .closed }) {
                 Text("This funds a channel with your Bitcoin for spending. To set up receiving capacity, use Receive Lightning.")
                     .font(.footnote).foregroundStyle(.secondary)
@@ -120,6 +137,10 @@ struct LightningView: View {
                         } }
                             .buttonStyle(.borderless).accessibilityIdentifier("lightningForceClose")
                     }
+                    if channel.format.hasAnchors && controller.recoveryStatus == nil && channel.needsMonitoring {
+                        Button("Review recovery fee bump") { bumpChannelID = channel.id; bump = true }
+                            .buttonStyle(.borderless).accessibilityIdentifier("lightningFeeBump")
+                    }
                 }
             }
             ForEach(controller.funding, id: \.temporaryID) { request in
@@ -132,7 +153,15 @@ struct LightningView: View {
     private var receiveSection: some View {
         Section("Receive") {
             Button("Receive Lightning") { receive = true }.accessibilityIdentifier("lightningReceive")
-            Button("Create receive offer") { run { try await controller.registerOffer(model: model) } }
+            Button("Create reusable offer") { run { try await controller.registerOrdinaryOffer(model: model) } }
+                .disabled(controller.maximumReceivableSat == 0).accessibilityIdentifier("lightningCreateOrdinaryOffer")
+            ForEach(controller.ordinaryOffers, id: \.bytes) { offer in
+                Text(offer.string).font(.caption.monospaced()).lineLimit(3).textSelection(.enabled)
+                    .accessibilityIdentifier("lightningOrdinaryReceiveOffer").accessibilityValue(offer.string)
+                ShareLink("Share reusable offer", item: offer.string)
+                Button("Copy reusable offer") { ClipboardPolicy.interchange.apply(offer.string) }
+            }
+            Button("Create async receive offer") { run { try await controller.registerOffer(model: model) } }
                 .disabled(controller.profile?.receive == nil).accessibilityIdentifier("lightningCreateOffer")
             ForEach(controller.offers, id: \.id) { offer in
                 Text("Reusable until \(Date(timeIntervalSince1970: TimeInterval(offer.expiresAt)).formatted())").font(.caption)

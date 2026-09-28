@@ -27,9 +27,9 @@ public struct LightningFeatures: Sendable, Equatable, Codable {
               bits.allSatisfy({ !bits.contains($0 ^ 1) }) else { throw LightningError.invalidMessage }
     }
     /// Baseline data-loss protection, TLV payloads/payment secrets, static remote
-    /// keys, anysegwit shutdowns and explicit channel types. No MPP, anchors
+    /// keys, anchor outputs, anysegwit shutdowns and explicit channel types. No MPP
     /// or async extensions.
-    public static var channelOpening: LightningFeatures { LightningFeatures(bytes: Data([0x20, 0, 0x08, 0, 0xa2, 2])) }
+    public static var channelOpening: LightningFeatures { LightningFeatures(bytes: Data([0x20, 0, 0x08, 0x80, 0xa2, 2])) }
 
     /// Client support for blinded receives and onion messages. The client does
     /// not advertise the holding-provider feature.

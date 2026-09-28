@@ -86,18 +86,23 @@ public actor LightningChainDriver {
     }
     private func reconcileAncestry(onReorg: (@Sendable (UInt32) async throws -> Void)?) async throws {
         let status = await engine.chainStatus(), positions = status.positions
-        guard await headers.blockHash(at: status.origin.height) == status.origin.hash else { throw LightningChainError.recoveryRequired }
+        try await validateOrigin(status.origin)
         guard let last = positions.last, await headers.blockHash(at: last.height) != last.hash else { return }
+        guard let ancestor = await commonAncestor(status) else { throw LightningChainError.recoveryRequired }
+        try await onReorg?(ancestor.height)
+        try await engine.blocksDisconnected(to: ancestor.height, hash: ancestor.hash)
+    }
+    private func validateOrigin(_ origin: LightningEngine.ChainStatus.Position) async throws {
+        guard await headers.blockHash(at: origin.height) == origin.hash else { throw LightningChainError.recoveryRequired }
+    }
+    private func commonAncestor(_ status: LightningEngine.ChainStatus) async -> LightningEngine.ChainStatus.Position? {
+        let positions = status.positions
         for position in positions.reversed() where await headers.blockHash(at: position.height) == position.hash {
-            try await onReorg?(position.height)
-            try await engine.blocksDisconnected(to: position.height, hash: position.hash)
-            return
+            return position
         }
         if positions.first?.height == status.origin.height + 1 {
-            try await onReorg?(status.origin.height)
-            try await engine.blocksDisconnected(to: status.origin.height, hash: status.origin.hash)
-            return
+            return status.origin
         }
-        throw LightningChainError.recoveryRequired
+        return nil
     }
 }

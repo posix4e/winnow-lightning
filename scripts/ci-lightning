@@ -78,7 +78,8 @@ def main():
                     result = rpc('testmempoolaccept', json.dumps([transactions[name]]))[0]
                     if result['allowed'] != allowed:
                         raise AssertionError(f'{name}: expected allowed={allowed}: {result}')
-                    (accepted if allowed else rejected).append(name)
+                    label = ('anchor_' if transactions.get('format') == 'anchors' else '') + name
+                    (accepted if allowed else rejected).append(label)
 
                 def send(transactions, name):
                     check(transactions, name, True)
@@ -132,6 +133,41 @@ def main():
                 send(raced, 'timeout')
                 rpc('generatetoaddress', 1, address)
                 send(raced, 'penalty_stage_timeout')
+                rpc('generatetoaddress', 1, address)
+                # Anchor commitments retain both HTLC variants, use zero-fee
+                # second stages, and permit wallet-funded 0x83 augmentation.
+                def funded_anchor():
+                    txid = rpc('sendtoaddress', funding_address, '0.001')
+                    funding = rpc('gettransaction', txid)['hex']
+                    rpc('generatetoaddress', 1, address)
+                    return swift('anchor-transactions', funding, destination, str(rpc('getblockcount') + 3))
+
+                def augment(transactions, name):
+                    deposit = rpc('sendtoaddress', address, '0.002')
+                    rpc('generatetoaddress', 1, address)
+                    coin = next(coin for coin in rpc('listunspent') if coin['txid'] == deposit and coin['address'] == address)
+                    raw = swift('augment-htlc', transactions[name], deposit, str(coin['vout']), '200000', destination, '1000')['transaction']
+                    signed = rpc('signrawtransactionwithwallet', raw)
+                    assert signed['complete'], signed
+                    return signed['hex']
+
+                anchor = funded_anchor()
+                send(anchor, 'commitment')
+                check(anchor, 'remote_immediate', False)
+                rpc('generatetoaddress', 1, address)
+                send(anchor, 'remote_immediate')
+                check(anchor, 'success', False)  # Peer signatures valid, but no relay fee yet.
+                anchor['success'] = augment(anchor, 'success')
+                send(anchor, 'success')
+                rpc('generatetoaddress', 6, address)
+                anchor['timeout'] = augment(anchor, 'timeout')
+                send(anchor, 'timeout')
+                rpc('generatetoaddress', 1, address)
+                anchor_revoked = funded_anchor()
+                send(anchor_revoked, 'commitment')
+                rpc('generatetoaddress', 1, address)
+                for name in ['penalty_delayed', 'penalty_timeout', 'penalty_success']:
+                    send(anchor_revoked, name)
                 rpc('generatetoaddress', 1, address)
                 print(json.dumps({'bitcoin_core': rpc('getnetworkinfo')['subversion'],
                                   'accepted': accepted, 'rejected': rejected, 'result': 'passed'}, indent=2))

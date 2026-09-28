@@ -47,18 +47,28 @@ public enum LightningLiquidity {
         public let announceChannel: Bool
         public let payment: Payment
         public func validate(request: Purchase, network: BitcoinNetwork, now: UInt64) throws -> UInt64 {
+            try validateBindings(request)
+            let quoted = try validatedPayment()
+            try validateInvoice(quoted.payment, fee: quoted.fee, network: network, now: now)
+            return quoted.fee
+        }
+        private func validateBindings(_ request: Purchase) throws {
             guard !orderId.isEmpty, orderId.utf8.count <= 64, orderState == "CREATED",
                   lspBalanceSat == request.lspBalanceSat, clientBalanceSat == "0", !announceChannel,
                   requiredChannelConfirmations == request.requiredChannelConfirmations,
                   fundingConfirmsWithinBlocks == request.fundingConfirmsWithinBlocks,
                   channelExpiryBlocks == request.channelExpiryBlocks else { throw LightningError.invalidMessage }
+        }
+        private func validatedPayment() throws -> (payment: Payment.Bolt11, fee: UInt64) {
             guard let payment = payment.bolt11, payment.state == "EXPECT_PAYMENT",
                   let fee = UInt64(payment.feeTotalSat), fee > 0, fee <= 1_000_000,
                   payment.feeTotalSat == payment.orderTotalSat else { throw LightningError.invalidAmount }
+            return (payment, fee)
+        }
+        private func validateInvoice(_ payment: Payment.Bolt11, fee: UInt64, network: BitcoinNetwork, now: UInt64) throws {
             let invoice = try Bolt11Invoice.decode(payment.invoice, network: network)
             guard invoice.amountMsat == fee * 1000, invoice.expiresAt > now,
                   let expires = LightningLiquidity.expiry(payment.expiresAt), expires > now else { throw LightningError.invalidMessage }
-            return fee
         }
     }
     public static func expiry(_ text: String) -> UInt64? {

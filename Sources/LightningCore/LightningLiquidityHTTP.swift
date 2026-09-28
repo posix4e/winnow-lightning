@@ -35,16 +35,26 @@ public struct LightningLiquidityHTTP: Sendable {
         let session = URLSession(configuration: configuration, delegate: NoRedirects(), delegateQueue: nil)
         defer { session.invalidateAndCancel() }
         let (bytes, response) = try await session.bytes(for: request)
+        let http = try validateResponse(response)
+        return try await readBody(bytes, response: http)
+    }
+    private func validateResponse(_ response: URLResponse) throws -> HTTPURLResponse {
         guard let http = response as? HTTPURLResponse, http.url?.host == base.host else { throw LightningError.invalidMessage }
+        return http
+    }
+    private func readBody(_ bytes: URLSession.AsyncBytes, response: HTTPURLResponse) async throws -> Data {
         var data = Data()
         for try await byte in bytes {
             guard data.count < 32_768 else { throw LightningError.invalidMessage }
             data.append(byte)
         }
-        guard http.statusCode == 200 else {
-            throw LightningLiquidityError.provider("Channel service returned HTTP \(http.statusCode). No fee was paid.")
-        }
+        try validateStatus(response.statusCode)
         return data
+    }
+    private func validateStatus(_ status: Int) throws {
+        guard status == 200 else {
+            throw LightningLiquidityError.provider("Channel service returned HTTP \(status). No fee was paid.")
+        }
     }
     private final class NoRedirects: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
         func urlSession(_ session: URLSession, task: URLSessionTask,

@@ -1,0 +1,128 @@
+#!/usr/bin/env python3
+"""Export package and simulator evidence, then enforce the method CRAP cap.
+
+Call check-crap snapshot before instrumented builds. This collector never
+launches another test run, changes coverage, or assumes unmeasured code passed.
+"""
+import argparse
+import json
+from pathlib import Path
+import subprocess
+import sys
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def test_binary(bundle):
+    candidates = [bundle / 'Contents/MacOS' / bundle.stem, bundle / bundle.stem]
+    return next((path for path in candidates if path.is_file()), None)
+
+
+def package_inputs(build):
+    profiles = sorted({path.resolve() for path in build.rglob('default.profdata') if path.parent.name == 'codecov'})
+    if len(profiles) != 1:
+        raise ValueError(f'Expected one instrumented package coverage profile; found {len(profiles)}')
+    binaries = sorted({binary.resolve() for bundle in build.rglob('*.xctest') if (binary := test_binary(bundle))})
+    if not binaries:
+        raise ValueError('No compiled package test binaries')
+    return profiles[0], binaries
+
+
+def app_inputs(derived, variant):
+    products = derived / 'Build/Products' / f'{variant}-iphonesimulator'
+    app = products / 'WinnowApp.app'
+    if not (app / 'WinnowApp').is_file():
+        raise ValueError(f'Missing instrumented {variant} app executable')
+    binaries = [app / 'WinnowApp', app / 'WinnowApp.debug.dylib']
+    bundles = list(products.rglob('WinnowAppTests.xctest'))
+    binaries += [binary for bundle in bundles if (binary := test_binary(bundle))]
+    binaries = sorted({path.resolve() for path in binaries if path.is_file()})
+    profiles = sorted({path.resolve() for path in (derived / 'Build/ProfileData').rglob('Coverage.profdata')})
+    if not binaries or not profiles:
+        raise ValueError('Missing instrumented simulator app binaries or coverage profiles')
+    return profiles, binaries
+
+
+def export(profile, binaries, output):
+    command = [str(ROOT / 'scripts/check-crap'), 'export-llvm', '--profile', str(profile), '--output', str(output)]
+    for binary in binaries:
+        command += ['--binary', str(binary)]
+    subprocess.run(command, check=True)
+
+
+def validate_package_sources(lines, compiled_manifest, final_manifest):
+    """A package run can precede App-only edits; its own source must match."""
+    compiled = json.loads(compiled_manifest.read_text())['files']
+    final = json.loads(final_manifest.read_text())['files']
+    observed = set()
+    for record in lines.read_text().splitlines():
+        if not record.startswith('SF:'):
+            continue
+        parts = Path(record[3:]).parts
+        if 'Sources' not in parts:
+            continue
+        source = '/'.join(parts[parts.index('Sources'):])
+        if source in compiled or source in final:
+            observed.add(source)
+    changed = sorted(source for source in observed if compiled.get(source) != final.get(source))
+    if changed:
+        raise ValueError('Package coverage source manifest mismatch: ' + ', '.join(changed[:12]))
+    if not observed:
+        raise ValueError('Package coverage has no first-party Sources evidence')
+    return sorted(observed)
+
+
+def collect(args):
+    output = args.output.resolve(); output.mkdir(parents=True, exist_ok=True)
+    package_profile, package_binaries = package_inputs(args.package_build.resolve())
+    export(package_profile, package_binaries, output / 'package.lcov')
+    package_manifest = (args.package_manifest or args.manifest).resolve()
+    package_sources = validate_package_sources(output / 'package.lcov', package_manifest, args.manifest.resolve())
+    (output / 'package-source-manifest.json').write_bytes(package_manifest.read_bytes())
+    (output / 'final-source-manifest.json').write_bytes(args.manifest.read_bytes())
+    applications = [(args.derived_data, args.variant)] + [(Path(directory), variant)
+                     for directory, variant in args.additional_app]
+    app_receipts, coverage = [], [output / 'package.lcov']
+    for index, (derived, variant) in enumerate(applications):
+        app_profiles, app_binaries = app_inputs(derived.resolve(), variant)
+        merged = output / f'app-{index}.profdata'
+        subprocess.run(['xcrun', 'llvm-profdata', 'merge', '-sparse', '-o', str(merged),
+                        *map(str, app_profiles)], check=True)
+        lines = output / f'app-{index}.lcov'
+        export(merged, app_binaries, lines)
+        coverage.append(lines)
+        app_receipts.append({'variant': variant, 'derived_data': str(derived.resolve()),
+                             'profiles': list(map(str, app_profiles)), 'binaries': list(map(str, app_binaries))})
+    receipt = {'schema': 1, 'package_profile': str(package_profile), 'package_binaries': list(map(str, package_binaries)),
+               'package_source_manifest': str(package_manifest), 'package_source_files': package_sources,
+               'applications': app_receipts, 'source_manifest': str(args.manifest.resolve())}
+    (output / 'coverage-inputs.json').write_text(json.dumps(receipt, indent=2) + '\n')
+    command = [str(ROOT / 'scripts/check-crap'), 'report', '--manifest', str(args.manifest.resolve()),
+               '--output', str(output / 'report.json')]
+    for lines in coverage:
+        command += ['--coverage', str(lines)]
+    subprocess.run(command, check=True)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--package-build', type=Path, required=True)
+    parser.add_argument('--derived-data', type=Path, required=True)
+    parser.add_argument('--variant', default='ResearchDebug')
+    parser.add_argument('--additional-app', nargs=2, action='append', default=[], metavar=('DERIVED_DATA', 'VARIANT'),
+                        help='Union another instrumented app configuration; declared evidence must exist')
+    parser.add_argument('--manifest', type=Path, required=True)
+    parser.add_argument('--package-manifest', type=Path,
+                        help='Original package-build snapshot when only uncompiled App sources changed afterward')
+    parser.add_argument('--output', type=Path, required=True)
+    args = parser.parse_args()
+    try:
+        collect(args)
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        print('CRAP gate failed: ' + str(error), file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

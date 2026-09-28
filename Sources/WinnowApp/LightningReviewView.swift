@@ -7,6 +7,8 @@ enum LightningReview: Identifiable {
     case funding(LightningAppController.FundingReview)
     case payment(LightningAppController.PaymentReview)
     case invoice(LightningAppController.InvoiceReview)
+    case feeBump(LightningAppController.FeeBumpReview)
+    case ordinaryInvoice(LightningAppController.OrdinaryInvoiceReview)
     case close(LightningAppController.CloseReview)
     var id: String {
         switch self {
@@ -14,7 +16,22 @@ enum LightningReview: Identifiable {
         case .funding(let review): "funding-" + review.request.temporaryID.hex
         case .payment(let review): "payment-" + review.request.id.hex
         case .invoice(let review): "invoice-" + review.request.id.hex
+        case .feeBump(let review): "fee-bump-" + review.quote.id.hex
+        case .ordinaryInvoice(let review): "ordinary-invoice-" + review.request.id.hex
         case .close(let review): "close-\(review.force)-" + review.channel.id.hex
+        }
+    }
+
+    @MainActor
+    func confirm(controller: LightningAppController, model: AppModel) async throws {
+        switch self {
+        case .profile(let profile): try await controller.saveProfile(profile, model: model)
+        case .funding(let review): try await controller.fund(review, model: model)
+        case .payment(let review): try await controller.pay(review, model: model)
+        case .invoice(let review): try await controller.payInvoice(review, model: model)
+        case .feeBump(let review): try await controller.approveFeeBump(review, model: model)
+        case .ordinaryInvoice(let review): try await controller.payOrdinaryInvoice(review, model: model)
+        case .close(let review): try await controller.close(review, model: model)
         }
     }
 }
@@ -97,6 +114,28 @@ struct LightningReviewView: View {
                     LabeledContent("Return address") { Text(review.address).font(.caption.monospaced()) }
                 }
             }
+        case .feeBump(let review):
+            Section("Recovery fee bump") {
+                LabeledContent("Parent fee", value: "\(review.quote.parentFeeSat) sats")
+                LabeledContent("Child fee", value: "\(review.quote.feeSat) sats")
+                LabeledContent("Total package fee", value: "\(review.quote.packageFeeSat) sats")
+                LabeledContent("Maximum total fee", value: "\(review.quote.totalFeeLimitSat) sats")
+                LabeledContent("Wallet inputs", value: "\(review.quote.selected.count)")
+                Text(review.quote.kind == .commitment ? "Approval publishes the current commitment and its fee-paying child. The channel will close." : "Approval adds reserved wallet inputs to the signed HTLC recovery transaction.")
+                Text("Signing requires device authentication. Background work can only relay already approved signed transactions.")
+            }
+        case .ordinaryInvoice(let review):
+            Section("Reusable offer payment") {
+                if let name = review.name { LabeledContent("DNSSEC name", value: name.display) }
+                if let description = review.invoice.offer.description { Text(description) }
+                LabeledContent("Amount", value: "\(Bolt11Invoice.sats(review.invoice.amountMsat)) sats")
+                LabeledContent("Routing fee", value: "\(Bolt11Invoice.sats(review.quote.feeMsat)) sats")
+                LabeledContent("Maximum fee", value: "\(Bolt11Invoice.sats(review.request.feeLimitMsat)) sats")
+                LabeledContent("Total", value: "\(Bolt11Invoice.sats(review.quote.amountMsat)) sats")
+                LabeledContent("Payment timeout", value: "\(review.quote.delta) blocks")
+                DisclosureGroup("Signed invoice") { Text(review.invoice.string).font(.caption.monospaced()).textSelection(.enabled) }
+                Text("The invoice signature binds the recipient, payment hash, amount and your request. Keep Winnow open until payment settles.")
+            }
         }
     }
     private func confirm() {
@@ -105,13 +144,7 @@ struct LightningReviewView: View {
         Task {
             defer { busy = false }
             do {
-                switch review {
-                case .profile(let profile): try await controller.saveProfile(profile, model: model)
-                case .funding(let review): try await controller.fund(review, model: model)
-                case .payment(let review): try await controller.pay(review, model: model)
-                case .invoice(let review): try await controller.payInvoice(review, model: model)
-                case .close(let review): try await controller.close(review, model: model)
-                }
+                try await review.confirm(controller: controller, model: model)
                 onConfirmed()
                 dismiss()
             } catch { self.error = error.localizedDescription }

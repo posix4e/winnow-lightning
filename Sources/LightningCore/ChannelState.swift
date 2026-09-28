@@ -15,11 +15,11 @@ struct ChannelSecrets: Codable {
     func point(_ number: UInt64) throws -> Data {
         try ChannelKeys.publicKey(secret: ChannelKeys.commitmentSecret(seed: seed, number: number))
     }
-    func terms(capacity: UInt64) throws -> ChannelTerms {
+    func terms(capacity: UInt64, format: ChannelFormat = .staticRemoteKey) throws -> ChannelTerms {
         try ChannelTerms(maximumHTLCMsat: capacity * 1000, reserveSat: max(546, capacity / 100),
             funding: ChannelKeys.publicKey(secret: funding), revocation: ChannelKeys.publicKey(secret: revocation),
             payment: ChannelKeys.publicKey(secret: payment), delayed: ChannelKeys.publicKey(secret: delayed),
-            htlc: ChannelKeys.publicKey(secret: htlc), firstPoint: point(0))
+            htlc: ChannelKeys.publicKey(secret: htlc), firstPoint: point(0), format: format)
     }
 }
 
@@ -58,6 +58,7 @@ struct ChannelState: Codable {
     var recovery: ChannelResolution.Policy?
     var resolutions: [ChannelResolution.Spend] = []
     var invoicePolicy: LightningEngine.InvoicePolicy?
+    var feeBumps: [AnchorFeeBump]?
 
     var id: Data {
         guard let fundingTxid, let fundingOutput else { return temporaryID }
@@ -85,7 +86,7 @@ struct ChannelState: Codable {
             remoteMsat: localOwner ? view.remoteMsat : view.localMsat, localIsFunder: ownerIsFunder,
             dustSat: owner.dustSat, feePerKW: view.feePerKW, delay: other.delay, number: number,
             openerPaymentBasepoint: isFunder ? local.payment : remote.payment,
-            accepterPaymentBasepoint: isFunder ? remote.payment : local.payment, keys: keys,
+            accepterPaymentBasepoint: isFunder ? remote.payment : local.payment, keys: keys, format: local.format,
             htlcs: view.htlcs.map { .init(id: $0.id, offered: localOwner ? $0.offered : !$0.offered,
                 amountMsat: $0.amountMsat, paymentHash: $0.paymentHash, expiry: $0.expiry) }))
     }
@@ -100,8 +101,9 @@ struct ChannelState: Codable {
     func validateNegotiation() throws {
         guard let remote else { throw LightningError.invalidState }
         try local.validate(capacity: capacity); try remote.validate(capacity: capacity)
+        guard local.format == remote.format else { throw LightningError.invalidMessage }
         guard local.dustSat <= remote.reserveSat, remote.dustSat <= local.reserveSat else { throw LightningError.invalidAmount }
-        let fee = UInt64(feePerKW) * 724 / 1000
+        let fee = UInt64(feePerKW) * local.format.commitmentWeight / 1000 + local.format.anchorReserveSat
         let funderReserve = isFunder ? remote.reserveSat : local.reserveSat
         guard (capacity * 1000 - pushMsat) / 1000 >= fee + funderReserve else { throw LightningError.invalidAmount }
     }

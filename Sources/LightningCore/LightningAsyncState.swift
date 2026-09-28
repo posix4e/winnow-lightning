@@ -51,7 +51,7 @@ extension LightningEngine {
         try healthy()
         guard let index = state.async.outbox.firstIndex(where: { $0.sequence == sequence }) else { return }
         var next = state
-        if [1, 2, 5].contains(next.async.outbox[index].key.first) {
+        if [1, 2, 5, 8].contains(next.async.outbox[index].key.first) {
             next.async.outbox[index].publishedAt = now
         } else { next.async.outbox.remove(at: index) }
         try persist(next)
@@ -77,7 +77,7 @@ extension LightningEngine {
         next.nextSequence += 1
     }
     public func receiveOnionMessage(_ message: LightningWire.Message, now: UInt64) throws -> [Event] {
-        try healthy()
+        try requireUsableChannels()
         guard chainIsCurrent else { throw LightningError.invalidState }
         guard message.type == 513 else { throw LightningError.invalidMessage }
         do { return try dispatchOnion(message, now: now) }
@@ -91,14 +91,19 @@ extension LightningEngine {
         }
     }
     private func dispatchOnion(_ message: LightningWire.Message, now: UInt64) throws -> [Event] {
-        guard case .receive(let content, let context, let reply) = try OnionMessage.peel(message, nodeSecret: state.nodeSecret, authenticationKey: asyncAuthKey),
-              context.count == 33 else { throw LightningError.invalidMessage }
+        let peeled = try OnionMessage.peel(message, nodeSecret: state.nodeSecret, authenticationKey: asyncAuthKey)
+        if case .invoiceRequest(let content, let reply) = peeled {
+            try receiveOrdinaryRequest(content, reply: reply, offerID: nil, now: now); return []
+        }
+        guard case .receive(let content, let context, let reply) = peeled, context.count == 33 else { throw LightningError.invalidMessage }
         let id = Data(context.dropFirst())
         switch context.first {
         case 1: return try acceptStaticInvoice(content, id: id, now: now)
         case 2: try receiveOfferRegistration(content, reply: reply, id: id, now: now)
         case 3: try releaseHeldPayment(content, reply: reply, id: id, now: now)
         case 4: try replyToInvoiceRequest(content, reply: reply, id: id, now: now)
+        case 8: try receiveOrdinaryRequest(content, reply: reply, offerID: id, now: now)
+        case 9: try acceptOrdinaryInvoice(content, id: id, now: now)
         default: throw LightningError.invalidMessage
         }
         return []

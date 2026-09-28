@@ -102,6 +102,32 @@ private struct LockedStoreKeys: StoreKeyVault {
 }
 
 extension BackgroundSyncTests {
+    func testRecoveryAnnouncementsPersistParentChildAndSingleClaimsWithoutInventingServing() async throws {
+        let pool = PeerPool(params: .regtest, peerCount: 0)
+        let broadcaster = try TxBroadcaster(pool: pool)
+        let parent = makeFakeSegwitTx()
+        var child = makeFakeSegwitTx()
+        child.inputs[0].previousOutput = .init(txid: parent.txid, vout: 0)
+        let channel = Data(repeating: 1, count: 32)
+        let events: [LightningEngine.Event] = [
+            .broadcastClose(channelID: channel, transaction: parent.serialized(includeWitness: true)),
+            .broadcastRecovery(channelID: channel, transaction: child.serialized(includeWitness: true))]
+        let pending = try await announceRecoveryTransactions(events, broadcaster: broadcaster)
+        XCTAssertEqual(pending, Set([parent.txid, child.txid]))
+        let stored = Set(await broadcaster.pendingTxids)
+        XCTAssertEqual(stored, pending)
+        let served = await broadcaster.wasServed(child.txid)
+        XCTAssertFalse(served, "registration alone cannot report a completed recovery relay")
+        let again = try await announceRecoveryTransactions([events[1]], broadcaster: broadcaster)
+        XCTAssertEqual(again, Set([child.txid]))
+        do {
+            _ = try await announceRecoveryTransactions([.channelReady(channel)], broadcaster: broadcaster)
+            XCTFail("non-broadcast event mutated relay intentions")
+        } catch LightningError.invalidState {}
+        let unchanged = Set(await broadcaster.pendingTxids)
+        XCTAssertEqual(unchanged, stored)
+        await broadcaster.shutdown(); await pool.stop()
+    }
     func testColdBackgroundMonitorNeverOpensFullJournalKey() async throws {
         let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

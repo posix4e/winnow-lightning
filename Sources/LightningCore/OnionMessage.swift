@@ -10,6 +10,9 @@ public enum OnionMessage {
     public enum Peeled: Sendable {
         case forward(Destination, LightningWire.Message)
         case receive(content: LightningWire.TLV, context: Data, reply: BlindedPath?)
+        /// Only a signed ordinary invoice request can arrive without a private
+        /// reply context. Async replies continue to require the receiver MAC.
+        case invoiceRequest(content: LightningWire.TLV, reply: BlindedPath?)
     }
     public static func path(nodes: [Data], context: Data, authenticationKey: Data) throws -> BlindedPath {
         guard !nodes.isEmpty, nodes.count <= 20, context.count <= 4096, authenticationKey.count == 32 else { throw LightningError.invalidMessage }
@@ -19,6 +22,7 @@ public enum OnionMessage {
         }
         return try blind(nodes: nodes, payloads: payloads)
     }
+    public static func directPath(node: Data) throws -> BlindedPath { try blind(nodes: [node], payloads: [Data()]) }
     static func blind(nodes: [Data], payloads: [Data]) throws -> BlindedPath {
         guard !nodes.isEmpty, nodes.count == payloads.count, nodes.count <= 20 else { throw LightningError.invalidMessage }
         var secret = try P256K.Signing.PrivateKey().dataRepresentation
@@ -92,6 +96,7 @@ public enum OnionMessage {
         return try .forward(destination, envelope(blinding: nextBlinding, packet: packet))
     }
     private static func receive(_ controls: [LightningWire.TLV], fields: [LightningWire.TLV], authenticationKey: Data) throws -> Peeled {
+        if controls.isEmpty { return try publicInvoiceRequest(fields) }
         guard !controls.contains(where: { [2, 4, 8].contains($0.type) }), let authenticated = controls.first(where: { $0.type == 65537 })?.value,
               authenticated.count >= 32, fields.allSatisfy({ $0.type == 2 || $0.type == 4 || $0.type >= 64 }) else { throw LightningError.invalidMessage }
         let context = Data(authenticated.dropLast(32)), tag = authenticated.suffix(32)
@@ -105,6 +110,18 @@ public enum OnionMessage {
             let path = try BlindedPath(reader: &reader); try reader.requireEnd(); return path
         }
         return .receive(content: content[0], context: context, reply: reply)
+    }
+    private static func publicInvoiceRequest(_ fields: [LightningWire.TLV]) throws -> Peeled {
+        guard fields.allSatisfy({ [2, 4, 64].contains($0.type) }),
+              let content = fields.first(where: { $0.type == 64 }) else { throw LightningError.invalidMessage }
+        // Syntax and the payer signature are checked before this reaches the
+        // engine's exact persisted-offer/path binding checks.
+        _ = try InvoiceRequest(bytes: content.value)
+        let reply = try fields.first(where: { $0.type == 2 }).map { field in
+            var reader = LightningWire.Reader(field.value)
+            let path = try BlindedPath(reader: &reader); try reader.requireEnd(); return path
+        }
+        return .invoiceRequest(content: content, reply: reply)
     }
     private static func envelope(blinding: Data, packet: Data) throws -> LightningWire.Message {
         _ = try ChannelKeys.point(blinding)

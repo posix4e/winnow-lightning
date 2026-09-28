@@ -2,6 +2,7 @@ import Foundation
 
 extension LightningEngine {
     public func isChainCurrent() -> Bool { chainIsCurrent }
+    public func currentRevision() -> UInt64 { state.revision }
     public struct FundingRequest: Sendable, Equatable {
         public let temporaryID: Data, peer: Data, scriptPubKey: Data
         public let amountSat: UInt64

@@ -122,16 +122,17 @@ extension LightningEngine {
         try persist(next)
     }
     func validAsyncReceive(_ htlc: ChannelTransactions.HTLC, peeled: OnionPacket.Peeled, blinding: Data, state: State) -> ReceiveRequest? {
-        do {
-            let received = try BlindedPayment.receive(peeled, blinding: blinding, nodeSecret: state.nodeSecret,
-                authenticationKey: asyncAuthKey, htlc: htlc, height: chainHeight)
-            guard let saved = state.async.receives.first(where: { $0.configuration.id == received.offerID }), saved.ready,
-                  let raw = saved.invoice, !state.payments.contains(where: { $0.payment.hash == htlc.paymentHash }) else { return nil }
-            let invoice = try StaticInvoice(bytes: raw)
-            try invoice.validatePayment(for: received.request.offer, chain: state.chain,
-                now: UInt64(Date().timeIntervalSince1970), amountMsat: received.request.amountMsat)
-            guard received.request.chain == state.chain, received.request.amountMsat <= saved.configuration.maximumMsat else { return nil }
-            return ReceiveRequest(id: htlc.paymentHash, preimage: received.preimage, secret: Data(), amountMsat: received.request.amountMsat, expiry: htlc.expiry)
-        } catch { return nil }
+        try? validateAsyncReceive(htlc, peeled: peeled, blinding: blinding, state: state)
+    }
+    private func validateAsyncReceive(_ htlc: ChannelTransactions.HTLC, peeled: OnionPacket.Peeled, blinding: Data, state: State) throws -> ReceiveRequest {
+        let received = try BlindedPayment.receive(peeled, blinding: blinding, nodeSecret: state.nodeSecret,
+            authenticationKey: asyncAuthKey, htlc: htlc, height: chainHeight)
+        guard let saved = state.async.receives.first(where: { $0.configuration.id == received.offerID }), saved.ready,
+              let raw = saved.invoice, !state.payments.contains(where: { $0.payment.hash == htlc.paymentHash }) else { throw LightningError.invalidMessage }
+        let invoice = try StaticInvoice(bytes: raw)
+        try invoice.validatePayment(for: received.request.offer, chain: state.chain,
+            now: UInt64(Date().timeIntervalSince1970), amountMsat: received.request.amountMsat)
+        guard received.request.chain == state.chain, received.request.amountMsat <= saved.configuration.maximumMsat else { throw LightningError.invalidAmount }
+        return ReceiveRequest(id: htlc.paymentHash, preimage: received.preimage, secret: Data(), amountMsat: received.request.amountMsat, expiry: htlc.expiry)
     }
 }

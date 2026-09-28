@@ -25,16 +25,7 @@ struct ChannelView {
     var htlcs: [ChannelTransactions.HTLC] = []
     mutating func apply(_ change: ChannelUpdate.Change) throws {
         switch change {
-        case .add(let htlc, _):
-            guard !htlcs.contains(where: { $0.id == htlc.id && $0.offered == htlc.offered }) else { throw LightningError.invalidState }
-            if htlc.offered {
-                guard localMsat >= htlc.amountMsat else { throw LightningError.invalidAmount }
-                localMsat -= htlc.amountMsat
-            } else {
-                guard remoteMsat >= htlc.amountMsat else { throw LightningError.invalidAmount }
-                remoteMsat -= htlc.amountMsat
-            }
-            htlcs.append(htlc)
+        case .add(let htlc, _): try add(htlc)
         case .fulfill(let id, let offered, let preimage):
             let htlc = try remove(id: id, offered: offered)
             guard preimage.count == 32, ChannelKeys.hash(preimage) == htlc.paymentHash else { throw LightningError.invalidHash }
@@ -44,6 +35,17 @@ struct ChannelView {
             if offered { localMsat += htlc.amountMsat } else { remoteMsat += htlc.amountMsat }
         case .fee(let rate): feePerKW = rate
         }
+    }
+    private mutating func add(_ htlc: ChannelTransactions.HTLC) throws {
+        guard !htlcs.contains(where: { $0.id == htlc.id && $0.offered == htlc.offered }) else { throw LightningError.invalidState }
+        if htlc.offered {
+            guard localMsat >= htlc.amountMsat else { throw LightningError.invalidAmount }
+            localMsat -= htlc.amountMsat
+        } else {
+            guard remoteMsat >= htlc.amountMsat else { throw LightningError.invalidAmount }
+            remoteMsat -= htlc.amountMsat
+        }
+        htlcs.append(htlc)
     }
     private mutating func remove(id: UInt64, offered: Bool) throws -> ChannelTransactions.HTLC {
         guard let index = htlcs.firstIndex(where: { $0.id == id && $0.offered == offered }) else { throw LightningError.invalidState }

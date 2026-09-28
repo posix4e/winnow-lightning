@@ -12,6 +12,7 @@ public actor LightningEngine {
         public let id: Data, peer: Data
         public let capacitySat: UInt64
         public let phase: ChannelPhase
+        public let format: ChannelFormat
         public let signedCommitment: Data?
         /// Funding remains exposed until a cooperative close has six verified confirmations.
         public let needsMonitoring: Bool
@@ -30,7 +31,7 @@ public actor LightningEngine {
         case broadcastRecovery(channelID: Data, transaction: Data)
     }
     struct State: Codable {
-        var version = 4
+        var version = 5
         var revision: UInt64 = 0
         var nextSequence: UInt64 = 0
         var chain: Data
@@ -41,6 +42,8 @@ public actor LightningEngine {
         var incoming: [ReceiveRequest] = []
         var scan = LightningChainState()
         var async = AsyncState()
+        var offers: OrdinaryOfferState? = nil
+        var recoveryRestore: RecoveryRestore? = nil
     }
     let journal: any LightningJournal
     let backgroundStore: LightningBackgroundStore?
@@ -62,9 +65,9 @@ public actor LightningEngine {
         self.backgroundStore = backgroundStore
         if let bytes = try journal.load() {
             var loaded = try JSONDecoder().decode(State.self, from: bytes)
-            guard [2, 3, 4].contains(loaded.version), loaded.chain == chain else { throw LightningError.storageFailed }
+            guard [2, 3, 4, 5].contains(loaded.version), loaded.chain == chain else { throw LightningError.storageFailed }
             needsBackgroundSchemaUpgrade = loaded.version < 4
-            loaded.version = 4
+            loaded.version = 5
             guard nodeSecret == nil || nodeSecret == loaded.nodeSecret else { throw LightningError.storageFailed }
             try Self.validateLoaded(loaded)
             state = loaded
@@ -75,7 +78,7 @@ public actor LightningEngine {
         }
     }
     public func channels() -> [Channel] {
-        state.channels.map { Channel(id: $0.id, peer: $0.peer, capacitySat: $0.capacity, phase: $0.phase,
+        state.channels.map { Channel(id: $0.id, peer: $0.peer, capacitySat: $0.capacity, phase: $0.phase, format: $0.local.format,
                                      signedCommitment: $0.dataLossDetected ? nil : $0.signedCommitment,
                                      needsMonitoring: $0.fundingTxid != nil && $0.phase != .closed) }
     }
@@ -87,14 +90,16 @@ public actor LightningEngine {
     public func chainDisconnected() { chainIsCurrent = false }
     public func peerInitialized(_ peer: Data, features: LightningFeatures) throws {
         try healthy(); _ = try ChannelKeys.point(peer)
-        try features.validateRequired(supported: [0, 6, 8, 12, 14, 24, LightningFeatures.shutdownAnySegwit, 38, 44, 728])
+        try features.validateRequired(supported: [0, 6, 8, 12, 14, 22, 24, LightningFeatures.shutdownAnySegwit, 38, 44, 728])
         guard features.supports(12), features.supports(44) else { throw LightningError.invalidMessage }
-        try prepareReestablishment(peer)
+        if state.recoveryRestore != nil { try prepareRecoveryReestablishment(peer) }
+        else { try prepareReestablishment(peer) }
         peers[peer] = features
     }
     public func peerDisconnected(_ peer: Data) { peers.removeValue(forKey: peer) }
     public func pendingMessages(peer: Data) throws -> [Outbound] {
-        try operational(peer)
+        try connected(peer)
+        if state.recoveryRestore != nil { return state.outbox.filter { $0.peer == peer && [17, 136].contains($0.message.type) } }
         return state.outbox.filter { item in
             guard item.peer == peer, !reestablishing.contains(item.channelID) || item.message.type == 136 else { return false }
             guard let channel = state.channels.first(where: { $0.id == item.channelID }) else { return true }
@@ -104,12 +109,14 @@ public actor LightningEngine {
         }
     }
     @discardableResult
-    public func openChannel(peer: Data, capacitySat: UInt64, feePerKW: UInt32) throws -> Data {
+    public func openChannel(peer: Data, capacitySat: UInt64, feePerKW: UInt32, format: ChannelFormat? = nil) throws -> Data {
         try operational(peer)
         guard state.channels.count < 64 else { throw LightningError.invalidState }
         guard (20_000..<(1 << 24)).contains(capacitySat) else { throw LightningError.invalidAmount }
         let temporary = try P256K.Signing.PrivateKey().dataRepresentation, secrets = try ChannelSecrets()
-        let terms = try secrets.terms(capacity: capacitySat)
+        let resolved = format ?? (peers[peer]?.supports(22) == true ? .anchors : .staticRemoteKey)
+        guard !resolved.hasAnchors || peers[peer]?.supports(22) == true else { throw LightningError.invalidMessage }
+        let terms = try secrets.terms(capacity: capacitySat, format: resolved)
         let open = ChannelNegotiation.Open(chain: state.chain, temporaryID: temporary, capacity: capacitySat,
             pushMsat: 0, feePerKW: feePerKW, terms: terms)
         let message = try open.message()
@@ -139,7 +146,11 @@ public actor LightningEngine {
         try persist(next)
     }
     public func receive(peer: Data, message: LightningWire.Message) throws -> [Event] {
-        try operational(peer)
+        try connected(peer)
+        if state.recoveryRestore != nil { return try receiveRecoveryMessage(peer: peer, message: message) }
+        return try receiveChannelMessage(peer: peer, message: message)
+    }
+    private func receiveChannelMessage(peer: Data, message: LightningWire.Message) throws -> [Event] {
         switch message.type {
         case 32: return try receiveOpen(peer: peer, message: message)
         case 33: return try receiveAccept(peer: peer, message: message)
@@ -161,14 +172,25 @@ public actor LightningEngine {
     }
     func healthy() throws { guard !failed else { throw LightningError.storageFailed } }
     func operational(_ peer: Data) throws {
+        try requireUsableChannels()
+        try connected(peer)
+    }
+    func connected(_ peer: Data) throws {
         try healthy()
         guard chainIsCurrent, peers[peer] != nil else { throw LightningError.invalidState }
+    }
+    func requireUsableChannels() throws {
+        try healthy()
+        guard state.recoveryRestore == nil else { throw LightningError.invalidState }
     }
     func persist(_ proposed: State) throws {
         try healthy()
         var next = proposed
         guard state.revision < UInt64.max else { throw LightningError.storageFailed }
         next.revision = state.revision + 1
+        // Every write preserves the restore restriction, including future
+        // adapters: an imported journal can never become an active channel.
+        try Self.validateRecoveryRestore(next)
         do {
             let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
             // The locked monitor must be updated BEFORE saving/publishing a
@@ -189,7 +211,10 @@ public actor LightningEngine {
             $0.peer == channel.peer && ($0.channelID == channel.id || $0.channelID == channel.temporaryID) && types.contains($0.message.type)
         }
     }
-    private static func validateLoaded(_ state: State) throws {
+    static func validateLoaded(_ state: State) throws {
+        try validateOrdinaryOffers(state.offers)
+        try validateAnchorFeeBumps(state)
+        try validateRecoveryRestore(state)
         let origin = state.scan.origin
         guard state.scan.nextHeight > (origin?.height ?? 0),
               origin == nil || (origin!.hash.count == 32 && (origin!.height != 0 || origin!.hash == state.chain)),

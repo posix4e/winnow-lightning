@@ -430,6 +430,7 @@ public struct WalletState: Codable, Equatable, Sendable {
     /// Exact data for locally-created sends that are still replaceable.
     var pendingSends: [PendingSend]
     var fundingReservations: [FundingReservation] = []
+    var recoveryReservations: [RecoverySpendReservation] = []
 
     public init(descriptor: String, network: String, creationHeight: UInt32,
                 nextReceiveIndex: UInt32 = 0, nextChangeIndex: UInt32 = 0,
@@ -449,7 +450,7 @@ public struct WalletState: Codable, Equatable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case descriptor, network, creationHeight, nextReceiveIndex, nextChangeIndex
-        case nextScanHeight, utxos, history, observedFeeRates, pendingSends, fundingReservations
+        case nextScanHeight, utxos, history, observedFeeRates, pendingSends, fundingReservations, recoveryReservations
     }
 
     public init(from decoder: any Decoder) throws {
@@ -465,19 +466,8 @@ public struct WalletState: Codable, Equatable, Sendable {
         observedFeeRates = try container.decodeIfPresent([Double].self, forKey: .observedFeeRates) ?? []
         pendingSends = try container.decodeIfPresent([PendingSend].self, forKey: .pendingSends) ?? []
         fundingReservations = try container.decodeIfPresent([FundingReservation].self, forKey: .fundingReservations) ?? []
-        var reservationIDs = Set<String>()
-        var reservedInputs = Set<Transaction.Outpoint>()
-        for reservation in fundingReservations {
-            try reservation.validate()
-            guard reservationIDs.insert(reservation.requestID).inserted else {
-                throw FundingReservationError.damagedRecord
-            }
-            for coin in reservation.selected {
-                guard reservedInputs.insert(coin.outpoint).inserted else {
-                    throw FundingReservationError.damagedRecord
-                }
-            }
-        }
+        recoveryReservations = try container.decodeIfPresent([RecoverySpendReservation].self, forKey: .recoveryReservations) ?? []
+        try validateReservations()
 
         func validateCoins(_ coins: [WalletUTXO], key: CodingKeys, countingTotal: Bool = true) throws {
             var seen = Set<Transaction.Outpoint>()
@@ -548,6 +538,7 @@ public struct WalletState: Codable, Equatable, Sendable {
         if !fundingReservations.isEmpty {
             try container.encode(fundingReservations, forKey: .fundingReservations)
         }
+        if !recoveryReservations.isEmpty { try container.encode(recoveryReservations, forKey: .recoveryReservations) }
     }
 }
 
@@ -711,6 +702,9 @@ public actor Wallet {
         for reservation in state.fundingReservations {
             try reservation.validateOwnership(descriptor: descriptor, network: network, nextChangeIndex: state.nextChangeIndex)
         }
+        for reservation in state.recoveryReservations {
+            try reservation.validateOwnership(descriptor: descriptor, network: network, nextChangeIndex: state.nextChangeIndex)
+        }
         // The account key is recoverable from the descriptor's xpub.
         guard case let .tr(.single(key), nil) = descriptor.expression,
               case let .extended(accountKey, _) = key.base
@@ -776,7 +770,7 @@ public actor Wallet {
     /// UTXOs consensus allows spending at the last scanned height.
     public var spendableUtxos: [WalletUTXO] {
         guard !fundingStorageFault else { return [] }
-        let reserved = Set(state.fundingReservations.flatMap { $0.selected.map(\.outpoint) })
+        let reserved = reservedWalletOutpoints()
         return state.utxos.filter { isMature($0) && !reserved.contains($0.outpoint) }
     }
 
@@ -809,7 +803,7 @@ public actor Wallet {
         return state.pendingSends.compactMap { pending in
             guard pending.changeIndex != nil, let txid = pending.txid,
                   !isChannelFunding(txid),
-                  !state.fundingReservations.contains(where: { $0.selected.contains(where: { $0.txid == txid }) }),
+                  !reservedWalletOutpoints().contains(where: { $0.txid == txid }),
                   let vout = pending.changeOutputIndex,
                   state.utxos.contains(where: { $0.txid == txid && $0.vout == vout })
             else { return nil }
@@ -1297,8 +1291,7 @@ public actor Wallet {
 
     private func checkFundingInputs(_ prepared: PreparedSend, fundingRequestID: String?) throws {
         guard !fundingStorageFault else { throw FundingReservationError.storageUnavailable }
-        let reserved = Set(state.fundingReservations.filter { $0.requestID != fundingRequestID }
-            .flatMap { $0.selected.map(\.outpoint) })
+        let reserved = reservedWalletOutpoints(except: fundingRequestID)
         guard !prepared.selected.contains(where: { reserved.contains($0.outpoint) }) else {
             throw FundingReservationError.inputsUnavailable
         }
@@ -1534,11 +1527,11 @@ public actor Wallet {
     /// advanced a second time because the same change script is reused.
     public func commitFeeBump(_ prepared: PreparedFeeBump) throws {
         guard !isChannelFunding(prepared.originalTxid),
-              !state.fundingReservations.contains(where: { reservation in
-                  reservation.selected.contains(where: {
-                      $0.txid == prepared.originalTxid && $0.vout == prepared.originalChangeOutputIndex
-                  })
-              }) else { throw FundingReservationError.inputsUnavailable }
+              !reservedWalletOutpoints().contains(.init(txid: prepared.originalTxid, vout: prepared.originalChangeOutputIndex))
+        else { throw FundingReservationError.inputsUnavailable }
+        guard !prepared.selected.contains(where: { reservedWalletOutpoints().contains($0.outpoint) }) else {
+            throw FundingReservationError.inputsUnavailable
+        }
         guard let pendingIndex = state.pendingSends.firstIndex(where: {
             $0.txid == prepared.originalTxid
         }), let historyIndex = state.history.firstIndex(where: {
@@ -1586,7 +1579,7 @@ public actor Wallet {
             changeIndex: UInt32, changeOutputIndex: UInt32) {
         guard !fundingStorageFault else { throw FundingReservationError.storageUnavailable }
         guard !isChannelFunding(txid),
-              !state.fundingReservations.contains(where: { $0.selected.contains(where: { $0.txid == txid }) })
+              !reservedWalletOutpoints().contains(where: { $0.txid == txid })
         else { throw FundingReservationError.inputsUnavailable }
         guard let pending = state.pendingSends.first(where: { $0.txid == txid }),
               let original = pending.transaction,
@@ -1787,11 +1780,34 @@ public actor Wallet {
         // written now would carry only height-0 change; a restore that
         // scans forward from lastKnownHeight can never put those inputs
         // back if the send fails to confirm.
-        if !state.fundingReservations.isEmpty || !state.pendingSends.isEmpty || state.utxos.contains(where: { $0.height == 0 }) {
+        if !state.fundingReservations.isEmpty || !state.recoveryReservations.isEmpty
+            || !state.pendingSends.isEmpty || state.utxos.contains(where: { $0.height == 0 }) {
             throw WalletError.exportWhilePending
         }
         let lastKnownHeight = state.nextScanHeight == 0 ? 0 : state.nextScanHeight - 1
-        let mnemonic: String?
+        let mnemonic = try exportedMnemonic(includeMnemonic: includeMnemonic)
+        return try ImportBundle.export(
+            descriptor: descriptor.serialized(),
+            network: network.rawValue,
+            lastKnownHeight: lastKnownHeight,
+            utxos: state.utxos,
+            history: state.history,
+            nextReceiveIndex: state.nextReceiveIndex,
+            nextChangeIndex: state.nextChangeIndex,
+            mnemonic: mnemonic
+        )
+    }
+
+    /// Device-loss recovery replays the chain from genesis rather than claiming
+    /// pending wallet transactions as confirmed. This remains usable while a
+    /// Lightning funding or recovery input reservation is outstanding.
+    public func recoveryBundle(includeMnemonic: Bool = false) throws -> ImportBundle {
+        try ImportBundle.export(descriptor: descriptor.serialized(), network: network.rawValue,
+            lastKnownHeight: 0, utxos: [], history: [], nextReceiveIndex: state.nextReceiveIndex,
+            nextChangeIndex: state.nextChangeIndex, mnemonic: exportedMnemonic(includeMnemonic: includeMnemonic))
+    }
+
+    private func exportedMnemonic(includeMnemonic: Bool) throws -> String? {
         if includeMnemonic {
             let secret: WalletSecret
             do {
@@ -1805,23 +1821,12 @@ public actor Wallet {
             }
             switch secret {
             case let .mnemonic(words):
-                mnemonic = words
+                return words
             case .masterKey:
                 throw WalletError.mnemonicUnavailable
             }
-        } else {
-            mnemonic = nil
         }
-        return try ImportBundle.export(
-            descriptor: descriptor.serialized(),
-            network: network.rawValue,
-            lastKnownHeight: lastKnownHeight,
-            utxos: state.utxos,
-            history: state.history,
-            nextReceiveIndex: state.nextReceiveIndex,
-            nextChangeIndex: state.nextChangeIndex,
-            mnemonic: mnemonic
-        )
+        return nil
     }
 
     // MARK: - Persistence
@@ -1937,7 +1942,8 @@ public actor Wallet {
         guard !fundingStorageFault else { throw FundingReservationError.storageUnavailable }
         guard let storageURL else { return }
         let data = try JSONEncoder().encode(candidate)
-        if !candidate.fundingReservations.isEmpty || !state.fundingReservations.isEmpty {
+        if !candidate.fundingReservations.isEmpty || !state.fundingReservations.isEmpty
+            || !candidate.recoveryReservations.isEmpty || !state.recoveryReservations.isEmpty {
             do { try FundingFile.write(data, to: storageURL) }
             catch FundingFile.WriteError.replacementDurabilityUnknown {
                 fundingStorageFault = true
@@ -1947,5 +1953,167 @@ public actor Wallet {
         }
         try data.write(to: storageURL,
                        options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+    }
+}
+
+extension Wallet {
+    public var recoverySpendReservations: [RecoverySpendReservation] { state.recoveryReservations }
+
+    private func reservedWalletOutpoints(except requestID: String? = nil) -> Set<Transaction.Outpoint> {
+        let funding = state.fundingReservations.filter { $0.requestID != requestID }.flatMap { $0.selected.map(\.outpoint) }
+        let recovery = state.recoveryReservations.filter { $0.requestID != requestID }.flatMap { $0.selected.map(\.outpoint) }
+        return Set(funding + recovery)
+    }
+
+    public func recoverySpendCoins(requestID: String?) throws -> [WalletUTXO] {
+        guard !fundingStorageFault else { throw FundingReservationError.storageUnavailable }
+        guard let saved = state.recoveryReservations.first(where: { $0.requestID == requestID }) else { return spendableUtxos.filter { $0.height > 0 } }
+        let txid = try saved.transaction().txid
+        guard !state.history.contains(where: { $0.txid == txid && $0.height > 0 }) else {
+            throw FundingReservationError.alreadySubmitted
+        }
+        let available = try saved.selected.map { try availableRecoveryCoin($0, replacing: txid) }
+        return spendableUtxos.filter { $0.height > 0 } + available
+    }
+
+    private func availableRecoveryCoin(_ coin: WalletUTXO, replacing txid: Data) throws -> WalletUTXO {
+        guard var current = state.allUtxos.first(where: { $0.outpoint == coin.outpoint }), isMature(current),
+              current.amount == coin.amount, current.scriptPubKey == coin.scriptPubKey else {
+            throw FundingReservationError.inputsUnavailable
+        }
+        if let spent = current.spent {
+            guard spent.spentBy == txid, spent.height == nil else { throw FundingReservationError.inputsUnavailable }
+        }
+        current.spent = nil
+        return current
+    }
+
+    /// Return exact wallet-signed child bytes only after the selected inputs
+    /// and its change index have been durably reserved. Input zero belongs to
+    /// the recovery engine and stays unsigned until its own journal commits.
+    public func reserveRecoverySpend(requestID: String, transaction: Transaction, coins: [WalletUTXO],
+                                     externalOutput: Transaction.Output, feeLimit: Int64) throws -> RecoverySpendReservation {
+        guard !fundingStorageFault else { throw FundingReservationError.storageUnavailable }
+        let existing = state.recoveryReservations.first { $0.requestID == requestID }
+        if let existing, try existing.transaction().serialized(includeWitness: false) == transaction.serialized(includeWitness: false) {
+            guard existing.feeLimit == feeLimit, existing.selected == coins,
+                  existing.externalValue == externalOutput.value, existing.externalScript == externalOutput.scriptPubKey,
+                  try existing.transaction().inputs[0].witness == transaction.inputs[0].witness else {
+                throw FundingReservationError.requestChanged
+            }
+            return existing
+        }
+        let index = existing?.changeIndex ?? state.nextChangeIndex
+        try validateRecoveryProposal(transaction, coins: coins, requestID: requestID, changeIndex: index)
+        let total = try recoveryInputTotal(coins, externalValue: externalOutput.value)
+        let outputTotal = try transaction.outputs.reduce(Int64(0)) { total, output in
+            guard output.value > 0, output.value <= BitcoinAmount.maximum - total else { throw WalletError.invalidTransactionAmounts }
+            return total + output.value
+        }
+        let fee = total - outputTotal
+        try validateRecoveryReplacement(existing, transaction: transaction, fee: fee, feeLimit: feeLimit)
+        let signed = try signRecoveryInputs(transaction, coins: coins, externalOutput: externalOutput)
+        let saved = RecoverySpendReservation(requestID: requestID, rawTransaction: signed.serialized(includeWitness: true),
+            externalValue: externalOutput.value, externalScript: externalOutput.scriptPubKey, selected: coins,
+            changeIndex: index, fee: fee, feeLimit: feeLimit, previousTxid: try existing?.transaction().txid)
+        try saved.validate()
+        var candidate = state
+        candidate.recoveryReservations.removeAll { $0.requestID == requestID }
+        candidate.recoveryReservations.append(saved)
+        candidate.nextChangeIndex = max(candidate.nextChangeIndex, index + 1)
+        try persist(candidate)
+        state = candidate
+        return saved
+    }
+
+    private func validateRecoveryProposal(_ tx: Transaction, coins: [WalletUTXO], requestID: String, changeIndex: UInt32) throws {
+        guard changeIndex < HDKey.hardenedOffset - 1, tx.inputs.count == coins.count + 1, (1...2).contains(tx.outputs.count),
+              tx.version == 2, tx.inputs.allSatisfy({ $0.scriptSig.isEmpty }), tx.inputs.dropFirst().allSatisfy({ $0.witness.isEmpty }),
+              Array(tx.inputs.dropFirst().map(\.previousOutput)) == coins.map(\.outpoint),
+              tx.outputs.last?.scriptPubKey == (try scriptPubKey(chain: .change, index: changeIndex)) else {
+            throw FundingReservationError.invalidRequest
+        }
+        let available = try recoverySpendCoins(requestID: requestID)
+        guard coins.allSatisfy({ available.contains($0) }),
+              !coins.contains(where: { reservedWalletOutpoints(except: requestID).contains($0.outpoint) }) else {
+            throw FundingReservationError.inputsUnavailable
+        }
+    }
+
+    private func recoveryInputTotal(_ coins: [WalletUTXO], externalValue: Int64) throws -> Int64 {
+        guard externalValue >= 330, externalValue <= BitcoinAmount.maximum else { throw FundingReservationError.invalidRequest }
+        var total = externalValue
+        for coin in coins {
+            guard coin.amount > 0, coin.amount <= BitcoinAmount.maximum - total else { throw WalletError.invalidTransactionAmounts }
+            total += coin.amount
+        }
+        return total
+    }
+
+    private func validateRecoveryReplacement(_ existing: RecoverySpendReservation?, transaction: Transaction, fee: Int64, feeLimit: Int64) throws {
+        guard fee > 0, fee <= feeLimit, feeLimit <= BitcoinAmount.maximum else { throw FundingReservationError.invalidRequest }
+        guard let existing else { return }
+        let old = try existing.transaction()
+        guard transaction.inputs.map(\.previousOutput) == old.inputs.map(\.previousOutput), fee > existing.fee,
+              feeLimit <= existing.feeLimit else {
+            throw FundingReservationError.requestChanged
+        }
+    }
+
+    private func signRecoveryInputs(_ tx: Transaction, coins: [WalletUTXO], externalOutput: Transaction.Output) throws -> Transaction {
+        let spent = [SighashBIP341.SpentOutput(amount: externalOutput.value, scriptPubKey: externalOutput.scriptPubKey)] + coins.map(\.spentOutput)
+        let master = try masterKey()
+        var signed = tx
+        for (offset, coin) in coins.enumerated() {
+            signed.inputs[offset + 1].witness = try Signer.witness(tx: tx, inputIndex: offset + 1, spentOutputs: spent,
+                tweakedPrivateKey: tweakedPrivateKey(chain: coin.chain, index: coin.index, master: master))
+        }
+        try Self.checkStandardSize(signed)
+        return signed
+    }
+
+    public func markRecoverySpendSubmitted(requestID: String) throws {
+        guard let index = state.recoveryReservations.firstIndex(where: { $0.requestID == requestID }) else {
+            throw FundingReservationError.unknownReservation
+        }
+        var candidate = state
+        candidate.recoveryReservations[index].submitted = true
+        try persist(candidate)
+        state = candidate
+    }
+
+    public func cancelUnsubmittedRecoverySpend(requestID: String) throws {
+        guard let saved = state.recoveryReservations.first(where: { $0.requestID == requestID }), !saved.submitted else {
+            throw FundingReservationError.alreadySubmitted
+        }
+        var candidate = state
+        candidate.recoveryReservations.removeAll { $0.requestID == requestID }
+        try persist(candidate)
+        state = candidate
+    }
+
+    public func commitRecoverySpendBroadcast(requestID: String, transaction: Transaction) throws {
+        guard let saved = state.recoveryReservations.first(where: { $0.requestID == requestID }), saved.submitted,
+              try saved.authorizes(transaction) else { throw FundingReservationError.requestChanged }
+        guard !state.history.contains(where: { $0.txid == transaction.txid }) else { return }
+        var candidate = state
+        if let previous = saved.previousTxid {
+            candidate.allUtxos.removeAll { $0.txid == previous }
+            if let old = candidate.history.firstIndex(where: { $0.txid == previous }) {
+                guard candidate.history[old].height == 0 else { throw FundingReservationError.alreadySubmitted }
+                candidate.history[old].replacedBy = transaction.txid
+            }
+        }
+        for index in candidate.allUtxos.indices where saved.selected.contains(where: { $0.outpoint == candidate.allUtxos[index].outpoint }) {
+            candidate.allUtxos[index].spent = .init(spentBy: transaction.txid, height: nil)
+        }
+        let output = transaction.outputs[transaction.outputs.count - 1]
+        candidate.allUtxos.append(WalletUTXO(txid: transaction.txid, vout: UInt32(transaction.outputs.count - 1), amount: output.value,
+            scriptPubKey: output.scriptPubKey, chain: .change, index: saved.changeIndex, height: 0))
+        candidate.history.append(HistoryEntry(txid: transaction.txid, height: 0, received: output.value,
+            spent: saved.selected.reduce(0) { $0 + $1.amount }, fee: saved.fee,
+            rawTransaction: transaction.serialized(includeWitness: false), fundingScripts: FundingSources.fundingScripts(of: transaction)))
+        try persist(candidate)
+        state = candidate
     }
 }

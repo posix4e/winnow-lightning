@@ -12,6 +12,7 @@ struct LightningInvoiceSendView: View {
     @State private var review: LightningReview?
     @State private var paymentID: Data?
     @State private var scan = false
+    @State private var sendOffer = false
     @State private var busy = false
     @State private var error: String?
     @State private var discovery: Task<Void, Never>?
@@ -51,6 +52,8 @@ struct LightningInvoiceSendView: View {
                         TextField("Maximum fee in sats", text: $fee).keyboardType(.numberPad).focused($editing).accessibilityIdentifier("lightningInvoiceFee")
                     }
                     Section {
+                        Button("Pay reusable offer or ₿name") { sendOffer = true }
+                            .accessibilityIdentifier("lightningInvoiceToOffer")
                         Text("Payments spend your Lightning channel balance. Receiving capacity is separate from your available balance.").font(.footnote)
                         Button(busy ? "Finding a route…" : "Review payment") { prepareReview() }
                             .disabled(busy || invoice.isEmpty).accessibilityIdentifier("lightningReviewInvoice")
@@ -65,6 +68,7 @@ struct LightningInvoiceSendView: View {
                 ToolbarItem(placement: .keyboard) { Button("Done") { editing = false }.accessibilityIdentifier("sendKeyboardDone") }
             }
             .sheet(isPresented: $scan) { PaymentScannerView { invoice = $0; scan = false } }
+            .sheet(isPresented: $sendOffer) { LightningOfferSendView(controller: controller) }
             .sheet(item: $review) { item in
                 LightningReviewView(controller: controller, review: item, onConfirmed: {
                     if case .invoice(let approved) = item { paymentID = approved.request.id }

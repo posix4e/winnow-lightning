@@ -100,8 +100,10 @@ extension LightningEngine {
                 events.append(.broadcastClose(channelID: channel.id, transaction: raw))
             }
             for resolution in channel.resolutions where try ChannelResolution.available(resolution, confirmed: confirmed, height: height) {
+                if try channel.local.format.hasAnchors && isAnchorHTLC(Transaction.decode(resolution.transaction)) { continue }
                 events.append(.broadcastRecovery(channelID: channel.id, transaction: resolution.transaction))
             }
+            events += try pendingFeeBumpEvents(channel: channel, confirmed: confirmed)
             return events
         }
     }

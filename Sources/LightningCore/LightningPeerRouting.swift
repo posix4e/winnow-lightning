@@ -13,6 +13,11 @@ extension LightningPeerSession {
         if let direct = try? empty.route(from: peer, invoice: value, amountMsat: amountMsat, feeLimitMsat: feeLimitMsat, maximumDelta: maximumDelta) { return direct }
         if let cached = await engine.cachedRouting(), now >= cached.synchronizedAt, now - cached.synchronizedAt < 600,
            let route = try? cached.route(from: peer, invoice: value, amountMsat: amountMsat, feeLimitMsat: feeLimitMsat, maximumDelta: maximumDelta) { return route }
+        let graph = try await queryRouting()
+        return try graph.route(from: peer, invoice: value, amountMsat: amountMsat, feeLimitMsat: feeLimitMsat, maximumDelta: maximumDelta)
+    }
+    func queryRouting() async throws -> LightningRoutingGraph {
+        let now = UInt64(Date().timeIntervalSince1970)
         guard peerFeatures?.supports(6) == true, gossipQuery == nil, gossipCompletion == nil else { throw LightningInvoiceError.unavailable }
         let height = try await engine.verifiedHeight()
         let chain = await engine.chainHash()
@@ -28,7 +33,7 @@ extension LightningPeerSession {
             }
         } onCancel: { Task { await self.cancelRouting() } }
         try Task.checkCancellation()
-        return try graph.route(from: peer, invoice: value, amountMsat: amountMsat, feeLimitMsat: feeLimitMsat, maximumDelta: maximumDelta)
+        return graph
     }
     private func startGossip() async {
         do {

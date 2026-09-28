@@ -68,7 +68,7 @@ extension LightningEngine {
         return payment
     }
     public func registerReceive(id: Data, amountMsat: UInt64, expiry: UInt32, expiresAt: UInt64? = nil) throws -> ReceiveInvoice {
-        try healthy()
+        try requireUsableChannels()
         guard id.count == 32, amountMsat > 0, amountMsat <= 16_777_215_000, expiry > chainHeight,
               state.incoming.count < 4096 else { throw LightningError.invalidMessage }
         if let existing = state.incoming.first(where: { $0.id == id }) {
@@ -131,7 +131,10 @@ extension LightningEngine {
             try failIncoming(htlc, onion: onion, sharedSecret: nil, channel: &channel, state: &state)
             return
         }
-        let request = blinding.map { validAsyncReceive(htlc, peeled: peeled, blinding: $0, state: state) } ?? validReceive(htlc, peeled: peeled, state: state)
+        let request = blinding.map {
+            validOrdinaryReceive(htlc, peeled: peeled, blinding: $0, state: state)
+                ?? validAsyncReceive(htlc, peeled: peeled, blinding: $0, state: state)
+        } ?? validReceive(htlc, peeled: peeled, state: state)
         guard let request else {
             try failIncoming(htlc, onion: onion, sharedSecret: peeled.sharedSecret, channel: &channel, state: &state)
             return

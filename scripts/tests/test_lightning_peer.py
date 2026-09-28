@@ -55,7 +55,9 @@ class PeerStartupTests(unittest.TestCase):
         check = self.module['check_peer']
         directories = []
 
-        def run(mode, evidence):
+        def run(mode, evidence, channel_format='staticRemoteKey', offers=False):
+            self.assertEqual(channel_format, 'staticRemoteKey')
+            self.assertFalse(offers)
             directories.append(evidence)
             (evidence / 'cln.log').write_text(CRASH if len(directories) == 1 else 'passed')
             if len(directories) == 1:

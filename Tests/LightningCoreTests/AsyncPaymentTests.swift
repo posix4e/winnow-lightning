@@ -66,4 +66,14 @@ final class AsyncPaymentTests: XCTestCase {
         XCTAssertTrue(LightningFeatures.asyncClient.supports(24)); XCTAssertTrue(LightningFeatures.asyncClient.supports(38))
         XCTAssertFalse(LightningFeatures.asyncClient.supports(152))
     }
+    func testReleasePathFramingRejectsDuplicateIDsAndTruncatedPaths() throws {
+        let path = try OnionMessage.path(nodes: [key(2)], context: id, authenticationKey: auth)
+        var writer = LightningWire.Writer(); writer.u64(42); writer.append(try path.encoded())
+        let decoded = try HTLCReleasePath.decode(writer.data)
+        XCTAssertEqual(decoded.count, 1); XCTAssertEqual(decoded.first?.id, 42); XCTAssertEqual(decoded.first?.path, path)
+        XCTAssertThrowsError(try HTLCReleasePath.decode(writer.data + writer.data))
+        XCTAssertThrowsError(try HTLCReleasePath.decode(Data(writer.data.dropLast())))
+        XCTAssertTrue(try HTLCReleasePath.decode(Data()).isEmpty)
+    }
+
 }

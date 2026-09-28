@@ -13,6 +13,8 @@ struct PeerFixture {
     }
     static func run() async throws {
         let args = Array(CommandLine.arguments.dropFirst())
+        if args.first == "relay-package" { try await probePackageRelay(args); return }
+        if args.first == "probe-bip353" { try await probeBIP353(args); return }
         if ["probe-lsp", "probe-lsp-quote", "probe-lsp-stability", "probe-lsp-opening"].contains(args.first) { try await probeLSP(args); return }
         if args.first == "probe-invoice-route" { try await probeInvoiceRoute(args); return }
         if args.first == "inspect-held" { try inspectHeld(args); return }
@@ -26,7 +28,7 @@ struct PeerFixture {
         if automatic { try await runAutomatic(engine: engine, peer: peer, host: args[0], port: port); return }
         let connection = try LightningConnection(host: args[0], port: port, secret: secret, peer: peer)
         try await connection.start()
-        try await connection.send(LightningFeatures.channelOpening.initialization())
+        try await connection.send(LightningFeatures.asyncClient.initialization())
         let initialization = try await connection.receive()
         let features = try LightningFeatures.readInitialization(initialization)
         FileHandle.standardError.write(Data("Reference init features: \(features.bits.sorted())\n".utf8))
@@ -37,18 +39,29 @@ struct PeerFixture {
         while let line = readLine() {
             let input = try JSONDecoder().decode([String: String].self, from: Data(line.utf8))
             let output = try await execute(input, engine: engine, connection: connection, peer: peer)
-            for pending in try await engine.pendingMessages(peer: peer) where !sent.contains(pending.sequence) {
-                try await connection.send(pending.message); sent.insert(pending.sequence)
-            }
+            try await publish(engine: engine, connection: connection, peer: peer, sent: &sent)
             try emit(output)
         }
         await connection.close()
     }
+    static func publish(engine: LightningEngine, connection: LightningConnection, peer: Data, sent: inout Set<UInt64>) async throws {
+        guard (try? await engine.verifiedHeight()) != nil else { return }
+        for pending in try await engine.pendingMessages(peer: peer) where !sent.contains(pending.sequence) {
+            try await connection.send(pending.message); sent.insert(pending.sequence)
+        }
+        for pending in try await engine.pendingOnionMessages(peer: peer, now: UInt64(Date().timeIntervalSince1970)) {
+            try await connection.send(pending.message)
+            try await engine.onionMessagePublished(sequence: pending.sequence, now: UInt64(Date().timeIntervalSince1970))
+        }
+    }
     static func execute(_ input: [String: String], engine: LightningEngine,
                         connection: LightningConnection?, peer: Data) async throws -> [String: String] {
+        if input["command"]?.hasPrefix("ordinary_") == true { return try await ordinaryCommand(input, engine: engine, peer: peer) }
+        if input["command"]?.hasPrefix("anchor_") == true { return try await anchorCommand(input, engine: engine, peer: peer) }
+        if input["command"]?.hasPrefix("recovery_") == true { return try await recoveryCommand(input, engine: engine) }
         switch input["command"] {
         case "open":
-            let id = try await engine.openChannel(peer: peer, capacitySat: UInt64(input["capacity"] ?? "") ?? 100_000, feePerKW: 1000)
+            let id = try await engine.openChannel(peer: peer, capacitySat: UInt64(input["capacity"] ?? "") ?? 100_000, feePerKW: 1000, format: input["format"].flatMap(ChannelFormat.init(rawValue:)))
             return ["temporary_id": id.hex]
         case "receive":
             guard let connection else { throw LightningError.invalidState }
@@ -64,7 +77,7 @@ struct PeerFixture {
             return encode(events)
         case "snapshot":
             guard let channel = await engine.channels().first else { throw LightningError.invalidState }
-            return ["id": channel.id.hex, "phase": channel.phase.rawValue, "commitment": channel.signedCommitment?.hex ?? ""]
+            return ["id": channel.id.hex, "phase": channel.phase.rawValue, "format": channel.format.rawValue, "commitment": channel.signedCommitment?.hex ?? ""]
         case "peel":
             guard let onion = Data(hex: input["onion"] ?? ""), let hash = Data(hex: input["hash"] ?? "") else { throw LightningError.invalidMessage }
             let peeled = try OnionPacket.peel(onion, secret: Data(repeating: 1, count: 32), associatedData: hash)
@@ -143,6 +156,10 @@ struct PeerFixture {
         if message.type == 513 {
             var output = encode(try await engine.receiveOnionMessage(message, now: UInt64(Date().timeIntervalSince1970)))
             output["type"] = "513"; return output
+        }
+        if message.type == 258 {
+            try await engine.receiveChannelPolicy(peer: peer, message: message)
+            return ["type": "258", "payload": message.payload.hex]
         }
         guard (32...39).contains(message.type) || (128...136).contains(message.type) else { return ["type": String(message.type), "payload": message.payload.hex] }
         var output = encode(try await engine.receive(peer: peer, message: message))

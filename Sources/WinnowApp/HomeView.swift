@@ -414,8 +414,12 @@ struct PaymentDetailView: View {
         error = nil
         defer { loading = false }
         do { try await model.loadPaymentDetails(entry) }
-        catch is CancellationError { }
-        catch { self.error = error.localizedDescription }
+        catch { recordDetailsError(error) }
+    }
+
+    private func recordDetailsError(_ error: Error) {
+        guard !(error is CancellationError) else { return }
+        self.error = error.localizedDescription
     }
 }
 
@@ -526,15 +530,15 @@ private struct FeeBumpView: View {
             currentRate = rate
             let suggestedRate = ceil(rate + 1)
             targetRateText = String(format: "%.0f", suggestedRate)
-            let requested = reviewInputs
-            guard let targetRate = requested.targetRate else { return }
-            let candidate = try await model.previewFeeBump(
-                txid: requested.txid, feeRateSatPerVByte: targetRate)
-            guard requested == reviewInputs else { return }
-            reviewedFeeBump = ReviewedFeeBump(request: requested, preview: candidate)
-        } catch {
-            self.error = error.localizedDescription
-        }
+            try await loadSuggestedReview()
+        } catch { self.error = error.localizedDescription }
+    }
+
+    private func loadSuggestedReview() async throws {
+        let requested = reviewInputs
+        guard let targetRate = requested.targetRate else { return }
+        let candidate = try await model.previewFeeBump(txid: requested.txid, feeRateSatPerVByte: targetRate)
+        installReview(candidate, requested: requested)
     }
 
     private func review() {
@@ -544,15 +548,20 @@ private struct FeeBumpView: View {
         reviewedFeeBump = nil
         Task {
             do {
-                let candidate = try await model.previewFeeBump(
-                    txid: requested.txid, feeRateSatPerVByte: targetRate)
-                guard requested == reviewInputs else { return }
-                reviewedFeeBump = ReviewedFeeBump(request: requested, preview: candidate)
-            } catch {
-                guard requested == reviewInputs else { return }
-                self.error = error.localizedDescription
-            }
+                let candidate = try await model.previewFeeBump(txid: requested.txid, feeRateSatPerVByte: targetRate)
+                installReview(candidate, requested: requested)
+            } catch { recordReviewError(error, requested: requested) }
         }
+    }
+
+    private func installReview(_ candidate: FeeBumpPreview, requested: FeeBumpReviewInputs) {
+        guard requested == reviewInputs else { return }
+        reviewedFeeBump = ReviewedFeeBump(request: requested, preview: candidate)
+    }
+
+    private func recordReviewError(_ error: Error, requested: FeeBumpReviewInputs) {
+        guard requested == reviewInputs else { return }
+        self.error = error.localizedDescription
     }
 
     private func bump() {

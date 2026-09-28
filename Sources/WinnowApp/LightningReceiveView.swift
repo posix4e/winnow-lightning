@@ -14,6 +14,8 @@ struct LightningReceiveView: View {
     @State private var setup = false
     @State private var busy = false
     @State private var error: String?
+    @State private var capacitySetup = false
+    @FocusState private var editingAmount: Bool
     var body: some View {
         NavigationStack {
             Form {
@@ -30,27 +32,9 @@ struct LightningReceiveView: View {
                 }
                 if let invoice, let invoiceExpiry {
                     invoiceSection(invoice, expires: invoiceExpiry)
-                } else if controller.maximumReceivableSat > 0 {
-                    Section("Lightning invoice") {
-                        TextField("Amount in sats", text: $amount).keyboardType(.numberPad)
-                            .accessibilityIdentifier("lightningReceiveAmount")
-                        Button("Create Lightning invoice") { run {
-                            guard let sats = UInt64(amount), sats > 0 else { throw LightningError.invalidAmount }
-                            let created = try await controller.createReceiveInvoice(amountSat: sats, model: model)
-                            let decoded = try Bolt11Invoice.decode(created, network: controller.network)
-                            invoice = created; invoiceHash = decoded.paymentHash
-                            invoiceExpiry = Date(timeIntervalSince1970: TimeInterval(decoded.expiresAt))
-                        } }.accessibilityIdentifier("lightningCreateInvoice")
-                    }
                 } else {
-                    Section("Set up Lightning receiving") {
-                        Text("Your wallet needs receiving capacity before it can accept a Lightning payment. Setup may have a one-time fee.")
-                        if let notice = controller.receivingSetupNotice { Text(notice) }
-                        NavigationLink("Get receiving capacity") { LightningLiquidityView(controller: controller) }
-                            .disabled(controller.profile?.liquidityProvider == nil)
-                            .accessibilityIdentifier("lightningGetCapacity")
-                        Button("Choose provider") { setup = true }.accessibilityIdentifier("lightningReceiveSetup")
-                    }
+                    amountSection
+                    receivingSection
                 }
                 Section {
                     if let warning = controller.peerWarning { Text(warning).foregroundStyle(.secondary) }
@@ -66,9 +50,14 @@ struct LightningReceiveView: View {
             }
             .navigationTitle("Receive Lightning")
             .disabled(busy)
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } } }
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } }
+                ToolbarItem(placement: .keyboard) { Button("Done") { editingAmount = false }.accessibilityIdentifier("sendKeyboardDone") }
+            }
+            .navigationDestination(isPresented: $capacitySetup) { LightningLiquidityView(controller: controller) }
             .sheet(isPresented: $setup) { LightningSetupView(controller: controller) }
             .task {
+                if amount.isEmpty, let intent = controller.receiveIntent { amount = String(intent.amountSat) }
                 while !Task.isCancelled {
                     do { try await controller.refresh(); try await Task.sleep(for: .seconds(1)) }
                     catch is CancellationError { return }
@@ -76,6 +65,44 @@ struct LightningReceiveView: View {
                 }
             }
         }
+    }
+    private var requestedAmount: UInt64? { UInt64(amount).flatMap { $0 > 0 ? $0 : nil } }
+    private var canReceiveAmount: Bool {
+        guard let requestedAmount else { return false }
+        return requestedAmount <= controller.maximumReceivableSat
+    }
+    private var amountSection: some View {
+        Section("How much do you want to receive?") {
+            TextField("Amount in sats", text: $amount).keyboardType(.numberPad).focused($editingAmount)
+                .accessibilityIdentifier("lightningReceiveAmount")
+            if canReceiveAmount {
+                Button("Create Lightning invoice") { editingAmount = false; run { try await createInvoice() } }
+                    .accessibilityIdentifier("lightningCreateInvoice")
+            }
+        }
+    }
+    @ViewBuilder private var receivingSection: some View {
+        if !canReceiveAmount {
+            Section("Set up Lightning receiving") {
+                Text("Enter the payment amount first. Winnow checks the provider's minimum capacity and shows its actual setup fee before you approve anything.")
+                if let notice = controller.receivingSetupNotice { Text(notice) }
+                Button("Get receiving capacity") { editingAmount = false; run {
+                    guard let requestedAmount else { throw LightningError.invalidAmount }
+                    try controller.setReceiveAmount(requestedAmount, model: model)
+                    capacitySetup = true
+                } }.disabled(controller.profile?.liquidityProvider == nil || requestedAmount == nil)
+                    .accessibilityIdentifier("lightningGetCapacity")
+                Button("Choose provider") { setup = true }.accessibilityIdentifier("lightningReceiveSetup")
+            }
+        }
+    }
+    private func createInvoice() async throws {
+        guard let requestedAmount else { throw LightningError.invalidAmount }
+        try controller.setReceiveAmount(requestedAmount, model: model)
+        let created = try await controller.createReceiveInvoice(amountSat: requestedAmount, model: model)
+        let decoded = try Bolt11Invoice.decode(created, network: controller.network)
+        invoice = created; invoiceHash = decoded.paymentHash
+        invoiceExpiry = Date(timeIntervalSince1970: TimeInterval(decoded.expiresAt))
     }
     private func invoiceSection(_ invoice: String, expires: Date) -> some View {
         Section("Lightning invoice · \(controller.network.rawValue)") {

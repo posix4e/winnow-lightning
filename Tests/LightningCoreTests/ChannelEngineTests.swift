@@ -118,8 +118,8 @@ final class ChannelEngineTests: XCTestCase, @unchecked Sendable {
     func testFundingAndPeerIdentityCannotBeSubstituted() async throws {
         let peer = try key(2), otherPeer = try key(3), memory = JournalMemory()
         let engine = try await engine(memory, peer: peer)
-        do { _ = try await engine.openChannel(peer: peer, capacitySat: .max, feePerKW: 1000); XCTFail() } catch {}
-        let id = try await engine.openChannel(peer: peer, capacitySat: 100_000, feePerKW: 1000)
+        do { _ = try await engine.openChannel(peer: peer, capacitySat: .max, feePerKW: 1000, format: .staticRemoteKey); XCTFail() } catch {}
+        let id = try await engine.openChannel(peer: peer, capacitySat: 100_000, feePerKW: 1000, format: .staticRemoteKey)
         let remoteSecrets = try ChannelSecrets(), terms = try remoteSecrets.terms(capacity: 100_000)
         let accept = try ChannelNegotiation.Accept(temporaryID: id, minimumDepth: 3, terms: terms).message()
         try await engine.peerInitialized(otherPeer, features: .channelOpening)

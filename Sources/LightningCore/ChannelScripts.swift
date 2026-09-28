@@ -1,7 +1,7 @@
 import Foundation
 import WalletCore
 
-/// BOLT 3 non-anchor scripts. Script serialization and hashing reuse WalletCore.
+/// BOLT 3 scripts. Script serialization and hashing reuse WalletCore.
 public enum ChannelScripts {
     public static func funding(_ first: Data, _ second: Data) throws -> Script {
         try validate([first, second])
@@ -23,7 +23,7 @@ public enum ChannelScripts {
     }
 
     public static func htlc(offered: Bool, revocation: Data, local: Data, remote: Data,
-                             paymentHash: Data, expiry: UInt32) throws -> Script {
+                             paymentHash: Data, expiry: UInt32, format: ChannelFormat = .staticRemoteKey) throws -> Script {
         try validate([revocation, local, remote])
         guard paymentHash.count == 32 else { throw LightningError.invalidHash }
         return Script.build { script in
@@ -42,8 +42,29 @@ public enum ChannelScripts {
                 script.appendScriptNumber(Int(expiry)); script.appendOpcode(0xb1)
                 script.appendOpcode(0x75); script.appendOpcode(0xac)
             }
-            script.appendOpcode(0x68); script.appendOpcode(0x68)
+            script.appendOpcode(0x68)
+            if format.hasAnchors { script.appendScriptNumber(1); script.appendOpcode(0xb2); script.appendOpcode(0x75) }
+            script.appendOpcode(0x68)
         }
+    }
+
+    public static func anchor(fundingKey: Data) throws -> Script {
+        try validate([fundingKey])
+        return Script.build {
+            $0.appendPush(fundingKey); $0.appendOpcode(0xac); $0.appendOpcode(0x73)
+            $0.appendOpcode(0x64); $0.appendScriptNumber(16); $0.appendOpcode(0xb2); $0.appendOpcode(0x68)
+        }
+    }
+    public static func remote(paymentKey: Data) throws -> Script {
+        try validate([paymentKey])
+        return Script.build {
+            $0.appendPush(paymentKey); $0.appendOpcode(0xad)
+            $0.appendScriptNumber(1); $0.appendOpcode(0xb2)
+        }
+    }
+    public static func remoteOutput(paymentKey: Data, format: ChannelFormat) throws -> Data {
+        if format.hasAnchors { return try witnessScriptHash(remote(paymentKey: paymentKey)) }
+        return try witnessKeyHash(paymentKey)
     }
 
     public static func witnessScriptHash(_ script: Script) -> Data {

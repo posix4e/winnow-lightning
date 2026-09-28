@@ -9,7 +9,8 @@ extension LightningEngine {
         guard open.chain == state.chain, state.channels.count < 64,
               !state.channels.contains(where: { $0.peer == peer && $0.temporaryID == open.temporaryID })
         else { throw LightningError.invalidMessage }
-        let secrets = try ChannelSecrets(), terms = try secrets.terms(capacity: open.capacity)
+        guard !open.terms.format.hasAnchors || peers[peer]?.supports(22) == true else { throw LightningError.invalidMessage }
+        let secrets = try ChannelSecrets(), terms = try secrets.terms(capacity: open.capacity, format: open.terms.format)
         let channel = ChannelState(peer: peer, temporaryID: open.temporaryID, capacity: open.capacity,
             pushMsat: open.pushMsat, feePerKW: open.feePerKW, isFunder: false, secrets: secrets,
             local: terms, remote: open.terms, phase: .accepted)

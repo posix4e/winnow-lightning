@@ -62,6 +62,8 @@ struct WinnowApp: App {
 struct StorageDamagedView: View {
     let message: String
     @Environment(AppModel.self) private var model
+    @State private var showImport = false
+    @State private var showLightningRecovery = false
 
     private var otherNetwork: BitcoinNetwork {
         model.network == .mainnet ? .signet : .mainnet
@@ -78,12 +80,26 @@ struct StorageDamagedView: View {
             }
             .buttonStyle(.borderedProminent)
             .accessibilityIdentifier("retryDamagedWalletButton")
+            backupRecoveryActions
             Button("Open the \(otherNetwork.rawValue) wallet instead") {
                 Task { await model.switchNetwork(to: otherNetwork) }
             }
             .accessibilityIdentifier("switchFromDamagedWalletButton")
         }
         .padding()
+        .sheet(isPresented: $showImport) { ImportBundleView() }
+        .sheet(isPresented: $showLightningRecovery) { LightningBackupView() }
+    }
+
+    @ViewBuilder private var backupRecoveryActions: some View {
+        if model.hasPendingWalletImport {
+            Button("Retry import from matching backup") { showImport = true }
+                .accessibilityIdentifier("retryDamagedWalletImportButton")
+            if model.supportsLightning {
+                Button("Restore encrypted Lightning backup") { showLightningRecovery = true }
+                    .accessibilityIdentifier("restoreDamagedLightningBackupButton")
+            }
+        }
     }
 }
 

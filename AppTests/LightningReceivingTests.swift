@@ -98,4 +98,34 @@ final class LightningReceivingTests: XCTestCase {
         do { try await reopened.saveProfile(other, model: makeModel(network: .regtest)); XCTFail("switched provider with approved order") }
         catch LightningError.invalidState {}
     }
+
+    func testPausedUnpaidOrderRetainsExpiryAndCannotSendPaymentAcrossRestart() async throws {
+        let root = directory(), keys = InMemoryStoreKeyVault(), model = makeModel(network: .regtest)
+        var controller: LightningAppController? = LightningAppController(network: .regtest, keys: keys)
+        try await controller!.prepare(directory: root, headers: HeaderChain(params: .regtest))
+        let profile = LightningProfile(network: "regtest", name: "Test", peer: try ChannelKeys.publicKey(secret: Data(repeating: 1, count: 32)).hex,
+            host: "127.0.0.1", port: 1, route: nil, receive: nil)
+        try await controller!.saveProfile(profile, model: model)
+        let unpaid = try quote(profile: profile)
+        controller!.liquidityQuote = unpaid; try controller!.storeLiquidityQuote(unpaid)
+        try await controller!.acceptLiquidityQuote(model: model)
+        try controller!.cancelLiquiditySetup(model: model)
+        XCTAssertFalse(controller!.liquidityQuote!.accepted)
+        XCTAssertNotNil(controller!.liquidityQuote!.cancelledAt)
+        XCTAssertEqual(controller!.liquidityQuote!.order.orderId, unpaid.order.orderId)
+        XCTAssertEqual(controller!.liquidityQuote!.order.payment.bolt11?.expiresAt, unpaid.order.payment.bolt11?.expiresAt)
+        XCTAssertTrue(controller!.payments.isEmpty)
+        XCTAssertTrue(controller!.channels.isEmpty)
+        await controller!.stop(); controller = nil
+        let reopened = LightningAppController(network: .regtest, keys: keys)
+        try await reopened.prepare(directory: root, headers: HeaderChain(params: .regtest))
+        let saved = try XCTUnwrap(reopened.liquidityQuote)
+        XCTAssertFalse(saved.isPayable(network: .regtest, now: LightningAppController.now))
+        XCTAssertTrue(saved.isActive(network: .regtest, now: LightningAppController.now))
+        XCTAssertEqual(saved.order.orderId, unpaid.order.orderId)
+        XCTAssertEqual(saved.invoice, unpaid.invoice)
+        try await reopened.acceptLiquidityQuote(model: model)
+        XCTAssertNil(reopened.liquidityQuote?.cancelledAt)
+        XCTAssertTrue(reopened.payments.isEmpty)
+    }
 }
