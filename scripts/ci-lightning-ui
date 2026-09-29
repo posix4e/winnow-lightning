@@ -36,7 +36,7 @@ def run(args, log, env=None, timeout=None):
 def prepare_display(simulator, results):
     # bootstatus can finish on a cold hosted runner without recordVideo ever
     # receiving a display frame. Open the selected Xcode's simulator GUI before
-    # rendering a system app. Xcode 27 moved this GUI to DeviceHub; do not let
+    # checking display output. Xcode 27 moved this GUI to DeviceHub; do not let
     # Launch Services choose a different installed Xcode's Simulator.app.
     developer = Path(subprocess.check_output(['xcode-select', '-p'], text=True).strip())
     applications = (developer / 'Applications/Simulator.app',
@@ -46,10 +46,9 @@ def prepare_display(simulator, results):
         raise FileNotFoundError(f'no simulator GUI in selected Xcode: {developer}')
     run(['open', '-a', str(application)], results / 'display-gui.log', timeout=60)
     print(f'Lightning UI simulator GUI opened: {application}', flush=True)
+    # The booted device's Home screen is sufficient to verify display output.
     # Do not launch Winnow until recording is acknowledged, so onboarding and
     # every financial action remain captured.
-    run(['xcrun', 'simctl', 'launch', simulator, 'com.apple.Preferences'],
-        results / 'display-launch.log', timeout=60)
     run(['xcrun', 'simctl', 'io', simulator, 'screenshot', str(results / 'display-ready.png')],
         results / 'display-screenshot.log', timeout=60)
     assert (results / 'display-ready.png').stat().st_size > 0, 'simulator display produced no screenshot'

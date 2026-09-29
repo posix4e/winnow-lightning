@@ -42,9 +42,8 @@ class DisplayBootstrapTests(unittest.TestCase):
                     ui.prepare_display('owned-device', self.results)
                 calls = run.call_args_list
                 self.assertEqual(calls[0].args[0], ['open', '-a', str(application)])
-                self.assertEqual(calls[1].args[0],
-                                 ['xcrun', 'simctl', 'launch', 'owned-device', 'com.apple.Preferences'])
-                self.assertEqual(calls[2].args[0][0:5],
+                self.assertEqual(len(calls), 2)
+                self.assertEqual(calls[1].args[0][0:5],
                                  ['xcrun', 'simctl', 'io', 'owned-device', 'screenshot'])
                 self.assertTrue(all(call.kwargs['timeout'] == 60 for call in calls))
                 application.rmdir()
@@ -66,7 +65,7 @@ class DisplayBootstrapTests(unittest.TestCase):
     def test_screenshot_timeout_fails_without_claiming_display_ready(self):
         (self.developer / 'Applications/Simulator.app').mkdir(parents=True)
         failure = subprocess.TimeoutExpired(['xcrun', 'simctl', 'io'], 60)
-        with self.selected_xcode(), patch.object(ui, 'run', side_effect=[None, None, failure]):
+        with self.selected_xcode(), patch.object(ui, 'run', side_effect=[None, failure]):
             with self.assertRaises(subprocess.TimeoutExpired):
                 ui.prepare_display('owned-device', self.results)
         self.assertFalse((self.results / 'display-ready.png').exists())

@@ -63,8 +63,12 @@ checks independent paid receipts, and tests process restart and enforceable
 close. The cooperative run also opens a public channel between two stock nodes;
 the production Swift session discovers the route and the second node receives
 the forwarded payment. `scripts/ci-lightning-ui` records Simple-mode entry,
-scanner fallback, canceled review, approved payment, independent stock-node
+scanner fallback, canceled review, approved payment, independent reference-node
 receipt, and restored history in addition to the existing async/crash journey.
+Its macOS UI BOLT11 peer uses released CLN with an isolated HSM override containing
+only the exact, unmerged upstream PR9564 patch; the distinct manifest and receipt
+qualify that result. This is separate from the unchanged released stock CLI gates
+above. See [the reference scope](lightning-roadmap.md) for the patch and provenance.
 Physical camera/authentication and funded mainnet checks remain separate.
 
 References: [BOLT11](https://github.com/lightning/bolts/blob/master/11-payment-encoding.md),

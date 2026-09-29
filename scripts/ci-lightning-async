@@ -362,11 +362,18 @@ class Fixture:
         tx, vout = self.funding(ready['script'], 1_000_000)
         swift.call('fund', id=ready['id'], transaction=tx, output=str(vout))
         signed = wait(lambda: swift.event('broadcast_funding'))
+        assert signed['transaction'] == tx
         self.rpc('sendrawtransaction', tx)
         self.rpc('generatetoaddress', 6, self.address)
         self.sync()
-        swift.call('confirm', id=signed['id'], transaction=tx)
-        wait(lambda: (swift.drain(), swift.call('snapshot')['phase'] == 'ready')[1])
+        # The verified scan publishes channel_ready. A second synthetic
+        # confirmation races the peer's readiness and can reject a ready channel.
+        def ready():
+            swift.drain()
+            snapshot = swift.call('snapshot')
+            assert snapshot['id'] == signed['id'], snapshot
+            return snapshot['phase'] == 'ready'
+        wait(ready)
         swift.call('recovery', id=signed['id'], destination=self.rpc('getaddressinfo', self.address)['scriptPubKey'])
         return signed['id']
 
@@ -378,12 +385,16 @@ class Fixture:
         tx, _ = self.funding(ready['script'], ready['amount'])
         provider.call('fund', id=ready['temporary_id'], peer=swift.node, transaction=tx)
         wait(lambda: (provider.drain(), tx in provider.broadcasts)[1])
+        channel = swift.call('snapshot')['id']
         self.rpc('sendrawtransaction', tx)
         self.rpc('generatetoaddress', 6, self.address)
         self.sync()
-        channel = swift.call('snapshot')['id']
-        swift.call('confirm', id=channel, transaction=tx)
-        wait(lambda: (swift.drain(), swift.call('snapshot')['phase'] == 'ready')[1])
+        def ready():
+            swift.drain()
+            snapshot = swift.call('snapshot')
+            assert snapshot['id'] == channel, snapshot
+            return snapshot['phase'] == 'ready'
+        wait(ready)
         swift.call('recovery', id=channel, destination=self.rpc('getaddressinfo', self.address)['scriptPubKey'])
         return wait(lambda: next((c for c in provider.call('status')['channels'] if c['peer'] == swift.node and c['usable']), None))
 

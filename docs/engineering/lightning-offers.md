@@ -19,8 +19,10 @@ Receiving standard offers requires a confirmed channel, verified chain and
 current signed receiving policy. Offers include either a public issuer identity
 or an authenticated blinded path through the provider. Invoice payment paths use
 standard BOLT4 encrypted forwarding data and a recipient-owned path token; they
-do not use async preimage or release fields. Share the ordinary offer using the
-ordinary offer action in Receive Lightning.
+do not use async preimage or release fields. In Advanced mode, open Lightning,
+then use Create reusable offer in the Receive section and Share reusable offer
+or Copy reusable offer. The separate Receive Lightning screen creates BOLT11
+invoices.
 
 Enter an `lno` offer or `₿user@domain` in Pay reusable offer. BIP353 resolves the
 name's TXT payment URI, follows signed CNAME/DNAME aliases, and verifies DNSSEC

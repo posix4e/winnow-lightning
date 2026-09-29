@@ -9,9 +9,8 @@ struct WinnowApp: App {
     init() {
         #if DEBUG
         if E2EMode.current != nil,
-           UIDevice.current.userInterfaceIdiom == .phone,
-           UIApplication.shared.preferredContentSizeCategory.isAccessibilityCategory {
-            // Use still UIKit transitions for accessibility-size phone UI fixtures.
+           UIDevice.current.userInterfaceIdiom == .phone {
+            // Use still UIKit transitions for phone UI fixtures.
             UIView.setAnimationsEnabled(false)
         }
         #endif
