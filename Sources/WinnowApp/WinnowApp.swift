@@ -7,7 +7,16 @@ struct WinnowApp: App {
     @State private var model: AppModel
 
     init() {
+        #if DEBUG
+        if E2EMode.current != nil {
+            // UI fixtures use still rendering; disable UIKit transitions as well.
+            UIView.setAnimationsEnabled(false)
+        }
+        #endif
         let model = AppModel()
+        #if DEBUG
+        model.e2e?.journal("ui.animationPolicy", fields: ["uikitEnabled": String(UIView.areAnimationsEnabled)])
+        #endif
         _model = State(initialValue: model)
         BackgroundSyncScheduler.shared.register(model: model)
     }
