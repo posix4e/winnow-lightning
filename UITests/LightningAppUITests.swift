@@ -95,9 +95,24 @@ final class LightningAppUITests: XCTestCase {
         app.launch()
         tap(app, "createWalletButton")
         selectTab(app, "Wallet")
-        app.buttons["advancedModeButton"].tap()
+        let mode = app.buttons["advancedModeButton"]
+        XCTAssertEqual(mode.label, "Simple", app.debugDescription)
+        mode.tap()
+        XCTAssertTrue(app.buttons.matching(identifier: "advancedModeButton")
+            .matching(NSPredicate(format: "label == %@", "Advanced")).firstMatch.appears(within: 10),
+            "Simple must replace the advanced tab layout: \(app.debugDescription)")
+        XCTAssertFalse(app.buttons["Lightning"].exists, app.debugDescription)
+        XCTAssertFalse(app.buttons["Settings"].exists, app.debugDescription)
         tap(app, "receiveButton")
-        XCTAssertTrue(app.buttons["receiveLightning"].appears(within: 10))
+        let receivedEntry = app.buttons["receiveLightning"].appears(within: 10)
+        if !receivedEntry {
+            Screenshots.capture(app, "lightning-simple-receive-entry-failure", testCase: self)
+            let hierarchy = XCTAttachment(string: app.debugDescription)
+            hierarchy.name = "lightning-simple-receive-entry-failure-hierarchy"
+            hierarchy.lifetime = .keepAlways
+            add(hierarchy)
+        }
+        XCTAssertTrue(receivedEntry, app.debugDescription)
         XCTAssertTrue(app.buttons["receiveBitcoin"].exists)
         Screenshots.capture(app, "lightning-simple-receive-methods", testCase: self)
         app.buttons["receiveLightning"].tap()
