@@ -8,14 +8,29 @@ from pathlib import Path
 import plistlib
 import signal
 import subprocess
+import sys
 import time
 
 ROOT = Path(__file__).resolve().parent.parent
 
 
 def run(args, log, env=None, timeout=None):
-    with log.open('w') as out:
-        subprocess.run(args, cwd=ROOT, stdout=out, stderr=subprocess.STDOUT, env=env, check=True, timeout=timeout)
+    try:
+        with log.open('w') as out:
+            subprocess.run(args, cwd=ROOT, stdout=out, stderr=subprocess.STDOUT, env=env, check=True, timeout=timeout)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        # Close and flush the redirected log before exposing a bounded tail.
+        # Diagnostics must not replace the original subprocess failure.
+        try:
+            with log.open('rb') as failure_log:
+                failure_log.seek(0, os.SEEK_END)
+                failure_log.seek(max(0, failure_log.tell() - 16384))
+                tail = failure_log.read(16384).decode('utf-8', errors='replace')
+            print(f'Failure log tail: {log.name} (last 60 lines, at most 16384 bytes)', file=sys.stderr, flush=True)
+            print('\n'.join(tail.splitlines()[-60:]), file=sys.stderr, flush=True)
+        except Exception:
+            pass
+        raise
 
 
 def prepare_display(simulator, results):
@@ -153,6 +168,13 @@ def main():
         assert receipt['result'] == 'passed'
         invoice_receipt = json.loads((results / 'fixture/evidence/bolt11-receipt.json').read_text())
         assert invoice_receipt['result'] == 'passed'
+        ui_reference = invoice_receipt.get('reference')
+        if os.environ.get('WINNOW_CLN_UI_MANIFEST'):
+            assert ui_reference and ui_reference['kind'] == 'released_cln_with_ui_hsmd_override'
+            assert ui_reference['manifest'] == 'ui-cln-reference.json'
+            assert ui_reference['manifest_sha256'] == hashlib.sha256((results / 'fixture/evidence/ui-cln-reference.json').read_bytes()).hexdigest()
+        else:
+            assert ui_reference is None, 'stock UI must not silently use the HSM override'
     finally:
         try:
             if video:
@@ -165,6 +187,9 @@ def main():
     completed = dict(result='passed', manifest=manifest,
         video_sha256=hashlib.sha256((results / 'journey.mp4').read_bytes()).hexdigest(),
         independent_receipt_sha256=hashlib.sha256((results / 'fixture/evidence/receipt.json').read_bytes()).hexdigest())
+    completed['bolt11_receipt_sha256'] = hashlib.sha256((results / 'fixture/evidence/bolt11-receipt.json').read_bytes()).hexdigest()
+    if ui_reference:
+        completed['ui_cln_reference_sha256'] = ui_reference['manifest_sha256']
     (results / 'journey.json').write_text(json.dumps(completed, indent=2) + '\n')
     print('PASS: recorded Swift app async payment, process crashes and returned channel funds', flush=True)
 

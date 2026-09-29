@@ -19,6 +19,18 @@ zero-coverage bound. [The metric definition and reproduction steps](../crap.md)
 state the scope and accessor/standalone-closure limitation. CI retains source
 hashes, test profiles and reports; it does not suppress difficult functions.
 
+The CLI interoperability gates keep released Core Lightning `v26.06.8`
+(commit `6f741afc395c66d200429ea477d29df4d974748d`) unchanged. The macOS
+simulator's BOLT11 peer uses that release with a separately built HSM containing
+only the exact reviewed [upstream PR9564 fd-lifetime fix](https://github.com/ElementsProject/lightning/pull/9564)
+at `d03657d3ee118a96d346c6a1faaefce7dead6e1c`. This patch is unmerged and
+unreleased. Its original patch, released base, source and binary hashes are
+retained in a distinct UI manifest and receipt. The stock daemon loads it through
+its supported subdaemon option; version checks, financial assertions and original
+deadlines remain active. This HSM is test infrastructure and is never linked into
+Winnow or shipped in the app. A UI run with this override does not establish
+unmodified-release interoperability; the separate stock CLI gates do.
+
 ## Release checks that require separate evidence
 
 The current research app has no iCloud capability. Manual recovery works

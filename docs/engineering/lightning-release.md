@@ -18,9 +18,17 @@ includes the ordinary Winnow checks and signet journey, independent pinned CLN
 and LDK peers, recipient-never-returns recovery, and the recorded Swift app
 journey. The latter captures actual SIGKILLs, independent provider receipts,
 funding, exact Apple Share/Copy bytes, offline settlement, restored history and
-cooperative close returning funds to the Winnow wallet. It also pays a stock-node
-BOLT11 invoice from Simple mode, cancels review before approval, verifies the
-independent receipt, and restores its payment history once after restart.
+cooperative close returning funds to the Winnow wallet. It also pays a BOLT11
+invoice from Simple mode, cancels review before approval, verifies the independent
+receipt, and restores its payment history once after restart. The CLI gates use
+unchanged released Core Lightning `v26.06.8` at `6f741afc395c66d200429ea477d29df4d974748d`.
+For macOS UI only, that stock daemon loads a separately built HSM with the exact
+one-file [upstream PR9564 fd-lifetime patch](https://github.com/ElementsProject/lightning/pull/9564),
+pinned at `d03657d3ee118a96d346c6a1faaefce7dead6e1c`, through its supported
+`--subdaemon=hsmd:PATH` option. The patch is unmerged and unreleased; its UI result
+must not be described as unmodified-release interoperability. The original
+manifest and BOLT11 receipt bind the released base, patch and actual HSM source
+and binary hashes. All other stock daemon bytes and version checks stay intact.
 
 Run the same recorded journey on iPad and with accessibility text before release.
 Use `SIMULATOR_ID`, `DERIVED_DATA` and `scripts/ci-lightning-ui`; each run needs a

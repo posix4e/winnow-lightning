@@ -68,7 +68,7 @@ jobs:
             echo "CRAP_PACKAGE_BUILD=$RUNNER_TEMP/lightning-crap-build"
             echo "CRAP_RESULTS=$RUNNER_TEMP/lightning-crap"
           } >> "$GITHUB_ENV"
-      - name: Fetch pinned external harness and build unmodified reference peers
+      - name: Build released reference peers and labeled macOS UI HSM override
         run: scripts/ci-lightning-references "$REFERENCE_DIR" > "$WINNOW_LIGHTNING_RESULTS/reference-build.log" 2>&1
       - name: Install the audited CRAP decision counter
         run: scripts/install-crap-swiftlint
@@ -106,6 +106,8 @@ jobs:
           path: |
             ${{ env.WINNOW_LIGHTNING_RESULTS }}
             ${{ env.REFERENCE_DIR }}/reference-manifest.json
+            ${{ env.REFERENCE_DIR }}/cln-ui-manifest.json
+            ${{ env.REFERENCE_DIR }}/cln-ui-fd-probe*
             ${{ env.REFERENCE_DIR }}/ldk-async-*.log
           retention-days: 14
       - name: Install pinned app project generator
@@ -115,6 +117,7 @@ jobs:
         if: ${{ !cancelled() }}
         env:
           DERIVED_DATA: ${{ runner.temp }}/lightning-app-build
+          WINNOW_CLN_UI_MANIFEST: ${{ runner.temp }}/lightning-references/cln-ui-manifest.json
         run: scripts/ci-lightning-ui "$RUNNER_TEMP/lightning-ui"
       - name: Exercise Research and normal wallet app tests with coverage
         if: ${{ !cancelled() }}
