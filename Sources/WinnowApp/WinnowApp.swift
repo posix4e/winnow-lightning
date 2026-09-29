@@ -8,8 +8,10 @@ struct WinnowApp: App {
 
     init() {
         #if DEBUG
-        if E2EMode.current != nil {
-            // UI fixtures use still rendering; disable UIKit transitions as well.
+        if E2EMode.current != nil,
+           UIDevice.current.userInterfaceIdiom == .phone,
+           UIApplication.shared.preferredContentSizeCategory.isAccessibilityCategory {
+            // Use still UIKit transitions for accessibility-size phone UI fixtures.
             UIView.setAnimationsEnabled(false)
         }
         #endif
