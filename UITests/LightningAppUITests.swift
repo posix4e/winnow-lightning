@@ -103,7 +103,11 @@ final class LightningAppUITests: XCTestCase {
             "Simple must replace the advanced tab layout: \(app.debugDescription)")
         XCTAssertFalse(app.buttons["Lightning"].exists, app.debugDescription)
         XCTAssertFalse(app.buttons["Settings"].exists, app.debugDescription)
-        tap(app, "receiveButton")
+        // Resolve the Simple home's button at activation time rather than
+        // retaining a screen coordinate through the mode layout transition.
+        let receive = app.buttons["receiveButton"]
+        XCTAssertTrue(receive.isHittable, app.debugDescription)
+        receive.tap()
         let receivedEntry = app.buttons["receiveLightning"].appears(within: 10)
         if !receivedEntry {
             Screenshots.capture(app, "lightning-simple-receive-entry-failure", testCase: self)
@@ -222,6 +226,9 @@ final class LightningAppUITests: XCTestCase {
         tap(app, "lightningCopyOffer")
         XCTAssertEqual(try clipboard(), offer, "Copy changed the reusable offer bytes")
         Screenshots.capture(app, "lightning-01-reusable-offer", testCase: self)
+        // Verify a fresh Share write, rather than reusing the direct Copy value.
+        UIPasteboard.general.items = []
+        XCTAssertEqual(try clipboard(), "", "Share must start with an empty simulator clipboard")
         tap(app, "lightningShareOffer")
         let copy = app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", "Copy")).firstMatch
         let more = app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", "View More")).firstMatch
@@ -231,7 +238,8 @@ final class LightningAppUITests: XCTestCase {
         XCTAssertTrue(copy.appears(within: 15), "Apple Share sheet did not open: \(app.debugDescription)")
         Screenshots.capture(app, "lightning-02-apple-share", testCase: self)
         copy.tap()
-        XCTAssertEqual(try clipboard(), offer, "Apple Share changed the offer bytes")
+        XCTAssertTrue(try waitForSharedOffer(copy: copy, expected: offer),
+                      "Apple Share did not copy the exact offer and dismiss within 15 seconds: \(app.debugDescription)")
         try killed(app, response: rpc("kill", values: ["role": "recipient"]))
 
         try launch(app, role: "sender", fresh: true)
@@ -548,14 +556,28 @@ final class LightningAppUITests: XCTestCase {
         // and reaped the process. This is not the crash mechanism.
         app.terminate()
     }
-    private func clipboard() throws -> String {
+    private func waitForSharedOffer(copy: XCUIElement,
+                                    expected: String) throws -> Bool {
+        let deadline = Date().addingTimeInterval(15)
+        while deadline.timeIntervalSinceNow > 0 {
+            let remaining = deadline.timeIntervalSinceNow
+            guard remaining > 0 else { break }
+            let text = try clipboard(timeout: min(2, remaining))
+            if text == expected && !copy.exists,
+               deadline.timeIntervalSinceNow > 0 { return true }
+            Thread.sleep(forTimeInterval: min(0.2, max(0, deadline.timeIntervalSinceNow)))
+        }
+        return false
+    }
+    private func clipboard(timeout: TimeInterval = 120) throws -> String {
         // The test runner is a background app and cannot read another app's
         // pasteboard on current iOS. Inspect the actual simulator pasteboard.
-        try XCTUnwrap(rpc("clipboard")["text"] as? String)
+        try XCTUnwrap(rpc("clipboard", timeout: timeout)["text"] as? String)
     }
-    private func rpc(_ command: String, values: [String: String] = [:]) throws -> [String: Any] {
+    private func rpc(_ command: String, values: [String: String] = [:],
+                     timeout: TimeInterval = 120) throws -> [String: Any] {
         let input = try JSONSerialization.data(withJSONObject: values.merging(["command": command]) { _, new in new })
-        let response = try HostProcess.run("/usr/bin/curl", ["--silent", "--show-error", "--fail", "--max-time", "120", "-X", "POST",
+        let response = try HostProcess.run("/usr/bin/curl", ["--silent", "--show-error", "--fail", "--max-time", String(timeout), "-X", "POST",
             "-H", "Authorization: Bearer " + XCTUnwrap(config["token"]), "-H", "Content-Type: application/json",
             "--data-binary", "@-", XCTUnwrap(config["url"])], input: input)
         XCTAssertEqual(response.status, 0, response.stderr)
