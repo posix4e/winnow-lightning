@@ -461,7 +461,8 @@ final class LightningAppUITests: XCTestCase {
         for _ in 0..<2 {
             guard deadline.timeIntervalSinceNow > 0 else { break }
             let done = app.buttons[action]
-            let popup = app.otherElements["PopoverDismissRegion"].firstMatch
+            let popup = app.windows.containing(.keyboard, identifier: nil)
+                .otherElements["PopoverDismissRegion"].firstMatch
             let dismissingPopup = popup.exists
             guard done.exists, done.isEnabled, tapVisibleCenter(app, done) else { break }
             activated = true
