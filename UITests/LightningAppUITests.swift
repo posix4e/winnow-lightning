@@ -461,8 +461,17 @@ final class LightningAppUITests: XCTestCase {
         for _ in 0..<2 {
             guard deadline.timeIntervalSinceNow > 0 else { break }
             let done = app.buttons[action]
+            let popup = app.otherElements["PopoverDismissRegion"].firstMatch
+            let dismissingPopup = popup.exists
             guard done.exists, done.isEnabled, tapVisibleCenter(app, done) else { break }
             activated = true
+            // iPad's numeric popover consumes the first outside activation.
+            // Wait for that observed modal region to leave before activating
+            // the app's Hide action again; both share the original deadline.
+            if dismissingPopup {
+                let remaining = max(0, deadline.timeIntervalSinceNow)
+                guard popup.disappears(within: remaining) else { return false }
+            }
             let remaining = max(0, deadline.timeIntervalSinceNow)
             if app.keyboards.firstMatch.disappears(within: min(1, remaining)),
                app.keyboards.count == 0 { return true }
