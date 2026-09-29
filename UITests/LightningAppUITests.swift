@@ -558,16 +558,9 @@ final class LightningAppUITests: XCTestCase {
     }
     private func waitForSharedOffer(copy: XCUIElement,
                                     expected: String) throws -> Bool {
-        let deadline = Date().addingTimeInterval(15)
-        while deadline.timeIntervalSinceNow > 0 {
-            let remaining = deadline.timeIntervalSinceNow
-            guard remaining > 0 else { break }
-            let text = try clipboard(timeout: min(2, remaining))
-            if text == expected && !copy.exists,
-               deadline.timeIntervalSinceNow > 0 { return true }
-            Thread.sleep(forTimeInterval: min(0.2, max(0, deadline.timeIntervalSinceNow)))
-        }
-        return false
+        try SharedClipboard.wait(expected: expected, timeout: 15,
+                                 read: { remaining in try clipboard(timeout: remaining) },
+                                 isShareDismissed: { !copy.exists })
     }
     private func clipboard(timeout: TimeInterval = 120) throws -> String {
         // The test runner is a background app and cannot read another app's
